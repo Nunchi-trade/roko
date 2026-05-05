@@ -84,13 +84,14 @@ jq_or_raw() {
 
 # ── cmd: up ──────────────────────────────────────────────────
 cmd_up() {
-  local watch=false no_vite=false release=false chain=false
+  local watch=false no_vite=false release=false chain=true
   while [ $# -gt 0 ]; do
     case "$1" in
-      --watch|-w) watch=true ;;
-      --no-vite)  no_vite=true ;;
-      --release)  release=true ;;
-      --chain|-c) chain=true ;;
+      --watch|-w)  watch=true ;;
+      --no-vite)   no_vite=true ;;
+      --release)   release=true ;;
+      --chain|-c)  chain=true ;;
+      --no-chain)  chain=false ;;
       *) die "Unknown option: $1" ;;
     esac
     shift
@@ -129,8 +130,13 @@ cmd_up() {
 
   # Start mirage-rs if --chain flag passed
   if $chain; then
-    if ! command -v mirage-rs &>/dev/null; then
-      die "mirage-rs not found. Install it or use without --chain for mock data."
+    local mirage_bin
+    if command -v mirage-rs &>/dev/null; then
+      mirage_bin="mirage-rs"
+    elif [ -x "./target/release/mirage-rs" ]; then
+      mirage_bin="./target/release/mirage-rs"
+    else
+      die "mirage-rs not found. Run 'cargo build --release -p mirage-rs' or use --no-chain to skip."
     fi
 
     local mirage_stale
@@ -143,7 +149,7 @@ cmd_up() {
 
     info "Starting mirage-rs (mainnet fork on :8545)..."
     local rpc_url="${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com}"
-    mirage-rs \
+    "$mirage_bin" \
       --host 127.0.0.1 \
       --port 8545 \
       --rpc-url "$rpc_url" &
@@ -172,41 +178,44 @@ cmd_up() {
       fi
     fi
 
-    # Start agent-relay (WebSocket bridge between on-chain and roko serve)
-    local relay_stale
-    relay_stale=$(pids_on_port 9011)
-    if [ -n "$relay_stale" ]; then
-      warn "Killing stale process(es) on :9011 — PIDs: $relay_stale"
-      echo "$relay_stale" | xargs kill 2>/dev/null || true
-      sleep 1
-    fi
-
-    info "Building agent-relay..."
-    cargo build -p agent-relay 2>&1
-
-    info "Starting agent-relay on :9011..."
-    ./target/debug/agent-relay \
-      --bind 127.0.0.1:9011 \
-      --rpc-ws-url ws://127.0.0.1:8545 \
-      --chain-id 31337 &
-    RELAY_PID=$!
-
-    # Wait for relay health
-    echo -n "[dev] Waiting for agent-relay..."
-    for i in $(seq 1 10); do
-      if curl -sf http://127.0.0.1:9011/relay/health >/dev/null 2>&1; then
-        echo " ready!"
-        break
-      fi
-      if [ "$i" -eq 10 ]; then
-        echo " timeout (relay may still be starting)"
-      fi
-      sleep 1
-      echo -n "."
-    done
-
-    export ROKO_AGENT_RELAY_URL="ws://127.0.0.1:9011/relay/agents/ws"
   fi
+
+  # Start agent-relay (always — provides WS event stream + agent registry)
+  local relay_stale
+  relay_stale=$(pids_on_port 9011)
+  if [ -n "$relay_stale" ]; then
+    warn "Killing stale process(es) on :9011 — PIDs: $relay_stale"
+    echo "$relay_stale" | xargs kill 2>/dev/null || true
+    sleep 1
+  fi
+
+  info "Building agent-relay..."
+  cargo build -p agent-relay 2>&1
+
+  local relay_args=(--bind 127.0.0.1:9011)
+  if $chain; then
+    relay_args+=(--rpc-ws-url ws://127.0.0.1:8545 --chain-id 31337)
+  fi
+
+  info "Starting agent-relay on :9011..."
+  ./target/debug/agent-relay "${relay_args[@]}" &
+  RELAY_PID=$!
+
+  # Wait for relay health
+  echo -n "[dev] Waiting for agent-relay..."
+  for i in $(seq 1 10); do
+    if curl -sf http://127.0.0.1:9011/relay/health >/dev/null 2>&1; then
+      echo " ready!"
+      break
+    fi
+    if [ "$i" -eq 10 ]; then
+      echo " timeout (relay may still be starting)"
+    fi
+    sleep 1
+    echo -n "."
+  done
+
+  export ROKO_AGENT_RELAY_URL="http://127.0.0.1:9011"
 
   # Build
   local profile="debug" bin="$ROKO_BIN"
@@ -262,7 +271,7 @@ cmd_up() {
   echo ""
   echo "${BOLD}═══════════════════════════════════════════════════════${RESET}"
   $chain && echo "  mirage-rs     → http://localhost:8545 (mainnet fork)"
-  $chain && echo "  agent-relay   → http://localhost:9011 (15 feed agents)"
+  echo "  agent-relay   → http://localhost:9011"
   echo "  roko serve    → http://localhost:$SERVE_PORT"
   $no_vite || echo "  demo-app      → http://localhost:$VITE_PORT"
   if $chain; then
@@ -270,7 +279,7 @@ cmd_up() {
     echo "  ISFR oracle   → keeper auto-submits each epoch"
     echo "  Feed agents   → 15 active (4 keepers + 11 derived)"
   else
-    echo "  ISFR data     → MOCK (use --chain for live data)"
+    echo "  ISFR data     → MOCK (no chain — use --chain for live data)"
   fi
   echo "  Ctrl+C to stop all"
   echo "${BOLD}═══════════════════════════════════════════════════════${RESET}"
@@ -284,7 +293,7 @@ cmd_down() {
   info "Stopping roko dev processes..."
   local killed=0
 
-  for pattern in "mirage-rs" "roko serve" "cargo watch" "vite"; do
+  for pattern in "mirage-rs" "agent-relay" "roko serve" "cargo watch" "vite"; do
     local pids
     pids=$(pgrep -f "$pattern" 2>/dev/null || true)
     if [ -n "$pids" ]; then
@@ -294,7 +303,7 @@ cmd_down() {
     fi
   done
 
-  for port in 8545 $SERVE_PORT $VITE_PORT; do
+  for port in 8545 9011 $SERVE_PORT $VITE_PORT; do
     local pids
     pids=$(pids_on_port "$port")
     if [ -n "$pids" ]; then
@@ -314,7 +323,7 @@ cmd_down() {
 # ── cmd: status ──────────────────────────────────────────────
 cmd_status() {
   echo "${BOLD}Processes${RESET}"
-  for pattern in "mirage-rs" "roko serve" "cargo watch" "vite"; do
+  for pattern in "mirage-rs" "agent-relay" "roko serve" "cargo watch" "vite"; do
     local pids
     pids=$(pgrep -f "$pattern" 2>/dev/null || true)
     if [ -n "$pids" ]; then
@@ -326,7 +335,7 @@ cmd_status() {
 
   echo ""
   echo "${BOLD}Ports${RESET}"
-  for port in 8545 $SERVE_PORT $VITE_PORT; do
+  for port in 8545 9011 $SERVE_PORT $VITE_PORT; do
     local pids
     pids=$(pids_on_port "$port")
     if [ -n "$pids" ]; then
@@ -1814,7 +1823,15 @@ cmd_mirage() {
   fi
 
   # Start mirage-rs in fork mode
-  mirage-rs \
+  local mirage_bin
+  if command -v mirage-rs &>/dev/null; then
+    mirage_bin="mirage-rs"
+  elif [ -x "./target/release/mirage-rs" ]; then
+    mirage_bin="./target/release/mirage-rs"
+  else
+    die "mirage-rs not found. Run 'cargo build --release -p mirage-rs' first."
+  fi
+  "$mirage_bin" \
     --host 127.0.0.1 \
     --port 8545 \
     --rpc-url https://ethereum-rpc.publicnode.com &

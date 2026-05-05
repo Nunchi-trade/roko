@@ -49,9 +49,15 @@ export default function CostComparisonPanel({
         </span>
       </div>
 
+      <div className="cost-panel-description">
+        Both agents solve the same coding task. The direct model uses a single expensive LLM.
+        Cascade routing starts with a cheaper model and only escalates when the task demands it —
+        often solving the problem at a fraction of the cost.
+      </div>
+
       <div className="cost-panel-columns">
         <div className={`cost-panel-column cost-panel-column--naive${isRunning && cascade.calls === 0 ? ' cost-panel-column--active' : ''}`}>
-          <div className="cost-panel-column-label">Naive (no cascade)</div>
+          <div className="cost-panel-column-label">Direct Model</div>
           <div className="cost-panel-metric">
             <span className="cost-panel-metric-label">Cost</span>
             <span className={`cost-panel-metric-value${naive.cost <= 0 ? ' cost-panel-metric-value--empty' : ''}`}>
@@ -104,7 +110,7 @@ export default function CostComparisonPanel({
         </div>
         <div className="cost-panel-delta-label">
           {delta !== null
-            ? delta > 0 ? 'cascade saved vs naive' : 'cascade cost more than naive'
+            ? delta > 0 ? 'cascade routing saved vs direct model' : 'cascade routing cost more than direct model'
             : 'run both to compare'}
         </div>
       </div>
@@ -112,7 +118,7 @@ export default function CostComparisonPanel({
       <div className="cost-panel-calls">
         <div className="cost-panel-calls-title">Inference Calls</div>
         <div className="cost-panel-calls-count">
-          {naive.calls + cascade.calls} total ({naive.calls} naive, {cascade.calls} cascade)
+          {naive.calls + cascade.calls} total ({naive.calls} direct, {cascade.calls} cascade)
         </div>
       </div>
     </section>

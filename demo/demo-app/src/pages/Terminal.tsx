@@ -3,6 +3,7 @@ import { useTerminal } from '../hooks/useTerminal';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { enterWorkspace } from '../lib/terminal-session';
 import ComponentErrorBoundary from '../components/design/ComponentErrorBoundary';
+import '../components/Terminal/TerminalPane.css';
 import './Terminal.css';
 
 /* ── Typewriter text (workspace badge) ── */
@@ -41,6 +42,7 @@ function TerminalPaneReal({
   const [prevStatus, setPrevStatus] = useState<string>(status);
   const [showConnFlash, setShowConnFlash] = useState(false);
   const paneRef = useRef<HTMLDivElement>(null);
+  const cdSent = useRef(false);
 
   /* Connection flash when status transitions to connected */
   useEffect(() => {
@@ -51,6 +53,20 @@ function TerminalPaneReal({
     }
     setPrevStatus(status);
   }, [status, prevStatus]);
+
+  /* Auto-cd into workspace when connected */
+  useEffect(() => {
+    if (status === 'connected' && workspacePath && !cdSent.current && handle.current?.ws?.readyState === WebSocket.OPEN) {
+      cdSent.current = true;
+      const h = handle.current;
+      // Write welcome banner then cd into workspace
+      h.terminal.write(
+        '\r\n\x1b[38;5;132m\u2500\u2500 roko workspace terminal \u2500\u2500\x1b[0m\r\n' +
+        `\x1b[38;5;245m   ${workspacePath}\x1b[0m\r\n\r\n`
+      );
+      h.sendRaw(`cd ${workspacePath}\r`);
+    }
+  }, [status, workspacePath, handle]);
 
   const handleCdWorkspace = useCallback(() => {
     const h = handle.current;
@@ -66,7 +82,7 @@ function TerminalPaneReal({
     <div
       ref={paneRef}
       className={[
-        'term-pane-real',
+        'terminal-pane',
         isFocused ? 'term-pane-focused gradient-border' : '',
         showConnFlash && 'term-pane-connected-flash',
       ].filter(Boolean).join(' ')}
@@ -75,15 +91,15 @@ function TerminalPaneReal({
       {/* Connection progress line along top border */}
       <div className={`term-conn-progress ${status}`} />
 
-      <div className="term-pane-header">
-        <span className={`term-conn-dot ${status}`} />
-        <span className="term-pane-label">{label}</span>
+      <div className="pane-header">
+        <span className={`pane-dot ${status}`} />
+        <span className="pane-label">{label}</span>
         {workspacePath && (
           <span className="term-ws-badge" title={workspacePath}>
             <TypewriterText text={badgeText} speed={35} />
           </span>
         )}
-        <span className="term-pane-status">{status}</span>
+        <span className="pane-status">{status}</span>
         {workspacePath && (
           <button
             className="term-init-btn term-header-btn btn-interactive"
@@ -109,7 +125,7 @@ function TerminalPaneReal({
       {shellWarning && (
         <div className="terminal-shell-warning">{shellWarning}</div>
       )}
-      <div className="term-pane-body" ref={attach} />
+      <div className="pane-body" ref={attach} />
     </div>
   );
 }
@@ -131,9 +147,17 @@ export default function Terminal() {
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [activeTabIdx, setActiveTabIdx] = useState(0);
   const [initState, setInitState] = useState<'idle' | 'spinning' | 'done'>('idle');
-  const { ensureWorkspace } = useWorkspace();
+  const { ensureWorkspace, serverWorkdir } = useWorkspace();
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const tabBarRef = useRef<HTMLDivElement>(null);
+
+  /* Auto-set workspace path from server workdir (project root) */
+  useEffect(() => {
+    if (serverWorkdir && !workspacePath) {
+      setWorkspacePath(serverWorkdir);
+      setInitState('done');
+    }
+  }, [serverWorkdir, workspacePath]);
 
   /* Live terminals (not closing) */
   const liveTerminals = useMemo(

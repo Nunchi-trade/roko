@@ -215,16 +215,17 @@
 .topnav .links .nav-link.active {
   color: var(--rose-glow);
   text-shadow: 0 0 12px color-mix(in srgb, var(--rose-glow) 25%, transparent);
+  box-shadow: var(--glow-rose-soft);
   animation: navTabEnter var(--duration-reveal) var(--ease) both,
              activeTabGlow 3s ease-in-out infinite;
 }
 
 @keyframes activeTabGlow {
   0%, 100% {
-    box-shadow: 0 0 12px color-mix(in srgb, var(--rose) 0%, transparent);
+    box-shadow: var(--glow-rose-soft);
   }
   50% {
-    box-shadow: 0 0 20px color-mix(in srgb, var(--rose) 15%, transparent);
+    box-shadow: 0 0 24px rgba(204,144,168,.4);
   }
 }
 

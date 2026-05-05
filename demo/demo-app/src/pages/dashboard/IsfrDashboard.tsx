@@ -201,7 +201,7 @@ export default function IsfrDashboard() {
             </span>
           )}
           {compositeDelta === 0 && currentRate && (
-            <span className="isfr-ticker__trend isfr-ticker__trend--flat">\u2014</span>
+            <span className="isfr-ticker__trend isfr-ticker__trend--flat">{'\u2014'}</span>
           )}
         </div>
         <div className="isfr-ticker__right">
@@ -1066,6 +1066,9 @@ const AGENT_EVENT_TYPES = [
   'gate_passed',
   'gate_failed',
   'gate_result',
+  'feed_agent_online',
+  'feed_agent_offline',
+  'feed_tick',
 ] as const;
 
 const MAX_AGENT_LOG_LINES = 500;
@@ -1160,10 +1163,42 @@ function lineTypeFromEvent(type: string): AgentLogLine['type'] {
 }
 
 function AgentsTab() {
+  const { get } = useLiveApi();
   const [agents, setAgents] = useState<Map<string, TrackedAgent>>(new Map());
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const agentsRef = useRef(agents);
   agentsRef.current = agents;
+
+  // Seed from REST on mount so agents already running appear immediately.
+  // Feed agents auto-populate from feed_tick SSE events within ~10s,
+  // but we also fetch managed-agents for non-feed agents.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await get<unknown>('/api/managed-agents');
+        const agents = Array.isArray(res) ? res : [];
+        setAgents((prev) => {
+          const next = new Map(prev);
+          for (const a of agents) {
+            if (!a || typeof a !== 'object') continue;
+            const rec = a as Record<string, unknown>;
+            const id = String(rec.agent_id ?? '');
+            if (!id || next.has(id)) continue;
+            next.set(id, {
+              id,
+              name: String(rec.name ?? id),
+              role: String(rec.role ?? 'agent'),
+              model: String(rec.model ?? ''),
+              status: 'running',
+              spawnedAt: Date.now(),
+              lines: [{ ts: Date.now(), type: 'lifecycle', level: 'info' as const, text: 'Agent discovered (already running)' }],
+            });
+          }
+          return next;
+        });
+      } catch { /* ok - agents will populate from SSE feed_tick events */ }
+    })();
+  }, [get]);
 
   useContextEventSubscription(
     AGENT_EVENT_TYPES as unknown as string[],
@@ -1188,6 +1223,55 @@ function AgentsTab() {
             spawnedAt: ts,
             lines: [{ ts, type: 'lifecycle', level: 'info', text: `Agent spawned (model=${ev.model ?? '?'}, role=${ev.role ?? '?'})` }],
           });
+          return next;
+        }
+
+        // Feed agents come online via feed_agent_online events.
+        if (type === 'feed_agent_online') {
+          const feedCount = typeof ev.feedCount === 'number' ? ev.feedCount : (typeof ev.feed_count === 'number' ? ev.feed_count : 0);
+          next.set(agentId, {
+            id: agentId,
+            name: String(ev.name ?? agentId),
+            role: 'feed-agent',
+            model: 'native',
+            status: 'running',
+            spawnedAt: ts,
+            lines: [{ ts, type: 'lifecycle', level: 'info', text: `Feed agent online (${feedCount} feeds)` }],
+          });
+          return next;
+        }
+
+        if (type === 'feed_agent_offline') {
+          const existing = next.get(agentId);
+          if (existing) {
+            next.set(agentId, { ...existing, status: 'completed', lines: [...existing.lines, { ts, type: 'lifecycle', level: 'info', text: 'Feed agent offline' }] });
+          }
+          return next;
+        }
+
+        // Feed ticks → append as a log line on the agent; auto-create if unseen.
+        if (type === 'feed_tick') {
+          const topic = String(ev.topic ?? '');
+          const payload = ev.payload as Record<string, unknown> | undefined;
+          const preview = payload
+            ? Object.entries(payload).slice(0, 3).map(([k, v]) => `${k}:${typeof v === 'number' ? (v as number).toFixed(0) : v}`).join(' ')
+            : '';
+          const line: AgentLogLine = { ts, type: 'output', level: 'info', text: `[${topic}] ${preview}` };
+          const existing = next.get(agentId);
+          if (existing) {
+            next.set(agentId, { ...existing, status: 'running', lines: [...existing.lines, line].slice(-MAX_AGENT_LOG_LINES) });
+          } else {
+            // Auto-create agent from first feed_tick if we missed feed_agent_online
+            next.set(agentId, {
+              id: agentId,
+              name: String(ev.name ?? agentId),
+              role: 'feed-agent',
+              model: 'native',
+              status: 'running',
+              spawnedAt: ts,
+              lines: [line],
+            });
+          }
           return next;
         }
 

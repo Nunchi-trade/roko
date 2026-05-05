@@ -16,6 +16,19 @@ import { create } from 'zustand';
 import type { ServerEvent } from '../transport/types';
 import { api } from '../transport/api';
 import type { BenchRun, BenchSuite, BenchModel } from '../lib/bench-types';
+import type {
+  ConnectedAgent as RelayConnectedAgent,
+  ConnectedWorkspace as RelayConnectedWorkspace,
+  FeedDescriptor as RelayFeedDescriptor,
+  TopicInfo as RelayTopicInfo,
+  RelayEvent,
+} from '../lib/relay-api';
+import {
+  fetchRelayAgents,
+  fetchRelayWorkspaces,
+  fetchRelayFeeds,
+  fetchRelayTopics,
+} from '../lib/relay-api';
 
 // ── Public types ────────────────────────────────────────────────
 
@@ -102,6 +115,40 @@ export interface IsfrEventEntry {
   message: string;
 }
 
+// ── Feed types ──────────────────────────────────────────────────
+
+export interface RelayFeed {
+  feedId: string;
+  topic: string;
+  name: string;
+  description: string;
+  kind: 'raw' | 'derived' | 'composite' | 'meta';
+  rate: string;
+  agentId: string;
+  agentName: string;
+  lastValue: unknown | null;
+  lastUpdateMs: number | null;
+  messageCount: number;
+  sparkline: number[];
+  status: 'live' | 'stale' | 'offline';
+}
+
+export interface RelayAgentEntry {
+  agentId: string;
+  name: string;
+  capabilities: string[];
+  feedCount: number;
+  connectedAtMs: number;
+  online: boolean;
+}
+
+export interface FeedLogEntry {
+  ts: number;
+  agentId: string;
+  topic: string;
+  preview: string;
+}
+
 // ── Chain types ──────────────────────────────────────────────────
 
 export interface ChainBlockEntry {
@@ -133,6 +180,19 @@ export interface ChainEventEntry {
   contract: string;
   eventName: string;
   decoded: Record<string, unknown>;
+}
+
+// ── Relay dashboard types ────────────────────────────────────
+
+export interface RelayEventLogEntry {
+  ts: number;
+  type: string;
+  message: string;
+}
+
+export interface RelayFeedGroup {
+  agent_id: string;
+  feeds: RelayFeedDescriptor[];
 }
 
 // ── Store interface ─────────────────────────────────────────────
@@ -221,6 +281,26 @@ export interface DataHub {
   fetchChainTxs: () => Promise<void>;
   fetchChainEvents: () => Promise<void>;
   fetchChainStatus: () => Promise<void>;
+
+  // -- Feed slice -------------------------------------------------
+  relayFeeds: RelayFeed[];
+  relayAgents: RelayAgentEntry[];
+  feedLog: FeedLogEntry[];
+  feedThroughput: number[];
+
+  // -- Actions: Feed REST fetches ---------------------------------
+  fetchFeedCatalog: () => Promise<void>;
+
+  // -- Relay dashboard slice ------------------------------------
+  relayDashAgents: RelayConnectedAgent[];
+  relayDashWorkspaces: RelayConnectedWorkspace[];
+  relayDashFeeds: RelayFeedGroup[];
+  relayDashTopics: RelayTopicInfo[];
+  relayDashEventLog: RelayEventLogEntry[];
+
+  // -- Actions: Relay dashboard ---------------------------------
+  fetchRelayDashboard: () => Promise<void>;
+  handleRelayEvent: (event: RelayEvent) => void;
 }
 
 // ── Ring-buffer limits ──────────────────────────────────────────
@@ -235,6 +315,69 @@ const MAX_CHAIN_BLOCKS = 64;
 const MAX_CHAIN_TXS = 128;
 const MAX_CHAIN_EVENTS = 128;
 const MAX_CHAIN_GAS_HISTORY = 64;
+const MAX_FEED_LOG = 200;
+const MAX_FEED_SPARKLINE = 30;
+// const MAX_FEED_THROUGHPUT = 60; // reserved for future throughput sparkline
+const MAX_RELAY_EVENT_LOG = 200;
+
+// ── Relay dashboard helpers ─────────────────────────────────
+
+function relayEventMessage(event: RelayEvent): string {
+  switch (event.type) {
+    case 'agent_connected':
+      return `Agent connected: ${event.agent.name ?? event.agent.agent_id}`;
+    case 'agent_disconnected':
+      return `Agent disconnected: ${event.agent_id}`;
+    case 'workspace_connected':
+      return `Workspace connected: ${event.workspace.name ?? event.workspace.workspace_id}`;
+    case 'workspace_disconnected':
+      return `Workspace disconnected: ${event.workspace_id}`;
+    case 'workspace_heartbeat':
+      return `Heartbeat: ${event.workspace_id} (${event.agents_count} agents)`;
+    case 'feed_registered':
+      return `Feed registered: ${event.feed.name} on ${event.feed.topic}`;
+    case 'feed_unregistered':
+      return `Feed unregistered: ${event.feed_id} from ${event.agent_id}`;
+    case 'card_updated':
+      return `Card updated: ${event.agent_id}`;
+    case 'message_delivered':
+      return `Message delivered to ${event.agent_id}`;
+    case 'message_responded':
+      return `Response from ${event.agent_id}`;
+    case 'agent_error':
+      return `Error from ${event.agent_id}: ${event.error}`;
+  }
+}
+
+function upsertFeed(
+  groups: { agent_id: string; feeds: RelayFeedDescriptor[] }[],
+  agentId: string,
+  feed: RelayFeedDescriptor,
+): { agent_id: string; feeds: RelayFeedDescriptor[] }[] {
+  const idx = groups.findIndex((g) => g.agent_id === agentId);
+  if (idx >= 0) {
+    const existing = groups[idx];
+    const feeds = [...existing.feeds.filter((f) => f.feed_id !== feed.feed_id), feed];
+    const next = [...groups];
+    next[idx] = { agent_id: agentId, feeds };
+    return next;
+  }
+  return [...groups, { agent_id: agentId, feeds: [feed] }];
+}
+
+function removeFeed(
+  groups: { agent_id: string; feeds: RelayFeedDescriptor[] }[],
+  agentId: string,
+  feedId: string,
+): { agent_id: string; feeds: RelayFeedDescriptor[] }[] {
+  return groups
+    .map((g) =>
+      g.agent_id === agentId
+        ? { ...g, feeds: g.feeds.filter((f) => f.feed_id !== feedId) }
+        : g,
+    )
+    .filter((g) => g.feeds.length > 0);
+}
 
 // ── Store implementation ────────────────────────────────────────
 
@@ -274,6 +417,15 @@ export const useDataHub = create<DataHub>()((set, get) => ({
   chainLatestBlock: null,
   chainWatcherRunning: false,
   chainGasHistory: [],
+  relayFeeds: [],
+  relayAgents: [],
+  feedLog: [],
+  feedThroughput: [],
+  relayDashAgents: [],
+  relayDashWorkspaces: [],
+  relayDashFeeds: [],
+  relayDashTopics: [],
+  relayDashEventLog: [],
 
   // -- Event handling -----------------------------------------------
 
@@ -409,8 +561,7 @@ export const useDataHub = create<DataHub>()((set, get) => ({
             ...s.isfrEventLog.slice(0, MAX_EVENT_LOG - 1),
           ],
         }));
-        // Refetch current rate (with readings) to populate per-source history
-        get().fetchIsfrCurrent();
+        // SSE event already carries all BPS values — no REST refetch needed
         break;
       }
 
@@ -524,6 +675,85 @@ export const useDataHub = create<DataHub>()((set, get) => ({
             },
             ...s.chainEvents.slice(0, MAX_CHAIN_EVENTS - 1),
           ],
+        }));
+        break;
+
+      case 'feed_tick':
+        set((s) => {
+          // Find and update the matching feed.
+          const feedIdx = s.relayFeeds.findIndex((f) => f.feedId === event.feedId);
+          const now = Date.now();
+
+          // Extract a numeric value for sparkline (try common keys).
+          const numericValue = (() => {
+            if (typeof event.payload === 'object' && event.payload !== null) {
+              const p = event.payload as Record<string, unknown>;
+              for (const key of ['compositeBps', 'emaGwei', 'rateBps', 'spreadBps', 'stddevBps', 'confidencePct', 'blockNumber', 'epoch', 'number', 'currentEpoch', 'maxSpreadBps', 'relayAgentCount', 'totalFeeds']) {
+                if (typeof p[key] === 'number') return p[key] as number;
+              }
+            }
+            return 0;
+          })();
+
+          // Build a short preview string for the log.
+          const preview = typeof event.payload === 'object' && event.payload !== null
+            ? Object.entries(event.payload as Record<string, unknown>)
+                .slice(0, 3)
+                .map(([k, v]) => `${k}:${typeof v === 'number' ? (v as number).toFixed(0) : v}`)
+                .join(' ')
+            : String(event.payload);
+
+          const updatedFeeds = [...s.relayFeeds];
+          if (feedIdx >= 0) {
+            const feed = { ...updatedFeeds[feedIdx] };
+            feed.lastValue = event.payload;
+            feed.lastUpdateMs = now;
+            feed.messageCount += 1;
+            feed.status = 'live';
+            feed.sparkline = [...feed.sparkline.slice(-(MAX_FEED_SPARKLINE - 1)), numericValue];
+            updatedFeeds[feedIdx] = feed;
+          }
+
+          return {
+            relayFeeds: updatedFeeds,
+            feedLog: [
+              { ts: now, agentId: event.agentId, topic: event.topic, preview },
+              ...s.feedLog.slice(0, MAX_FEED_LOG - 1),
+            ],
+          };
+        });
+        break;
+
+      case 'feed_agent_online':
+        set((s) => {
+          const exists = s.relayAgents.findIndex((a) => a.agentId === event.agentId);
+          const entry: RelayAgentEntry = {
+            agentId: event.agentId,
+            name: event.name,
+            capabilities: [],
+            feedCount: event.feedCount,
+            connectedAtMs: Date.now(),
+            online: true,
+          };
+
+          const agents = [...s.relayAgents];
+          if (exists >= 0) {
+            agents[exists] = entry;
+          } else {
+            agents.push(entry);
+          }
+          return { relayAgents: agents };
+        });
+        break;
+
+      case 'feed_agent_offline':
+        set((s) => ({
+          relayAgents: s.relayAgents.map((a) =>
+            a.agentId === event.agentId ? { ...a, online: false } : a,
+          ),
+          relayFeeds: s.relayFeeds.map((f) =>
+            f.agentId === event.agentId ? { ...f, status: 'offline' as const } : f,
+          ),
         }));
         break;
 
@@ -661,10 +891,10 @@ export const useDataHub = create<DataHub>()((set, get) => ({
       const res = await api.get<{
         composite_bps: number; lending_bps: number; structured_bps: number;
         funding_bps: number; staking_bps: number; confidence_bps: number;
-        source_count: number; timestamp_ms: number;
+        source_count?: number; timestamp_ms: number;
         readings?: Array<{
-          source_id: string; source_name: string; rate_bps: number;
-          weight: number; class: string; metadata: Record<string, unknown> | null;
+          source: string; rate_bps: number; is_live: boolean;
+          timestamp_ms: number; metadata: Record<string, unknown> | null;
         }>;
       }>('/api/isfr/current');
       if (res.ok && 'composite_bps' in res.data) {
@@ -676,12 +906,13 @@ export const useDataHub = create<DataHub>()((set, get) => ({
           const nextReadingsCache = { ...s.isfrReadingsCache };
           if (d.readings) {
             for (const r of d.readings) {
-              nextSourceHistory[r.source_name] = capSrc(
-                nextSourceHistory[r.source_name],
+              const name = r.source;
+              nextSourceHistory[name] = capSrc(
+                nextSourceHistory[name],
                 { bps: r.rate_bps, ts: d.timestamp_ms },
               );
               if (r.metadata) {
-                nextReadingsCache[r.source_name] = r.metadata;
+                nextReadingsCache[name] = r.metadata;
               }
             }
           }
@@ -693,7 +924,7 @@ export const useDataHub = create<DataHub>()((set, get) => ({
               fundingBps: d.funding_bps,
               stakingBps: d.staking_bps,
               confidenceBps: d.confidence_bps,
-              sourceCount: d.source_count,
+              sourceCount: d.source_count ?? d.readings?.length ?? 0,
               timestampMs: d.timestamp_ms,
             },
             isfrSourceHistory: nextSourceHistory,
@@ -723,17 +954,26 @@ export const useDataHub = create<DataHub>()((set, get) => ({
       if (res.ok) {
         const data = res.data;
         const arr = Array.isArray(data) ? data : (data?.rates ?? []);
+        const mapped = arr.map((r) => ({
+          compositeBps: r.composite_bps,
+          lendingBps: r.lending_bps,
+          structuredBps: r.structured_bps,
+          fundingBps: r.funding_bps,
+          stakingBps: r.staking_bps,
+          confidenceBps: r.confidence_bps,
+          sourceCount: r.source_count ?? 0,
+          timestampMs: r.timestamp_ms,
+        }));
         set({
-          isfrHistory: arr.map((r) => ({
-            compositeBps: r.composite_bps,
-            lendingBps: r.lending_bps,
-            structuredBps: r.structured_bps,
-            fundingBps: r.funding_bps,
-            stakingBps: r.staking_bps,
-            confidenceBps: r.confidence_bps,
-            sourceCount: r.source_count,
-            timestampMs: r.timestamp_ms,
-          })),
+          isfrHistory: mapped,
+          isfrFieldHistory: {
+            composite: mapped.map((r) => r.compositeBps),
+            lending: mapped.map((r) => r.lendingBps),
+            structured: mapped.map((r) => r.structuredBps),
+            funding: mapped.map((r) => r.fundingBps),
+            staking: mapped.map((r) => r.stakingBps),
+            confidence: mapped.map((r) => r.confidenceBps),
+          },
         });
       }
     } catch (err) {
@@ -778,17 +1018,30 @@ export const useDataHub = create<DataHub>()((set, get) => ({
         gas_used: number; gas_limit: number; tx_count: number; base_fee_per_gas: number | null;
       }> }>('/api/chain/blocks?limit=64');
       if (res.ok) {
-        set({
-          chainBlocks: res.data.blocks.map((b) => ({
-            number: b.number,
-            hash: b.hash,
-            parentHash: b.parent_hash,
-            timestamp: b.timestamp,
-            gasUsed: b.gas_used,
-            gasLimit: b.gas_limit,
-            txCount: b.tx_count,
-            baseFeePerGas: b.base_fee_per_gas,
-          })),
+        const mapped = res.data.blocks.map((b) => ({
+          number: b.number,
+          hash: b.hash,
+          parentHash: b.parent_hash,
+          timestamp: b.timestamp,
+          gasUsed: b.gas_used,
+          gasLimit: b.gas_limit,
+          txCount: b.tx_count,
+          baseFeePerGas: b.base_fee_per_gas,
+        }));
+        set((s) => {
+          // Only seed from REST when SSE hasn't already pushed data.
+          if (s.chainBlocks.length > 0) return {};
+          const seedGas =
+            s.chainGasHistory.length === 0 && mapped.length > 0
+              ? [...mapped].reverse().map((b) => b.gasUsed)
+              : s.chainGasHistory;
+          const latestBlock =
+            s.chainLatestBlock ?? (mapped.length > 0 ? mapped[0] : null);
+          return {
+            chainBlocks: mapped,
+            chainGasHistory: seedGas,
+            chainLatestBlock: latestBlock,
+          };
         });
       }
     } catch (err) {
@@ -803,18 +1056,18 @@ export const useDataHub = create<DataHub>()((set, get) => ({
         value_wei: string; gas_used: number; method_sig: string | null; success: boolean;
       }> }>('/api/chain/transactions?limit=128');
       if (res.ok) {
-        set({
-          chainTxs: res.data.transactions.map((t) => ({
-            blockNumber: t.block_number,
-            txHash: t.tx_hash,
-            from: t.from,
-            to: t.to,
-            valueWei: t.value_wei,
-            gasUsed: t.gas_used,
-            methodSig: t.method_sig,
-            success: t.success,
-          })),
-        });
+        const mapped = res.data.transactions.map((t) => ({
+          blockNumber: t.block_number,
+          txHash: t.tx_hash,
+          from: t.from,
+          to: t.to,
+          valueWei: t.value_wei,
+          gasUsed: t.gas_used,
+          methodSig: t.method_sig,
+          success: t.success,
+        }));
+        // Only seed if SSE hasn't already pushed data (avoids clobbering live stream)
+        set((s) => (s.chainTxs.length === 0 ? { chainTxs: mapped } : {}));
       }
     } catch (err) {
       console.warn('[DataHub] fetchChainTxs failed:', err);
@@ -828,16 +1081,16 @@ export const useDataHub = create<DataHub>()((set, get) => ({
         contract: string; event_name: string; decoded: Record<string, unknown>;
       }> }>('/api/chain/events?limit=128');
       if (res.ok) {
-        set({
-          chainEvents: res.data.events.map((e) => ({
-            blockNumber: e.block_number,
-            txHash: e.tx_hash,
-            logIndex: e.log_index,
-            contract: e.contract,
-            eventName: e.event_name,
-            decoded: e.decoded,
-          })),
-        });
+        const mapped = res.data.events.map((e) => ({
+          blockNumber: e.block_number,
+          txHash: e.tx_hash,
+          logIndex: e.log_index,
+          contract: e.contract,
+          eventName: e.event_name,
+          decoded: e.decoded,
+        }));
+        // Only seed if SSE hasn't already pushed data (avoids clobbering live stream)
+        set((s) => (s.chainEvents.length === 0 ? { chainEvents: mapped } : {}));
       }
     } catch (err) {
       console.warn('[DataHub] fetchChainEvents failed:', err);
@@ -852,6 +1105,151 @@ export const useDataHub = create<DataHub>()((set, get) => ({
       }
     } catch (err) {
       console.warn('[DataHub] fetchChainStatus failed:', err);
+    }
+  },
+
+  // -- Feed fetch actions -----------------------------------------
+
+  // -- Relay dashboard actions -----------------------------------
+
+  fetchRelayDashboard: async () => {
+    const [agentsRes, workspacesRes, feedsRes, topicsRes] = await Promise.all([
+      fetchRelayAgents(),
+      fetchRelayWorkspaces(),
+      fetchRelayFeeds(),
+      fetchRelayTopics(),
+    ]);
+    set((s) => ({
+      relayDashAgents: agentsRes.ok ? agentsRes.data : s.relayDashAgents,
+      relayDashWorkspaces: workspacesRes.ok ? workspacesRes.data : s.relayDashWorkspaces,
+      relayDashFeeds: feedsRes.ok
+        ? Object.entries(feedsRes.data).map(([agent_id, feeds]) => ({ agent_id, feeds }))
+        : s.relayDashFeeds,
+      relayDashTopics: topicsRes.ok ? topicsRes.data : s.relayDashTopics,
+    }));
+  },
+
+  handleRelayEvent: (event: RelayEvent) => {
+    const now = Date.now();
+    const logEntry = (msg: string): RelayEventLogEntry => ({
+      ts: now,
+      type: event.type,
+      message: msg,
+    });
+
+    set((s) => {
+      const nextLog = [
+        logEntry(relayEventMessage(event)),
+        ...s.relayDashEventLog.slice(0, MAX_RELAY_EVENT_LOG - 1),
+      ];
+
+      switch (event.type) {
+        case 'agent_connected':
+          return {
+            relayDashAgents: [
+              ...s.relayDashAgents.filter((a) => a.agent_id !== event.agent.agent_id),
+              event.agent,
+            ],
+            relayDashEventLog: nextLog,
+          };
+
+        case 'agent_disconnected':
+          return {
+            relayDashAgents: s.relayDashAgents.filter((a) => a.agent_id !== event.agent_id),
+            relayDashEventLog: nextLog,
+          };
+
+        case 'workspace_connected':
+          return {
+            relayDashWorkspaces: [
+              ...s.relayDashWorkspaces.filter((w) => w.workspace_id !== event.workspace.workspace_id),
+              event.workspace,
+            ],
+            relayDashEventLog: nextLog,
+          };
+
+        case 'workspace_disconnected':
+          return {
+            relayDashWorkspaces: s.relayDashWorkspaces.filter((w) => w.workspace_id !== event.workspace_id),
+            relayDashEventLog: nextLog,
+          };
+
+        case 'workspace_heartbeat':
+          return {
+            relayDashWorkspaces: s.relayDashWorkspaces.map((w) =>
+              w.workspace_id === event.workspace_id
+                ? { ...w, last_heartbeat_ms: now, agents_count: event.agents_count }
+                : w,
+            ),
+            relayDashEventLog: nextLog,
+          };
+
+        case 'feed_registered':
+          return {
+            relayDashFeeds: upsertFeed(s.relayDashFeeds, event.agent_id, event.feed),
+            relayDashEventLog: nextLog,
+          };
+
+        case 'feed_unregistered':
+          return {
+            relayDashFeeds: removeFeed(s.relayDashFeeds, event.agent_id, event.feed_id),
+            relayDashEventLog: nextLog,
+          };
+
+        default:
+          return { relayDashEventLog: nextLog };
+      }
+    });
+  },
+
+  fetchFeedCatalog: async () => {
+    try {
+      const res = await api.get<{
+        agents: Array<{
+          agent_id: string; name: string; capabilities: string[];
+          feed_count: number; online: boolean;
+        }>;
+        feeds: Array<{
+          feed_id: string; topic: string; name: string; description: string;
+          kind: string; rate: string; agent_id: string;
+        }>;
+        stats: { total_agents: number; total_feeds: number; messages_per_sec: number };
+      }>('/api/feeds/catalog');
+      if (res.ok) {
+        const { agents, feeds } = res.data;
+        set((s) => ({
+          relayAgents: agents.map((a) => ({
+            agentId: a.agent_id,
+            name: a.name,
+            capabilities: a.capabilities,
+            feedCount: a.feed_count,
+            connectedAtMs: Date.now(),
+            online: a.online,
+          })),
+          relayFeeds: feeds.map((f) => {
+            // Preserve sparkline + messageCount from existing state.
+            const existing = s.relayFeeds.find((ef) => ef.feedId === f.feed_id);
+            const agentName = agents.find((a) => a.agent_id === f.agent_id)?.name ?? f.agent_id;
+            return {
+              feedId: f.feed_id,
+              topic: f.topic,
+              name: f.name,
+              description: f.description,
+              kind: f.kind as RelayFeed['kind'],
+              rate: f.rate,
+              agentId: f.agent_id,
+              agentName,
+              lastValue: existing?.lastValue ?? null,
+              lastUpdateMs: existing?.lastUpdateMs ?? null,
+              messageCount: existing?.messageCount ?? 0,
+              sparkline: existing?.sparkline ?? [],
+              status: existing?.status ?? 'live',
+            };
+          }),
+        }));
+      }
+    } catch (err) {
+      console.warn('[DataHub] fetchFeedCatalog failed:', err);
     }
   },
 }));

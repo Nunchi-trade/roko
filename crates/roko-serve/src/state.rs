@@ -359,6 +359,42 @@ pub struct ISFRSourceSnapshot {
     pub last_poll_ms: Option<i64>,
 }
 
+/// A feed agent entry in the catalog.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedCatalogAgent {
+    pub agent_id: String,
+    pub name: String,
+    pub capabilities: Vec<String>,
+    pub feed_count: usize,
+    pub online: bool,
+}
+
+/// A feed descriptor entry in the catalog.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedCatalogEntry {
+    pub feed_id: String,
+    pub topic: String,
+    pub name: String,
+    pub description: String,
+    pub kind: String,
+    pub rate: String,
+    pub agent_id: String,
+}
+
+/// Aggregated catalog of active feed agents and their feeds.
+///
+/// Updated by [`crate::feed_agents::spawn_all`] when agents come online,
+/// and periodically by the agent-monitor feed agent.
+#[derive(Debug, Clone, Default)]
+pub struct FeedAgentCatalog {
+    /// Connected feed agents.
+    pub agents: Vec<FeedCatalogAgent>,
+    /// Registered feed descriptors from all agents.
+    pub feeds: Vec<FeedCatalogEntry>,
+    /// Estimated aggregate messages per second.
+    pub messages_per_sec: f64,
+}
+
 /// Shared ISFR keeper state exposed via REST (`/api/isfr/...`) and SSE.
 ///
 /// Updated by the `PublishFn` callback when the keeper computes a new rate.
@@ -498,6 +534,9 @@ pub struct AppState {
     /// Upstream agent-relay URL for reverse proxy (`ROKO_AGENT_RELAY_URL`).
     pub agent_relay_url: Option<String>,
 
+    /// Aggregated feed agent catalog snapshot updated by feed_agents module.
+    pub feed_agent_catalog: RwLock<FeedAgentCatalog>,
+
     /// Shared ISFR keeper state exposed via REST and SSE.
     pub isfr: Arc<ISFRState>,
 
@@ -540,7 +579,11 @@ impl std::fmt::Debug for ServeFeeds {
 
 impl ServeFeeds {
     /// Create the default set of runtime feeds.
-    pub fn new(workdir: &Path, provider_health: &ProviderHealthTracker) -> Self {
+    pub fn new(
+        workdir: &Path,
+        provider_health: &ProviderHealthTracker,
+        isfr_state: &Arc<ISFRState>,
+    ) -> Self {
         let roko_dir = workdir.join(".roko");
         let roko_dir_exists = roko_dir.is_dir();
         let provider_count = provider_health.snapshot().len();
@@ -581,8 +624,41 @@ impl ServeFeeds {
             }),
         };
 
+        // isfr-keeper: reports ISFR composite rate feed status.
+        let isfr = Arc::clone(isfr_state);
+        let isfr_entry = ServeFeedEntry {
+            id: "isfr-keeper".to_string(),
+            status_fn: Box::new(move || {
+                let running = isfr.keeper_running.load(Ordering::Relaxed);
+                let history_len = isfr
+                    .rate_history
+                    .try_read()
+                    .map(|h| h.len() as u64)
+                    .unwrap_or(0);
+                let last_ms = isfr
+                    .current_rate
+                    .try_read()
+                    .ok()
+                    .and_then(|r| r.as_ref().map(|r| r.timestamp_ms));
+                roko_core::FeedRuntimeStatus {
+                    id: "isfr-keeper".to_string(),
+                    topic: "isfr.rates".to_string(),
+                    kind: "Composite".to_string(),
+                    connected: running,
+                    rate_hz: if running { 0.1 } else { 0.0 },
+                    pulses_produced: history_len,
+                    last_update_ms: last_ms,
+                    error: if !running {
+                        Some("keeper not started".into())
+                    } else {
+                        None
+                    },
+                }
+            }),
+        };
+
         Self {
-            entries: vec![file_watch_entry, provider_health_entry],
+            entries: vec![file_watch_entry, provider_health_entry, isfr_entry],
         }
     }
 
@@ -881,7 +957,8 @@ impl AppState {
         let ephemeral_workspaces = RwLock::new(load_workspace_registry(&workdir));
 
         let provider_health = ProviderHealthTracker::new();
-        let runtime_feeds = ServeFeeds::new(&workdir, &provider_health);
+        let isfr = Arc::new(ISFRState::default());
+        let runtime_feeds = ServeFeeds::new(&workdir, &provider_health, &isfr);
 
         Ok(Self {
             workdir,
@@ -941,8 +1018,10 @@ impl AppState {
                 .filter(|s| !s.is_empty()),
             agent_relay_url: std::env::var("ROKO_AGENT_RELAY_URL")
                 .ok()
-                .filter(|s| !s.is_empty()),
-            isfr: Arc::new(ISFRState::default()),
+                .filter(|s| !s.is_empty())
+                .or_else(|| roko_config.relay.url.clone()),
+            feed_agent_catalog: RwLock::new(FeedAgentCatalog::default()),
+            isfr,
             chain: Arc::new(roko_chain::block_watcher::ChainState::default()),
             runtime_feeds,
         })

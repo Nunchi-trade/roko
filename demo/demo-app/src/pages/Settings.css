@@ -479,7 +479,9 @@ input[type="checkbox"]:focus-visible + .toggle-track {
   border: 1px solid var(--danger);
   border-radius: var(--radius-lg);
   color: var(--text-primary);
+  font-family: var(--mono);
   font-size: var(--text-md);
+  letter-spacing: 0.04em;
   animation: fadeInUp var(--duration-reveal) var(--ease) both;
   animation-delay: 60ms;
 }
@@ -513,9 +515,15 @@ input[type="checkbox"]:focus-visible + .toggle-track {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
   cursor: pointer;
   user-select: none;
   margin: 0 0 var(--sp-3);
+  padding: 0;
+  background: none;
+  border: none;
+  font: inherit;
+  color: inherit;
 }
 
 .settings-section-toggle h2 {

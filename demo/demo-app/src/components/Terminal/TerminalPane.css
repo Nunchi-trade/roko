@@ -4,7 +4,7 @@
    ═══════════════════════════════════════════════════════════ */
 
 .terminal-pane {
-  background: color-mix(in srgb, var(--bg-deeper) 90%, transparent);
+  background: color-mix(in srgb, var(--bg-deeper) 95%, transparent);
   border: 1px solid var(--glass-border);
   border-radius: 4px;
   overflow: hidden;
@@ -23,10 +23,10 @@
 
 @keyframes focusBreathe {
   0%, 100% {
-    box-shadow: 0 0 12px color-mix(in srgb, var(--rose) 6%, transparent), 0 0 4px color-mix(in srgb, var(--rose) 3%, transparent);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--rose) 4%, transparent), 0 0 3px color-mix(in srgb, var(--rose) 2%, transparent);
   }
   50% {
-    box-shadow: 0 0 20px color-mix(in srgb, var(--rose) 12%, transparent), 0 0 8px color-mix(in srgb, var(--rose) 6%, transparent);
+    box-shadow: 0 0 14px color-mix(in srgb, var(--rose) 8%, transparent), 0 0 5px color-mix(in srgb, var(--rose) 4%, transparent);
   }
 }
 
@@ -200,7 +200,7 @@
 
 /* Blinking cursor for empty state */
 .pane-body:empty::after {
-  content: "\2588";
+  content: "\2502";
   font-family: var(--mono);
   font-size: var(--text-md);
   color: var(--rose-dim);
@@ -221,7 +221,7 @@
 /* Inner padding */
 .pane-body .xterm,
 .demo-term-body .xterm {
-  padding: 2px 0 2px 4px;
+  padding: 8px;
 }
 
 /* ── 8. Scrollbar enhancement: glow on hover, invisible track ── */
@@ -283,6 +283,7 @@
 
 .pane-body .xterm-selection div,
 .demo-term-body .xterm-selection div {
+  background: color-mix(in srgb, var(--rose) 25%, transparent) !important;
   border-radius: 2px;
 }
 

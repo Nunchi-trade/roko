@@ -76,6 +76,7 @@ pub mod error;
 pub mod event_bus;
 pub mod events;
 pub mod extract;
+pub mod feed_agents;
 pub mod feedback;
 pub mod fswatcher;
 pub mod integrations;
@@ -400,6 +401,12 @@ impl ServerBuilder {
         // Wire the ISFRFeed relay bridge: receives relay TopicMessages and
         // republishes them as Pulses on the local bus.
         let _isfr_relay_bridge = start_isfr_relay_bridge(Arc::clone(&state));
+
+        // Spawn feed agents (15 agents publishing to relay + local event bus).
+        let _feed_agents = feed_agents::spawn_all(Arc::clone(&state));
+
+        // Bridge feed agents to the relay: registers feeds and forwards ticks.
+        let _feed_relay_bridge = start_feed_relay_bridge(Arc::clone(&state));
 
         let router = build_server_router(
             Arc::clone(&state),
@@ -1441,6 +1448,86 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
         ServerEvent::IsfrKeeperStateChanged { running } => {
             Some(DashboardEvent::IsfrKeeperStateChanged { running: *running })
         }
+        ServerEvent::ChainBlock {
+            number,
+            hash,
+            parent_hash,
+            timestamp,
+            gas_used,
+            gas_limit,
+            tx_count,
+            base_fee_per_gas,
+        } => Some(DashboardEvent::ChainBlock {
+            number: *number,
+            hash: hash.clone(),
+            parent_hash: parent_hash.clone(),
+            timestamp: *timestamp,
+            gas_used: *gas_used,
+            gas_limit: *gas_limit,
+            tx_count: *tx_count,
+            base_fee_per_gas: *base_fee_per_gas,
+        }),
+        ServerEvent::ChainTx {
+            block_number,
+            tx_hash,
+            from,
+            to,
+            value_wei,
+            gas_used,
+            method_sig,
+            success,
+        } => Some(DashboardEvent::ChainTx {
+            block_number: *block_number,
+            tx_hash: tx_hash.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            value_wei: value_wei.clone(),
+            gas_used: *gas_used,
+            method_sig: method_sig.clone(),
+            success: *success,
+        }),
+        ServerEvent::ChainContractEvent {
+            block_number,
+            tx_hash,
+            log_index,
+            contract,
+            event_name,
+            decoded,
+        } => Some(DashboardEvent::ChainContractEvent {
+            block_number: *block_number,
+            tx_hash: tx_hash.clone(),
+            log_index: *log_index,
+            contract: contract.clone(),
+            event_name: event_name.clone(),
+            decoded: decoded.clone(),
+        }),
+        ServerEvent::FeedTick {
+            agent_id,
+            feed_id,
+            topic,
+            payload,
+            timestamp_ms,
+        } => Some(DashboardEvent::FeedTick {
+            agent_id: agent_id.clone(),
+            feed_id: feed_id.clone(),
+            topic: topic.clone(),
+            payload: payload.clone(),
+            timestamp_ms: *timestamp_ms,
+        }),
+        ServerEvent::FeedAgentOnline {
+            agent_id,
+            name,
+            feed_count,
+        } => Some(DashboardEvent::FeedAgentOnline {
+            agent_id: agent_id.clone(),
+            name: name.clone(),
+            feed_count: *feed_count,
+        }),
+        ServerEvent::FeedAgentOffline { agent_id } => {
+            Some(DashboardEvent::FeedAgentOffline {
+                agent_id: agent_id.clone(),
+            })
+        }
         _ => None,
     }
 }
@@ -2419,6 +2506,121 @@ fn start_isfr_relay_bridge(state: Arc<AppState>) -> Option<tokio::task::JoinHand
         // dropping the handle closes the outbound sender channel, which causes
         // the loop to exit.
         state.cancel.cancelled().await;
+        drop(handle);
+    }))
+}
+
+/// Bridge feed agents to the relay: connects as a single agent, registers all
+/// 15 feeds, then subscribes to `ServerEvent::FeedTick` and publishes each tick
+/// to the relay topic bus so the relay dashboard shows live feed data.
+fn start_feed_relay_bridge(state: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
+    use roko_agent_server::features::relay_client::{RelayClientConfig, connect};
+    use roko_agent_server::registration::{AgentCard, AgentCardEndpoints};
+    use roko_agent_server::state::AgentState;
+
+    let roko_config = state.load_roko_config();
+    let raw_relay_url = roko_config.relay.url.clone()?;
+
+    if !roko_config.feed_agents_enabled() {
+        return None;
+    }
+
+    // Normalize to base URL (strip path like /relay/agents/ws).
+    let relay_url = crate::relay::normalize_relay_base_url(&raw_relay_url);
+    info!(relay_url = %relay_url, "starting feed agent relay bridge");
+
+    let state2 = Arc::clone(&state);
+    Some(tokio::spawn(async move {
+        // Wait briefly for feed agents to populate the catalog.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let agent_state = Arc::new(AgentState::new(
+            "roko-feed-publisher".to_string(),
+            None,
+            env!("CARGO_PKG_VERSION").to_string(),
+            vec![
+                "feed_publisher".to_string(),
+                "isfr".to_string(),
+                "chain".to_string(),
+            ],
+            None,
+            None,
+            None,
+        ));
+
+        let card = AgentCard {
+            name: "roko-feed-publisher".to_string(),
+            capabilities: vec![
+                "feed_publisher".to_string(),
+                "isfr".to_string(),
+                "chain".to_string(),
+            ],
+            endpoints: AgentCardEndpoints {
+                rest: None,
+                websocket: None,
+                a2a: None,
+                mcp: None,
+            },
+            domain_tags: vec!["roko".to_string(), "feeds".to_string()],
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        let relay_config = RelayClientConfig::new(relay_url.clone());
+        let handle = match connect(relay_config, agent_state, card, None).await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(error = %e, relay_url = %relay_url, "feed relay bridge: connect failed");
+                return;
+            }
+        };
+
+        // Register all feeds from the catalog.
+        let catalog = state2.feed_agent_catalog.read().await;
+        for feed in &catalog.feeds {
+            if let Err(e) = handle.register_feed(
+                &feed.feed_id,
+                &feed.topic,
+                &feed.name,
+                &feed.description,
+                &feed.kind,
+                &feed.rate,
+            ) {
+                warn!(feed_id = %feed.feed_id, error = %e, "feed relay bridge: register_feed failed");
+            }
+        }
+        let feed_count = catalog.feeds.len();
+        drop(catalog);
+
+        info!(feed_count, "feed relay bridge: registered feeds with relay");
+
+        // Subscribe to local FeedTick events and forward to relay.
+        let mut rx = state2.event_bus.subscribe();
+        loop {
+            tokio::select! {
+                _ = state2.cancel.cancelled() => break,
+                envelope = rx.recv() => {
+                    match envelope {
+                        Ok(env) => {
+                            if let crate::events::ServerEvent::FeedTick {
+                                topic,
+                                payload,
+                                ..
+                            } = env.payload {
+                                if let Err(e) = handle.publish(&topic, "tick", payload) {
+                                    debug!(error = %e, "feed relay bridge: publish failed");
+                                    break;
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            debug!(skipped = n, "feed relay bridge: event bus lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+
         drop(handle);
     }))
 }

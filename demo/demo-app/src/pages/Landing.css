@@ -103,6 +103,13 @@
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   text-shadow: none;
+  filter: drop-shadow(0 0 24px color-mix(in srgb, var(--rose-glow) 18%, transparent));
+  animation: titleBreathe 5s ease-in-out infinite;
+}
+
+@keyframes titleBreathe {
+  0%, 100% { filter: drop-shadow(0 0 24px color-mix(in srgb, var(--rose-glow) 18%, transparent)); }
+  50%      { filter: drop-shadow(0 0 40px color-mix(in srgb, var(--rose-glow) 30%, transparent)); }
 }
 
 /* ── subtitle entrance ── */
@@ -349,6 +356,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .landing-page { animation: none; }
+  .landing-title-gradient { animation: none; filter: none; }
   .landing-letter { animation: none; opacity: 1; }
   .landing-subtitle { animation: none; opacity: 1; }
   .landing-cta-row { animation: none; opacity: 1; }

@@ -30,16 +30,25 @@ export default function KnowledgeGraph() {
   const { get } = useLiveApi();
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [edges, setEdges] = useState<KnowledgeEdge[]>([]);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchAll = useCallback(async () => {
-    const [eData, edData] = await Promise.all([
-      get<KnowledgeEntry[] | { items?: KnowledgeEntry[] }>('/api/knowledge/entries'),
-      get<KnowledgeEdge[] | { items?: KnowledgeEdge[] }>('/api/knowledge/edges'),
-    ]);
-    const e = Array.isArray(eData) ? eData : ((eData as { items?: KnowledgeEntry[] }).items ?? []);
-    const ed = Array.isArray(edData) ? edData : ((edData as { items?: KnowledgeEdge[] }).items ?? []);
-    setEntries(e);
-    setEdges(ed);
+    try {
+      const [eData, edData] = await Promise.all([
+        get<KnowledgeEntry[] | { items?: KnowledgeEntry[] }>('/api/knowledge/entries'),
+        get<KnowledgeEdge[] | { items?: KnowledgeEdge[] }>('/api/knowledge/edges'),
+      ]);
+      const e = Array.isArray(eData) ? eData : ((eData as { items?: KnowledgeEntry[] }).items ?? []);
+      const ed = Array.isArray(edData) ? edData : ((edData as { items?: KnowledgeEdge[] }).items ?? []);
+      setEntries(e);
+      setEdges(ed);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load knowledge graph');
+    } finally {
+      setInitialLoading(false);
+    }
   }, [get]);
 
   // Initial fetch + 60s fallback poll
@@ -55,6 +64,18 @@ export default function KnowledgeGraph() {
     ['knowledge_updated', 'knowledge_created', 'knowledge_deleted'],
     debouncedRefetch,
   );
+
+  if (initialLoading) {
+    return (
+      <div className="dash-page progressive-reveal">
+        <div className="skeleton" style={{ height: 32, borderRadius: 6 }} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+        </div>
+      </div>
+    );
+  }
 
   /* Unique domains */
   const domains = new Set(entries.map((e) => e.domain).filter(Boolean));
@@ -86,7 +107,12 @@ export default function KnowledgeGraph() {
   const sortedDomains = Object.entries(domainCounts).sort(([, a], [, b]) => b - a);
 
   return (
-    <div className="dash-page">
+    <div className="dash-page" style={{ animation: 'fadeInUp 0.35s var(--ease) both' }}>
+      {error && (
+        <div style={{ padding: '8px 12px', background: 'var(--rose-deep)', border: '1px solid var(--rose-dim)', borderRadius: 'var(--radius-md)', fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)', color: 'var(--rose-bright)', marginBottom: 8 }}>
+          {error}
+        </div>
+      )}
       {/* TOP MOSAIC */}
       <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
         <Mosaic columns={5}>

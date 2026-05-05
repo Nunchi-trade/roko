@@ -17,7 +17,7 @@ use alloy::rpc::types::eth::BlockNumberOrTag;
 use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Information about a single block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,17 +93,36 @@ impl BlockWatcher {
         }
     }
 
+    /// Number of historical blocks to backfill from before the fork point.
+    const BACKFILL_COUNT: u64 = 20;
+
     /// Run the watcher loop until cancelled.
-    #[allow(clippy::too_many_lines)]
     pub async fn run(self, publish: PublishFn, cancel: CancellationToken) {
         let mut last_block: u64 = 0;
 
         // Seed with current block number.
         match self.provider.get_block_number().await {
             Ok(n) => {
-                // Start from current block (don't replay history).
                 last_block = n;
                 debug!(block = n, "block_watcher seeded at block");
+
+                // Backfill recent historical blocks (these are real mainnet
+                // blocks behind the fork point with actual tx data).
+                let start = n.saturating_sub(Self::BACKFILL_COUNT);
+                if start < n {
+                    info!(
+                        from = start + 1,
+                        to = n,
+                        "block_watcher backfilling historical blocks"
+                    );
+                    for num in (start + 1)..=n {
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        self.process_block(num, &publish).await;
+                    }
+                    info!(count = n - start, "block_watcher backfill complete");
+                }
             }
             Err(e) => {
                 warn!(error = %e, "block_watcher failed to get initial block number");
@@ -136,111 +155,241 @@ impl BlockWatcher {
                 if cancel.is_cancelled() {
                     return;
                 }
+                self.process_block(num, &publish).await;
+            }
 
-                let block = match self
-                    .provider
-                    .get_block_by_number(BlockNumberOrTag::Number(num))
-                    .full()
-                    .await
-                {
-                    Ok(Some(b)) => b,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        warn!(block = num, error = %e, "failed to fetch block");
-                        continue;
+            last_block = current;
+        }
+    }
+
+    /// Fetch a single block by number, publish block/tx/event payloads.
+    async fn process_block(&self, num: u64, publish: &PublishFn) {
+        let block = match self
+            .provider
+            .get_block_by_number(BlockNumberOrTag::Number(num))
+            .full()
+            .await
+        {
+            Ok(Some(b)) => b,
+            Ok(None) => return,
+            Err(e) => {
+                warn!(block = num, error = %e, "failed to fetch block");
+                return;
+            }
+        };
+
+        let header = &block.header;
+
+        // Process transactions FIRST so we get the actual count (Anvil fork blocks
+        // may return empty transaction arrays for historical blocks even with .full()).
+        let mut actual_tx_count = 0u32;
+        if let Some(transactions) = block.transactions.as_transactions() {
+            if !transactions.is_empty() {
+                info!(block = num, tx_count = transactions.len(), "processing full transactions");
+            }
+            for tx in transactions {
+                self.process_full_tx(num, tx, publish).await;
+                actual_tx_count += 1;
+            }
+        } else if let Some(hashes) = block.transactions.as_hashes() {
+            // mirage-rs / some providers return hash-only blocks even with .full().
+            // Fetch each transaction individually.
+            info!(block = num, hash_count = hashes.len(), "fetching transactions by hash");
+            for hash in hashes {
+                match self.provider.get_transaction_by_hash(*hash).await {
+                    Ok(Some(tx)) => {
+                        self.process_full_tx(num, &tx, publish).await;
+                        actual_tx_count += 1;
                     }
-                };
+                    Ok(None) => {
+                        debug!(tx_hash = %hash, block = num, "tx not found by hash");
+                    }
+                    Err(e) => {
+                        warn!(tx_hash = %hash, block = num, error = %e, "failed to fetch tx by hash");
+                    }
+                }
+            }
+        }
 
-                let header = &block.header;
-                let txs = block.transactions.as_transactions().map_or(0, |t| t.len());
+        // If we got 0 txs but the block used significant gas, transactions
+        // existed but alloy couldn't deserialize the provider's format.
+        // Try fetching the block as raw JSON to extract tx hashes.
+        if actual_tx_count == 0 && header.gas_used > 21_000 {
+            debug!(
+                block = num,
+                gas_used = header.gas_used,
+                "block has gas_used but 0 parsed txs — attempting raw tx extraction"
+            );
+            actual_tx_count = self.try_raw_tx_extraction(num, publish).await;
+        }
 
-                let block_info = BlockInfo {
-                    number: header.number,
-                    hash: format!("{:#x}", header.hash),
-                    parent_hash: format!("{:#x}", header.parent_hash),
-                    timestamp: header.timestamp,
-                    gas_used: header.gas_used,
-                    gas_limit: header.gas_limit,
-                    tx_count: txs as u32,
-                    base_fee_per_gas: header.base_fee_per_gas,
-                };
+        // Publish block info with ACTUAL tx count (after processing transactions)
+        let block_info = BlockInfo {
+            number: header.number,
+            hash: format!("{:#x}", header.hash),
+            parent_hash: format!("{:#x}", header.parent_hash),
+            timestamp: header.timestamp,
+            gas_used: header.gas_used,
+            gas_limit: header.gas_limit,
+            tx_count: actual_tx_count,
+            base_fee_per_gas: header.base_fee_per_gas,
+        };
 
-                publish(
-                    "chain:block",
-                    serde_json::to_value(&block_info).unwrap_or_default(),
-                );
+        publish(
+            "chain:block",
+            serde_json::to_value(&block_info).unwrap_or_default(),
+        );
+    }
 
-                // Process transactions.
-                if let Some(transactions) = block.transactions.as_transactions() {
-                    for tx in transactions {
-                        let tx_hash = format!("{:#x}", tx.tx_hash());
-                        let from = format!("{:#x}", tx.from());
-                        let to = TxTrait::to(tx).map(|a| format!("{:#x}", a));
-                        let value_wei = TxTrait::value(tx).to_string();
-                        let input_data = tx.input();
-                        let method_sig = if input_data.len() >= 4 {
-                            Some(format!("0x{}", alloy::hex::encode(&input_data[..4])))
-                        } else {
-                            None
-                        };
+    /// Fallback: when alloy can't deserialize the block's transactions, try
+    /// fetching each tx individually by hash. We extract hashes from a raw
+    /// JSON-RPC call to avoid alloy's typed deserialization.
+    async fn try_raw_tx_extraction(&self, block_number: u64, publish: &PublishFn) -> u32 {
+        // Use alloy's raw transport to get the untyped block JSON.
+        let params = (format!("0x{block_number:x}"), true);
+        let raw: Result<Option<serde_json::Value>, _> = self
+            .provider
+            .raw_request("eth_getBlockByNumber".into(), params)
+            .await;
+        let block_json = match raw {
+            Ok(Some(v)) => v,
+            _ => return 0,
+        };
+        let tx_array = match block_json.get("transactions").and_then(|t| t.as_array()) {
+            Some(arr) => arr,
+            None => return 0,
+        };
 
-                        // Fetch receipt for gas_used and logs.
-                        let hash_b256: B256 = tx.tx_hash();
-                        let (gas_used, success, logs) =
-                            match self.provider.get_transaction_receipt(hash_b256).await {
-                                Ok(Some(receipt)) => {
-                                    let logs: Vec<_> = receipt.inner.logs().to_vec();
-                                    (receipt.gas_used, receipt.status(), logs)
-                                }
-                                _ => (0, true, vec![]),
-                            };
+        let mut count = 0u32;
+        for tx_val in tx_array {
+            // Each element is either a hash string or a tx object with a "hash" field.
+            let hash_str = tx_val
+                .as_str()
+                .or_else(|| tx_val.get("hash").and_then(|h| h.as_str()));
+            let Some(hash_hex) = hash_str else {
+                continue;
+            };
+            let Ok(hash) = hash_hex.parse::<B256>() else {
+                continue;
+            };
 
+            // Fetch the full tx via the individual endpoint (often succeeds
+            // even when the bulk block response fails alloy deserialization).
+            match self.provider.get_transaction_by_hash(hash).await {
+                Ok(Some(tx)) => {
+                    self.process_full_tx(block_number, &tx, publish).await;
+                    count += 1;
+                }
+                Ok(None) => {
+                    // If individual fetch also fails, build a minimal TxInfo
+                    // from the raw JSON so the dashboard at least shows something.
+                    if let Some(obj) = tx_val.as_object() {
                         let tx_info = TxInfo {
-                            block_number: num,
-                            tx_hash: tx_hash.clone(),
-                            from,
-                            to,
-                            value_wei,
-                            gas_used,
-                            method_sig,
-                            success,
+                            block_number,
+                            tx_hash: hash_hex.to_string(),
+                            from: obj
+                                .get("from")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("0x0")
+                                .to_string(),
+                            to: obj.get("to").and_then(|v| v.as_str()).map(String::from),
+                            value_wei: obj
+                                .get("value")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("0x0")
+                                .to_string(),
+                            gas_used: 0,
+                            method_sig: None,
+                            success: true,
                         };
-
                         publish(
                             "chain:tx",
                             serde_json::to_value(&tx_info).unwrap_or_default(),
                         );
-
-                        // Decode logs.
-                        for (log_idx, log) in logs.iter().enumerate() {
-                            let topics = &log.inner.data.topics();
-                            if topics.is_empty() {
-                                continue;
-                            }
-
-                            let topic0 = format!("{:#x}", topics[0]);
-                            let contract = format!("{:#x}", log.inner.address);
-                            let (event_name, decoded) = decode_event(&topic0, topics, &log.inner.data.data);
-
-                            let event_info = ContractEventInfo {
-                                block_number: num,
-                                tx_hash: tx_hash.clone(),
-                                log_index: log_idx as u32,
-                                contract,
-                                event_name,
-                                decoded,
-                            };
-
-                            publish(
-                                "chain:event",
-                                serde_json::to_value(&event_info).unwrap_or_default(),
-                            );
-                        }
+                        count += 1;
                     }
                 }
+                Err(e) => {
+                    debug!(tx_hash = %hash, block = block_number, error = %e, "raw fallback: failed to fetch tx");
+                }
+            }
+        }
+        if count > 0 {
+            info!(block = block_number, tx_count = count, "recovered transactions via raw extraction");
+        }
+        count
+    }
+
+    /// Process a single fully-fetched transaction: publish tx info + decoded contract events.
+    async fn process_full_tx(
+        &self,
+        block_number: u64,
+        tx: &<alloy::network::Ethereum as alloy::network::Network>::TransactionResponse,
+        publish: &PublishFn,
+    ) {
+        let tx_hash = format!("{:#x}", tx.tx_hash());
+        let from = format!("{:#x}", tx.from());
+        let to = TxTrait::to(tx).map(|a| format!("{:#x}", a));
+        let value_wei = TxTrait::value(tx).to_string();
+        let input_data = tx.input();
+        let method_sig = if input_data.len() >= 4 {
+            Some(format!("0x{}", alloy::hex::encode(&input_data[..4])))
+        } else {
+            None
+        };
+
+        // Fetch receipt for gas_used and logs.
+        let hash_b256: B256 = tx.tx_hash();
+        let (gas_used, success, logs) =
+            match self.provider.get_transaction_receipt(hash_b256).await {
+                Ok(Some(receipt)) => {
+                    let logs: Vec<_> = receipt.inner.logs().to_vec();
+                    (receipt.gas_used, receipt.status(), logs)
+                }
+                _ => (0, true, vec![]),
+            };
+
+        let tx_info = TxInfo {
+            block_number,
+            tx_hash: tx_hash.clone(),
+            from,
+            to,
+            value_wei,
+            gas_used,
+            method_sig,
+            success,
+        };
+
+        publish(
+            "chain:tx",
+            serde_json::to_value(&tx_info).unwrap_or_default(),
+        );
+
+        // Decode logs.
+        for (log_idx, log) in logs.iter().enumerate() {
+            let topics = &log.inner.data.topics();
+            if topics.is_empty() {
+                continue;
             }
 
-            last_block = current;
+            let topic0 = format!("{:#x}", topics[0]);
+            let contract = format!("{:#x}", log.inner.address);
+            let (event_name, decoded) =
+                decode_event(&topic0, topics, &log.inner.data.data);
+
+            let event_info = ContractEventInfo {
+                block_number,
+                tx_hash: tx_hash.clone(),
+                log_index: log_idx as u32,
+                contract,
+                event_name,
+                decoded,
+            };
+
+            publish(
+                "chain:event",
+                serde_json::to_value(&event_info).unwrap_or_default(),
+            );
         }
     }
 }

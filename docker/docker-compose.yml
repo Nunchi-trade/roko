@@ -75,6 +75,7 @@ services:
     environment:
       RUST_LOG: "info,roko=debug"
       ROKO_MIRAGE_URL: "http://mirage:8545"
+      ROKO_AGENT_RELAY_URL: "http://mirage:8545"
     # roko is a CLI; keep the container alive with a long-running entrypoint
     # so operators can `docker compose exec roko roko <subcommand>`.
     entrypoint: ["/usr/local/bin/roko"]

@@ -36,7 +36,7 @@ export const DEFAULT_TIMEOUTS: TimeoutConfig = {
   execCheck: 3000,
   websocketOpen: 8000,
   shellPrompt: 6000,
-  workspaceCd: 5000,
+  workspaceCd: 8000,
 };
 
 let activeTimeouts: TimeoutConfig = { ...DEFAULT_TIMEOUTS };
@@ -144,18 +144,60 @@ function shellQuote(value: string): string {
  * Demo runs are long-lived terminal sessions; this keeps generated commands
  * anchored to the server-created workspace even if a previous command changed
  * directories or a shell integration restored a different working directory.
+ *
+ * Uses a two-step approach (mkdir then cd) with retry logic to handle
+ * slow filesystem operations and temporary directory creation races.
  */
 export async function ensureWorkspaceCwd(
   handle: TerminalHandle,
   dir: string,
   timeout = activeTimeouts.workspaceCd,
 ): Promise<boolean> {
-  const cdResult = await handle.execCmd(`cd ${shellQuote(dir)}`, timeout, { silent: true });
-  if (!cdResult.ok) {
-    console.error('[ensureWorkspaceCwd] cd failed:', dir, cdResult);
+  const quoted = shellQuote(dir);
+
+  // Attempt 1: combined mkdir+cd with the configured timeout
+  const attempt1 = await handle.execCmd(
+    `mkdir -p ${quoted} && cd ${quoted}`,
+    timeout,
+    { silent: true },
+  );
+  if (attempt1.ok) return true;
+
+  console.warn('[ensureWorkspaceCwd] attempt 1 failed (exitCode=%d), retrying with split commands', attempt1.exitCode);
+
+  // Attempt 2: split mkdir and cd into separate execCmd calls.
+  // This helps when the combined command times out — mkdir might succeed
+  // but the OSC marker is lost, leaving the cd unexecuted.
+  const mkdirResult = await handle.execCmd(
+    `mkdir -p ${quoted}`,
+    timeout,
+    { silent: true },
+  );
+  if (!mkdirResult.ok) {
+    console.warn('[ensureWorkspaceCwd] mkdir failed (exitCode=%d), trying fallback temp dir', mkdirResult.exitCode);
+    // Fallback: create a local temp workspace if the server path is unreachable
+    const fallback = await handle.execCmd(
+      `__rk_ws=$(mktemp -d /tmp/roko-ws-fallback-XXXXXX) && cd "$__rk_ws"`,
+      timeout,
+      { silent: true },
+    );
+    if (fallback.ok) {
+      console.warn('[ensureWorkspaceCwd] using fallback workspace (original dir unavailable):', dir);
+      return true;
+    }
+    console.warn('[ensureWorkspaceCwd] all attempts failed:', dir);
     return false;
   }
-  return true;
+
+  const cdResult = await handle.execCmd(
+    `cd ${quoted}`,
+    timeout,
+    { silent: true },
+  );
+  if (cdResult.ok) return true;
+
+  console.warn('[ensureWorkspaceCwd] cd failed after successful mkdir:', dir, cdResult);
+  return false;
 }
 
 /**
@@ -203,7 +245,7 @@ export async function enterWorkspace(
   // 1. Wait for WebSocket to be open
   const wsOk = await waitForOpen(handle, activeTimeouts.websocketOpen);
   if (!wsOk) {
-    console.error('[enterWorkspace] WebSocket never opened for', handle.sessionId);
+    console.warn('[enterWorkspace] WebSocket never opened for', handle.sessionId);
     throw new Error(`Terminal WebSocket failed to connect (session: ${handle.sessionId})`);
   }
 
@@ -217,7 +259,7 @@ export async function enterWorkspace(
     promptOk = await handle.waitForPrompt(5000);
   }
   if (!promptOk) {
-    console.error('[enterWorkspace] Shell prompt never appeared for', handle.sessionId);
+    console.warn('[enterWorkspace] Shell prompt never appeared for', handle.sessionId);
     throw new Error(`Shell prompt not detected (session: ${handle.sessionId}). Terminal may be hung.`);
   }
 
@@ -246,6 +288,7 @@ export interface CommandResult {
   gates: GateResult[];
   cost: string | null;
   tokens: string | null;
+  model: string | null;
   /** Last lines of terminal output when the command failed. */
   error?: string;
   /** Reason for failure when ok=false. */
@@ -321,14 +364,14 @@ export async function showCmd(
 
   if (opts?.signal?.aborted) {
     opts?.onLogComplete?.(cmd, false);
-    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null, failureReason: 'aborted' };
+    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null, model: null, failureReason: 'aborted' };
   }
 
   if (opts?.workspaceDir) {
     const cwdOk = await ensureWorkspaceCwd(handle, opts.workspaceDir);
     if (!cwdOk) {
       opts?.onLogComplete?.(cmd, false);
-      return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null, failureReason: 'command_error' };
+      return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null, model: null, failureReason: 'command_error' };
     }
     handle.outputBuffer = '';
   }
@@ -337,13 +380,13 @@ export async function showCmd(
   const typed = await typeChars(handle, cmd);
   if (!typed) {
     opts?.onLogComplete?.(cmd, false);
-    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null, failureReason: 'ws_closed' };
+    return { ok: false, elapsed: 0, gates: [], cost: null, tokens: null, model: null, failureReason: 'ws_closed' };
   }
 
   // Press Enter and wait for prompt
   if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) {
     opts?.onLogComplete?.(cmd, false);
-    return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null, failureReason: 'ws_closed' };
+    return { ok: false, elapsed: (Date.now() - startTime) / 1000, gates: [], cost: null, tokens: null, model: null, failureReason: 'ws_closed' };
   }
   handle.ws.send('\r');
   const promptOk = await handle.waitForPrompt(timeout, opts?.signal);
@@ -389,9 +432,13 @@ export async function showCmd(
   // On failure, capture last lines of terminal output as error context
   // (uses pre-exit-check snapshot since execCmd clears the buffer)
   let error: string | undefined;
-  if (!ok && commandOutput) {
-    const lines = stripAnsi(commandOutput).split('\n').filter(l => l.trim());
-    error = lines.slice(-10).join('\n').trim() || undefined;
+  if (!ok) {
+    if (!promptOk) {
+      error = `Command timed out after ${Math.round(timeout / 1000)}s`;
+    } else if (commandOutput) {
+      const lines = stripAnsi(commandOutput).split('\n').filter(l => l.trim());
+      error = lines.slice(-10).join('\n').trim() || undefined;
+    }
   }
 
   console.debug(`[showCmd] done: ok=${ok} elapsed=${elapsed.toFixed(1)}s gates=${result.gates.length} cost=${result.cost} tokens=${result.tokens}${error ? ` error="${error.slice(0, 100)}"` : ''}`);
@@ -405,6 +452,7 @@ export async function showCmd(
     gates: result.gates,
     cost: result.cost,
     tokens: result.tokens,
+    model: result.model,
     error,
     failureReason: ok ? undefined : (!promptOk ? 'timeout' : 'command_error'),
   };
@@ -416,6 +464,7 @@ interface DetectionResult {
   gates: GateResult[];
   cost: string | null;
   tokens: string | null;
+  model: string | null;
 }
 
 /**
@@ -453,15 +502,68 @@ function detectFromOutput(
     }
   }
 
-  // Cost detection
+  // Cost detection — matches:
+  //   "$0.0012"             (inline runner / output_format.rs)
+  //   "$0.0012 USD"         (print_cost_actual format)
+  //   "$ cost 0.0012"       (projection event format)
+  //   "cost       0.0432"   (roko do summary block — no $ prefix)
+  let cost: string | null = null;
   const costMatch = text.match(/\$(\d+\.\d+)/);
-  const cost = costMatch ? `$${costMatch[1]}` : null;
+  if (costMatch) {
+    cost = `$${costMatch[1]}`;
+  } else {
+    // Fallback: "cost <whitespace> <number>" (roko do summary format)
+    const labelCost = text.match(/\bcost\s+(\d+\.\d+)/i);
+    if (labelCost) {
+      cost = `$${labelCost[1]}`;
+    } else {
+      // Fallback: projection format "$ cost <number>"
+      const projCost = text.match(/\$\s*cost\s+(\d+\.\d+)/i);
+      if (projCost) {
+        cost = `$${projCost[1]}`;
+      }
+    }
+  }
   if (cost) opts?.onCost?.(cost);
 
-  // Token detection
-  const tokenMatch = text.match(/(\d[\d,]*)\s*(?:tokens?|tok)/i);
-  const tokens = tokenMatch ? tokenMatch[1] : null;
+  // Token detection — matches:
+  //   "1,234 tokens"   (standard format)
+  //   "1234 tok"       (abbreviated)
+  //   "1234 in / 5678 out"  (roko inline runner format — sum both)
+  // Token detection — matches:
+  //   "1,234 tokens"         (standard format)
+  //   "1234 tok"             (abbreviated)
+  //   "tokens     75970"     (roko do summary block — label-first)
+  //   "1234 in / 5678 out"   (roko inline runner format — sum both)
+  let tokens: string | null = null;
+  const tokenMatch = text.match(/(\d[\d,]*)\s*(?:tokens?|tok)\b/i);
+  if (tokenMatch) {
+    tokens = tokenMatch[1];
+  } else {
+    // Fallback: "tokens <whitespace> <number>" (roko do summary format)
+    const labelTokens = text.match(/\btokens?\s+(\d[\d,]*)/i);
+    if (labelTokens) {
+      tokens = labelTokens[1];
+    } else {
+      // Fallback: roko inline runner prints "N in / M out" for token counts
+      const inOutMatch = text.match(/(\d[\d,]*)\s*in\s*\/\s*(\d[\d,]*)\s*out/i);
+      if (inOutMatch) {
+        const inCount = parseInt(inOutMatch[1].replace(/,/g, ''), 10) || 0;
+        const outCount = parseInt(inOutMatch[2].replace(/,/g, ''), 10) || 0;
+        tokens = String(inCount + outCount);
+      }
+    }
+  }
   if (tokens) opts?.onTokens?.(tokens);
+
+  // Model detection — matches:
+  //   "model   gpt-5.4-mini"   (roko do summary block)
+  //   "model: claude-opus-4"   (alternative format)
+  let model: string | null = null;
+  const modelMatch = text.match(/\bmodel\s+([a-zA-Z0-9][\w./-]*)/i);
+  if (modelMatch) {
+    model = modelMatch[1];
+  }
 
   // Error detection
   if (opts?.onError) {
@@ -481,7 +583,7 @@ function detectFromOutput(
     }
   }
 
-  return { gates, cost, tokens };
+  return { gates, cost, tokens, model };
 }
 
 // ── Utilities ────────────────────────────────────────────────

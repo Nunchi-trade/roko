@@ -116,11 +116,11 @@ function ChainBlocks() {
 function ScenarioDiagram({ scenarioId }: { scenarioId: string }) {
   switch (scenarioId) {
     case 'cost':
-      return <RaceLanes left="Naive" right="Cascade" />;
+      return <RaceLanes left="Direct (fixed model)" right="Cascade (smart routing)" />;
     case 'pipeline':
       return <FlowDiagram />;
     case 'memory':
-      return <TransferDiagram left="Cold run" right="Warm run" />;
+      return <TransferDiagram left="First run (fresh)" right="Second run (with knowledge)" />;
     case 'isfr':
       return <CategoryGrid items={['Lending', 'Staking', 'Aggregator', 'Validator']} />;
     case 'oracle':
@@ -154,14 +154,26 @@ function ScenarioDiagram({ scenarioId }: { scenarioId: string }) {
   }
 }
 
+/** Pane descriptions shown below subtitle to explain what each terminal does. */
+function scenarioPaneNote(scenarioId: string): string | null {
+  switch (scenarioId) {
+    case 'cost': return 'Left pane: fixed model. Right pane: cascade routing. Watch costs diverge.';
+    case 'pipeline': return 'Single pane shows classify → plan → code → validate in real time.';
+    case 'memory': return 'Left pane: solve from scratch. Right pane: solve with prior knowledge.';
+    case 'isfr': return 'Four panes — one per agent. They run in parallel and feed a composite rate.';
+    case 'oracle': return 'Left pane: data agent reads the chain. Right pane: strategy agent reads the analysis.';
+    default: return null;
+  }
+}
+
 /** What this scenario demonstrates. */
 function scenarioFeature(scenarioId: string): string {
   switch (scenarioId) {
-    case 'cost': return 'Cost delta';
-    case 'pipeline': return 'Idea to code';
-    case 'memory': return 'Compounding intelligence';
-    case 'isfr': return 'Agent swarm';
-    case 'oracle': return 'DeFi oracle';
+    case 'cost': return 'Smart routing saves money';
+    case 'pipeline': return 'Prompt → working code';
+    case 'memory': return 'Knowledge reuse across runs';
+    case 'isfr': return '4 agents → 1 benchmark rate';
+    case 'oracle': return 'Chain data → strategy';
     case 'prd-research-loop': return 'Full self-hosting loop';
     case 'race': return 'Cost comparison';
     case 'gate-retry': return 'Gate failure recovery';
@@ -218,6 +230,9 @@ export default function ScenarioPreview({
       <div className="sp-info" onClick={(e) => e.stopPropagation()}>
         <div className="sp-title">{scenario.title}</div>
         <div className="sp-subtitle">{scenario.subtitle}</div>
+        {scenarioPaneNote(scenario.id) && (
+          <div className="sp-pane-note">{scenarioPaneNote(scenario.id)}</div>
+        )}
 
         <div className="sp-facts">
           <span className="sp-fact">

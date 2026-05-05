@@ -5,6 +5,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  animation: fadeIn 0.3s ease both;
 }
 
 .dash-page--wide {
@@ -459,6 +460,45 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   text-align: center;
+}
+
+/* Error banner (inline alert strip) */
+.dash-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--rose-deep);
+  border: 1px solid var(--rose-dim);
+  border-radius: var(--radius-md);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.04em;
+  color: var(--rose-bright);
+  animation: fadeInUp 0.3s var(--ease) both;
+}
+
+/* Live indicator dot + label */
+.dash-live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--success);
+}
+
+.dash-live-indicator::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  animation: pulse-dot 2.4s ease-in-out infinite;
+  flex-shrink: 0;
 }
 
 /* Compact CLI empty state */

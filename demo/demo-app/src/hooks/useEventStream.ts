@@ -64,20 +64,40 @@ function normalizeEvent(parsed: Record<string, unknown>, fallbackType?: string):
  * named SSE events, so wildcard subscribers are backed by known runtime event
  * names plus the default message channel.
  */
+const BACKOFF_DELAYS = [1_000, 2_000, 4_000, 8_000, 15_000];
+const MAX_RETRIES = 5;
+
+interface SourceEntry {
+  source: EventSource | null;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  retries: number;
+  path: string;
+  namedEvents: boolean;
+}
+
 export function createEventStreamManager(baseUrl: string): EventStreamManager {
-  let sources = new Set<EventSource>();
-  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let connected = false;
   let destroyed = false;
   let onConnectedChange: ((connected: boolean) => void) | null = null;
 
+  const sourceEntries = new Map<string, SourceEntry>();
   const handlers = new Map<string, Set<EventHandler>>();
   const connectListeners = new Set<() => void>();
   const listenedTypes = new Set<string>();
 
-  function notifyConnect() {
-    for (const fn of connectListeners) fn();
-    if (onConnectedChange) onConnectedChange(connected);
+  function updateConnected() {
+    const prev = connected;
+    connected = false;
+    for (const entry of sourceEntries.values()) {
+      if (entry.source?.readyState === EventSource.OPEN) {
+        connected = true;
+        break;
+      }
+    }
+    if (connected !== prev) {
+      for (const fn of connectListeners) fn();
+      if (onConnectedChange) onConnectedChange(connected);
+    }
   }
 
   function dispatch(type: string, event: unknown) {
@@ -85,7 +105,6 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
     if (set) {
       for (const handler of set) handler(event);
     }
-    // Also dispatch to wildcard subscribers
     const wildcard = handlers.get('*');
     if (wildcard) {
       for (const handler of wildcard) handler(event);
@@ -116,63 +135,65 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
     }
     if (listenedTypes.has(type)) return;
     listenedTypes.add(type);
-    for (const source of sources) attachNamedListener(source, type);
+    for (const entry of sourceEntries.values()) {
+      if (entry.source) attachNamedListener(entry.source, type);
+    }
   }
 
-  function closeSources() {
-    for (const source of sources) source.close();
-    sources = new Set<EventSource>();
-  }
-
-  function scheduleReconnect() {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(connect, 3_000);
-  }
-
-  function openSource(path: string, namedEvents: boolean) {
+  function openSource(entry: SourceEntry) {
     if (destroyed) return;
 
-    const source = new EventSource(`${baseUrl}${path}`);
-    sources.add(source);
+    // Close previous source if still around
+    if (entry.source) {
+      entry.source.close();
+      entry.source = null;
+    }
+
+    const source = new EventSource(`${baseUrl}${entry.path}`);
+    entry.source = source;
 
     source.onopen = () => {
-      if (destroyed || !sources.has(source)) return;
-      connected = true;
-      notifyConnect();
+      if (destroyed || entry.source !== source) return;
+      entry.retries = 0; // Reset on successful connection
+      updateConnected();
     };
 
     source.onmessage = (e) => {
-      if (destroyed || !sources.has(source)) return;
+      if (destroyed || entry.source !== source) return;
       handleEventData(e.data);
     };
-    if (namedEvents) {
+
+    if (entry.namedEvents) {
       for (const type of listenedTypes) attachNamedListener(source, type);
     }
 
-    source.onerror = (ev) => {
-      console.warn('[SSE] Connection error, reconnecting...', ev);
-      if (destroyed || !sources.has(source)) {
-        source.close();
-        return;
-      }
+    source.onerror = () => {
+      if (destroyed || entry.source !== source) return;
       source.close();
-      sources.delete(source);
-      connected = sources.size > 0;
-      notifyConnect();
-      scheduleReconnect();
+      entry.source = null;
+      updateConnected();
+
+      // Independent retry for this source only
+      if (entry.retries < MAX_RETRIES) {
+        const delay = BACKOFF_DELAYS[Math.min(entry.retries, BACKOFF_DELAYS.length - 1)];
+        console.warn(`[SSE] ${entry.path} error, retry ${entry.retries + 1}/${MAX_RETRIES} in ${delay}ms`);
+        entry.retries++;
+        clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => openSource(entry), delay);
+      } else {
+        console.warn(`[SSE] ${entry.path} max retries reached, stopping reconnect`);
+      }
     };
   }
 
-  function connect() {
-    if (destroyed) return;
-    closeSources();
-    connected = false;
-    notifyConnect();
-    openSource('/api/events', false);
-    openSource('/api/workflow/events', true);
+  function initSource(path: string, namedEvents: boolean) {
+    const entry: SourceEntry = { source: null, timer: undefined, retries: 0, path, namedEvents };
+    sourceEntries.set(path, entry);
+    openSource(entry);
   }
 
-  connect();
+  initSource('/api/events', false);
+  initSource('/api/workflow/events', true);
 
   return {
     get connected() {
@@ -196,7 +217,6 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
         }
         set.add(handler);
       }
-      // Also subscribe to connection state changes
       const wrappedConnect = () => {};
       connectListeners.add(wrappedConnect);
 
@@ -214,8 +234,12 @@ export function createEventStreamManager(baseUrl: string): EventStreamManager {
 
     destroy() {
       destroyed = true;
-      clearTimeout(reconnectTimer);
-      closeSources();
+      for (const entry of sourceEntries.values()) {
+        clearTimeout(entry.timer);
+        entry.source?.close();
+        entry.source = null;
+      }
+      sourceEntries.clear();
       handlers.clear();
       connectListeners.clear();
       connected = false;

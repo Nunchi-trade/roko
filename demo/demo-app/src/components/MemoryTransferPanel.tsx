@@ -39,10 +39,10 @@ export default function MemoryTransferPanel({
   }, [cold.calls, cold.cost, warm.calls, hasBothCosts]);
 
   const phases: { id: Phase; label: string }[] = [
-    { id: 'cold', label: 'Cold' },
-    { id: 'ingest', label: 'Ingest' },
-    { id: 'warm', label: 'Warm' },
-    { id: 'delta', label: 'Delta' },
+    { id: 'cold', label: 'First Run' },
+    { id: 'ingest', label: 'Save Knowledge' },
+    { id: 'warm', label: 'Second Run' },
+    { id: 'delta', label: 'Compare' },
   ];
 
   const phaseOrder: Phase[] = ['cold', 'ingest', 'warm', 'delta'];
@@ -54,10 +54,16 @@ export default function MemoryTransferPanel({
   return (
     <section className="memory-panel" aria-label="Memory transfer">
       <div className="memory-panel-header">
-        <span className="memory-panel-title">Knowledge Transfer</span>
+        <span className="memory-panel-title">Knowledge Reuse</span>
         <span className={`memory-panel-live${hasData ? ' connected' : ''}`}>
           {panelState === 'pending' ? 'ready' : 'live'}
         </span>
+      </div>
+
+      <div className="memory-panel-description">
+        The first agent solves a task from scratch and saves what it learned to the knowledge store.
+        The second agent tackles a similar task but starts with that knowledge — compare cost and
+        speed to see the benefit of persistent memory.
       </div>
 
       <div className="memory-panel-phases">
@@ -74,7 +80,7 @@ export default function MemoryTransferPanel({
 
       <div className="memory-panel-columns">
         <div className="memory-panel-column memory-panel-column--cold">
-          <div className="memory-panel-column-label">Cold Run</div>
+          <div className="memory-panel-column-label">First Run (no prior knowledge)</div>
           <div className="memory-panel-metric">
             <span className="memory-panel-metric-label">Cost</span>
             <span className={`memory-panel-metric-value${cold.cost <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
@@ -96,7 +102,7 @@ export default function MemoryTransferPanel({
         </div>
 
         <div className="memory-panel-column memory-panel-column--warm">
-          <div className="memory-panel-column-label">Warm Run</div>
+          <div className="memory-panel-column-label">Second Run (with knowledge)</div>
           <div className="memory-panel-metric">
             <span className="memory-panel-metric-label">Cost</span>
             <span className={`memory-panel-metric-value${warm.cost <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>

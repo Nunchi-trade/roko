@@ -134,6 +134,7 @@ export default function CascadeRouter() {
   const { get } = useLiveApi();
   const [state, setState] = useState<CascadeState>({});
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<CRSortKey>('model');
   const [sortAsc, setSortAsc] = useState(true);
 
@@ -147,8 +148,9 @@ export default function CascadeRouter() {
     try {
       const data = await get<CascadeState>('/api/learn/cascade-router');
       setState(data ?? {});
-    } catch {
-      /* keep previous */
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load cascade router data');
     } finally {
       setLoading(false);
     }
@@ -213,13 +215,30 @@ export default function CascadeRouter() {
     };
   }, [rows]);
 
+  if (loading) {
+    return (
+      <div className="dash-page progressive-reveal">
+        <div className="skeleton" style={{ height: 32, borderRadius: 6 }} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <DataSurface
-      loading={loading}
-      empty={!loading && rows.length === 0 && roleEntries.length === 0}
+      loading={false}
+      empty={rows.length === 0 && roleEntries.length === 0}
       emptyLabel="No cascade router data. Run a plan to populate model statistics."
     >
-    <div className="dash-page--full">
+    <div className="dash-page--full" style={{ animation: 'fadeInUp 0.35s var(--ease) both' }}>
+      {error && (
+        <div style={{ padding: '8px 12px', background: 'var(--rose-deep)', border: '1px solid var(--rose-dim)', borderRadius: 'var(--radius-md)', fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)', color: 'var(--rose-bright)', marginBottom: 8 }}>
+          {error}
+        </div>
+      )}
       {/* TOP MOSAIC */}
       <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
         <Mosaic columns={5}>

@@ -13,6 +13,13 @@ interface ClassRate {
   status: 'pending' | 'active' | 'done';
 }
 
+const RATE_CLASS_DESCRIPTIONS: Record<string, string> = {
+  LENDING: 'Aave, Compound supply rates',
+  STRUCTURED: 'Yield vaults & strategies',
+  FUNDING: 'Perp funding rates',
+  STAKING: 'ETH liquid staking yields',
+};
+
 const DEFAULT_CLASSES: ClassRate[] = [
   { label: 'LENDING', rate: '--', weight: '60%', status: 'pending' },
   { label: 'STRUCTURED', rate: '--', weight: '25%', status: 'pending' },
@@ -56,6 +63,12 @@ export default function ISFRPanel({ insights, connected }: ISFRPanelProps) {
         </span>
       </div>
 
+      <div className="isfr-description">
+        The Internet Secured Funding Rate (ISFR) is a composite DeFi benchmark — like SOFR for
+        traditional finance. Four agents analyze lending, staking, structured, and funding yields,
+        then combine them into a single weighted rate.
+      </div>
+
       <div className="isfr-composite">
         <div className="isfr-composite-rate">{compositeRate}</div>
         <div className="isfr-composite-unit">
@@ -72,6 +85,7 @@ export default function ISFRPanel({ insights, connected }: ISFRPanelProps) {
               <span className="isfr-class-label">{c.label}</span>
               <span className="isfr-class-weight">{c.weight}</span>
             </div>
+            <div className="isfr-class-desc">{RATE_CLASS_DESCRIPTIONS[c.label]}</div>
             <div className="isfr-class-rate">{c.rate}</div>
             <div className="isfr-class-bar">
               <div

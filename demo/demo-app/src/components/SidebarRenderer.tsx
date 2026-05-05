@@ -27,6 +27,7 @@ import InferenceTracePanel from './InferenceTracePanel';
 import type { InferenceCall, InferenceTraceTotals } from '../hooks/useInferenceTrace';
 import { ConfidenceMeter, ModelSlot, CrystallizeTransition } from './inference';
 import { AgentHandoff } from './agent';
+import ProvenanceCard from './ProvenanceCard';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -160,6 +161,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -215,6 +224,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -276,6 +293,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -308,6 +333,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -341,6 +374,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -409,6 +450,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
         totals={traceTotals}
         costSeries={traceCostSeries}
       />
+      <RevealWhen visible={scenarioComplete} mode="blur">
+        <ProvenanceCard
+          model={stats.model}
+          cost={stats.cost}
+          tokens={stats.tokens}
+          duration={stats.time}
+        />
+      </RevealWhen>
     </>
   );
 }

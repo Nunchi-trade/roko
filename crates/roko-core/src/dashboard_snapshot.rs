@@ -166,6 +166,53 @@ pub enum DashboardEvent {
     },
     /// ISFR keeper started or stopped.
     IsfrKeeperStateChanged { running: bool },
+    /// New block observed on the connected chain.
+    ChainBlock {
+        number: u64,
+        hash: String,
+        parent_hash: String,
+        timestamp: u64,
+        gas_used: u64,
+        gas_limit: u64,
+        tx_count: u32,
+        base_fee_per_gas: Option<u64>,
+    },
+    /// Transaction included in a block.
+    ChainTx {
+        block_number: u64,
+        tx_hash: String,
+        from: String,
+        to: Option<String>,
+        value_wei: String,
+        gas_used: u64,
+        method_sig: Option<String>,
+        success: bool,
+    },
+    /// Decoded contract event log.
+    ChainContractEvent {
+        block_number: u64,
+        tx_hash: String,
+        log_index: u32,
+        contract: String,
+        event_name: String,
+        decoded: serde_json::Value,
+    },
+    /// A feed agent published new data.
+    FeedTick {
+        agent_id: String,
+        feed_id: String,
+        topic: String,
+        payload: serde_json::Value,
+        timestamp_ms: i64,
+    },
+    /// A feed agent came online.
+    FeedAgentOnline {
+        agent_id: String,
+        name: String,
+        feed_count: usize,
+    },
+    /// A feed agent went offline.
+    FeedAgentOffline { agent_id: String },
     /// An error occurred.
     Error { message: String },
 }
@@ -1170,6 +1217,12 @@ impl DashboardSnapshot {
             DashboardEvent::IsfrRateComputed { .. }
             | DashboardEvent::IsfrSourceHealthChanged { .. }
             | DashboardEvent::IsfrKeeperStateChanged { .. } => {}
+            DashboardEvent::ChainBlock { .. }
+            | DashboardEvent::ChainTx { .. }
+            | DashboardEvent::ChainContractEvent { .. } => {}
+            DashboardEvent::FeedTick { .. }
+            | DashboardEvent::FeedAgentOnline { .. }
+            | DashboardEvent::FeedAgentOffline { .. } => {}
         }
     }
 

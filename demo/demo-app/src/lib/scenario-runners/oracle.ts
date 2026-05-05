@@ -32,22 +32,22 @@ export const ORACLE_COMMANDS: CommandDef[] = [
 export const oracleScenario: ClickableScenario = {
   id: 'oracle',
   title: 'Oracle',
-  subtitle: 'On-chain data becomes reusable agent knowledge.',
+  subtitle: 'One agent reads live DeFi data and writes analysis. A second agent reads it and produces an investment strategy.',
   panes: 2,
-  labels: ['data collection', 'strategy synthesis'],
+  labels: ['Data agent (reads chain, writes analysis)', 'Strategy agent (reads analysis, recommends)'],
   panel: true,
   promptBar: false,
   mirageBar: true,
   category: 'chain',
-  features: ['Chain data', 'Knowledge write', 'Strategy read'],
+  features: ['Read live DeFi rates', 'Write structured analysis to knowledge', 'Generate allocation strategy'],
   durationHint: '<2 min',
   accent: 'violet',
   icon: 'evm',
   steps: [
-    { label: 'Connect', sublabel: 'local fork' },
-    { label: 'Scan', sublabel: 'lending rates' },
-    { label: 'Write', sublabel: 'knowledge store' },
-    { label: 'Recommend', sublabel: 'USDC allocation' },
+    { label: 'Connect', sublabel: 'verify Ethereum fork is running' },
+    { label: 'Scan', sublabel: 'read lending rates from Aave + Compound' },
+    { label: 'Write', sublabel: 'save structured analysis to knowledge store' },
+    { label: 'Recommend', sublabel: 'produce USDC allocation strategy' },
   ],
   commands: ORACLE_COMMANDS,
 
@@ -84,9 +84,11 @@ export const oracleScenario: ClickableScenario = {
     ctx.setMetric(`${prefix}-elapsed`, String(result.elapsed ?? 0));
     ctx.setMetric(`${prefix}-calls`, '1');
 
-    // Also feed sidebar stats
+    // Also feed sidebar stats (model/cost/tokens/time) for provenance
+    if (result.model) ctx.setMetric('model', result.model);
     if (result.cost) ctx.setMetric('cost', result.cost);
     if (result.tokens) ctx.setMetric('tokens', result.tokens);
+    ctx.setMetric('time', `${(result.elapsed ?? 0).toFixed(1)}s`);
 
     return { ok: result.ok, error: result.error };
   },

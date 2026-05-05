@@ -90,6 +90,21 @@ const fn default_relay_heartbeat() -> u64 {
     30
 }
 
+/// `[feed_agents]` section in roko.toml — controls whether the 15 built-in
+/// feed agents are spawned at serve startup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeedAgentsConfig {
+    /// Whether feed agents are enabled (default: false).
+    pub enabled: bool,
+}
+
+impl Default for FeedAgentsConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
 fn default_chain_profile() -> String {
     "mirage".to_string()
 }

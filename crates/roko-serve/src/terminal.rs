@@ -555,7 +555,7 @@ impl SessionManager {
         let zdotdir_path = if command.is_none() {
             let zdotdir = std::env::temp_dir().join(format!("roko-zdot-{}", Uuid::new_v4()));
             let _ = std::fs::create_dir_all(&zdotdir);
-            let _ = std::fs::write(zdotdir.join(".zshrc"), "PS1='%1~ %# '\n");
+            let _ = std::fs::write(zdotdir.join(".zshrc"), "PS1='%F{95}roko%f %F{240}%1~%f %F{95}❯%f '\n");
             cmd.env("ZDOTDIR", zdotdir.to_string_lossy().as_ref());
             Some(zdotdir)
         } else {
@@ -777,7 +777,7 @@ impl SessionManager {
         let zdotdir_path = if command.is_none() {
             let zdotdir = std::env::temp_dir().join(format!("roko-zdot-{}", Uuid::new_v4()));
             let _ = std::fs::create_dir_all(&zdotdir);
-            let _ = std::fs::write(zdotdir.join(".zshrc"), "PS1='%1~ %# '\n");
+            let _ = std::fs::write(zdotdir.join(".zshrc"), "PS1='%F{95}roko%f %F{240}%1~%f %F{95}❯%f '\n");
             cmd.env("ZDOTDIR", zdotdir.to_string_lossy().as_ref());
             Some(zdotdir)
         } else {

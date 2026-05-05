@@ -233,6 +233,7 @@ async fn handle_agent_socket(state: Arc<RelayState>, socket: WebSocket) {
     writer.abort();
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_agent_frame(
     state: &Arc<RelayState>,
     agent_id: &str,
@@ -327,6 +328,22 @@ fn handle_agent_frame(
             }
             let _ = outbound_tx.send(RelayOutboundFrame::Ack {
                 event: format!("published:{topic}:{seq}"),
+            });
+            true
+        }
+        Ok(AgentInboundFrame::RegisterFeed { feed }) => {
+            tracing::debug!(%agent_id, feed_id = %feed.feed_id, "register_feed");
+            state.register_feed(agent_id, feed);
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: "feed_registered".to_string(),
+            });
+            true
+        }
+        Ok(AgentInboundFrame::UnregisterFeed { feed_id }) => {
+            tracing::debug!(%agent_id, %feed_id, "unregister_feed");
+            state.unregister_feed(agent_id, &feed_id);
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: "feed_unregistered".to_string(),
             });
             true
         }
@@ -475,4 +492,38 @@ async fn topic_subscribers(
         "topic": topic,
         "subscriber_count": count,
     }))
+}
+
+// ── Feed registration endpoints ──────────────────────────────────────────────
+
+/// `GET /relay/feeds` — list all feeds across all agents.
+async fn list_feeds(State(state): State<Arc<RelayState>>) -> Json<Value> {
+    let all = state.list_feeds();
+    let feeds: Vec<Value> = all
+        .into_iter()
+        .flat_map(|(agent_id, feeds)| {
+            feeds.into_iter().map(move |feed| {
+                json!({
+                    "agent_id": agent_id,
+                    "feed_id": feed.feed_id,
+                    "topic": feed.topic,
+                    "name": feed.name,
+                    "description": feed.description,
+                    "kind": feed.kind,
+                    "rate": feed.rate,
+                    "schema": feed.schema,
+                })
+            })
+        })
+        .collect();
+    Json(json!({ "feeds": feeds }))
+}
+
+/// `GET /relay/feeds/:agent_id` — list feeds for a specific agent.
+async fn agent_feeds(
+    State(state): State<Arc<RelayState>>,
+    Path(agent_id): Path<String>,
+) -> Json<Value> {
+    let feeds = state.agent_feeds(&agent_id);
+    Json(json!({ "agent_id": agent_id, "feeds": feeds }))
 }

@@ -122,6 +122,11 @@ export default function PipelineStagesPanel({
         </div>
       </header>
 
+      <div className="pipeline-description">
+        A single command drives the full pipeline: classify the request, plan the implementation,
+        generate Rust code, then validate with compile, clippy, and test gates — all automated.
+      </div>
+
       <div className="pipeline-command" title={`roko do "${PIPELINE_PROMPT}"`}>
         <span>$</span>
         <code>roko do "{PIPELINE_PROMPT}"</code>

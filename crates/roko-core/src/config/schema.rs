@@ -134,6 +134,9 @@ pub struct RokoConfig {
     /// ISFR keeper configuration.
     #[serde(default)]
     pub isfr: ISFRSection,
+    /// Feed agent configuration.
+    #[serde(default)]
+    pub feed_agents: FeedAgentsConfig,
     #[serde(default)]
     pub runner: CoreRunnerConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -194,6 +197,7 @@ impl Default for RokoConfig {
             chain: ChainConfig::default(),
             relay: RelayConfig::default(),
             isfr: ISFRSection::default(),
+            feed_agents: FeedAgentsConfig::default(),
             runner: CoreRunnerConfig::default(),
             agents: Vec::new(),
             validation: ValidationConfig::default(),
@@ -255,6 +259,12 @@ impl RokoConfig {
     #[must_use]
     pub const fn is_stale(&self) -> bool {
         self.schema_version < CURRENT_SCHEMA_VERSION
+    }
+
+    /// Returns `true` if feed agents should be spawned at serve startup.
+    #[must_use]
+    pub const fn feed_agents_enabled(&self) -> bool {
+        self.feed_agents.enabled
     }
 
     // ---- provider / model synthesis --------------------------------------

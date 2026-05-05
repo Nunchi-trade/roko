@@ -34,11 +34,13 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/bench/provider-status", get(provider_status))
         .route("/bench/run", post(start_bench_run))
+        .route("/bench/runs", post(start_bench_run))
         .route("/bench/run/{id}", get(get_bench_run))
         .route("/bench/runs/{id}", get(get_bench_run))
         .route("/bench/run/{id}/status", get(bench_run_status))
         .route("/bench/run/{id}", delete(delete_bench_run))
         .route("/bench/runs/{id}", delete(delete_bench_run))
+        .route("/bench/runs/{id}/cancel", post(cancel_bench_run))
         .route("/bench/runs", get(list_bench_runs))
         .route("/bench/runs/compare", get(compare_bench_runs))
         .route("/bench/cost-summary", get(cost_summary))
@@ -360,6 +362,35 @@ async fn execute_bench_run(
             _failed_count += 1;
         }
 
+        // Emit per-gate verdicts so the live UI can show gate pass/fail.
+        for gv in &task_result.gate_verdicts {
+            let gate_name = gv.get("gate").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let gate_passed = gv.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
+            let gate_detail = gv.get("detail").and_then(|v| v.as_str()).map(String::from);
+            state.event_bus.publish(ServerEvent::BenchGateVerdict {
+                bench_id: run_id.clone(),
+                task_id: task_result.task_id.clone(),
+                gate: gate_name,
+                passed: gate_passed,
+                message: gate_detail,
+                duration_ms: task_result.duration_ms,
+            });
+        }
+
+        // Emit token velocity for throughput sparklines.
+        let total_tokens = task_result.tokens_in + task_result.tokens_out;
+        if task_result.duration_ms > 0 && total_tokens > 0 {
+            let tps = (total_tokens as f64) / (task_result.duration_ms as f64 / 1000.0);
+            state.event_bus.publish(ServerEvent::BenchTokenVelocity {
+                bench_id: run_id.clone(),
+                task_id: task_result.task_id.clone(),
+                tokens_per_second: tps,
+                tokens_in: task_result.tokens_in,
+                tokens_out: task_result.tokens_out,
+                duration_ms: task_result.duration_ms,
+            });
+        }
+
         // Publish task completion.
         state.event_bus.publish(ServerEvent::BenchTaskCompleted {
             bench_id: run_id.clone(),
@@ -550,6 +581,40 @@ async fn delete_bench_run(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/bench/runs/:id/cancel` -- cancel a running bench run.
+///
+/// Equivalent to DELETE but accepts POST (frontend convention).
+async fn cancel_bench_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Abort if running.
+    let handle = state.active_bench_runs.write().await.remove(&id);
+    if let Some(handle) = handle {
+        handle.handle.abort();
+    }
+    // Mark as cancelled on disk if still running.
+    match bench::load_bench_run(&state.workdir, &id).await {
+        Ok(Some(mut run)) => {
+            if run.status == BenchRunStatus::Running {
+                run.status = BenchRunStatus::Cancelled;
+                run.finished_at = Some(now_secs());
+                if let Err(err) = bench::save_bench_run(&state.workdir, &run).await {
+                    tracing::warn!(error = %err, bench_id = %id, "failed to save cancelled bench run state");
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(error = %err, bench_id = %id, "failed to load bench run for cancellation");
+        }
+    }
+    Ok((
+        axum::http::StatusCode::OK,
+        Json(json!({ "id": id, "status": "cancelled" })),
+    ))
+}
+
 /// `GET /api/bench/runs` -- list bench runs.
 async fn list_bench_runs(
     State(state): State<Arc<AppState>>,
@@ -732,6 +797,10 @@ async fn bench_events_sse(State(state): State<Arc<AppState>>) -> impl IntoRespon
                             | ServerEvent::BenchLearningEvent { .. }
                             | ServerEvent::BenchProgress { .. }
                             | ServerEvent::BenchRunCompleted { .. }
+                            | ServerEvent::BenchGateVerdict { .. }
+                            | ServerEvent::BenchTokenVelocity { .. }
+                            | ServerEvent::BenchAgentOutput { .. }
+                            | ServerEvent::BenchRegressionReport { .. }
                     );
                     if !is_bench {
                         continue;

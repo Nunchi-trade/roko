@@ -15,7 +15,7 @@ mod deployments;
 mod diagnosis;
 mod dream;
 mod event_ingest;
-mod feeds;
+pub(crate) mod feeds;
 mod gateway;
 mod heartbeats;
 mod integrations;

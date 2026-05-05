@@ -313,16 +313,13 @@ pub(crate) async fn cmd_isfr(cli: &Cli, cmd: IsfrCmd) -> Result<i32> {
                             for src in sources {
                                 let name = src.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                                 let status =
-                                    src.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                                    src.get("health").and_then(|v| v.as_str()).unwrap_or("?");
                                 let weight =
                                     src.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let failures = src
-                                    .get("consecutive_failures")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
+                                // No consecutive_failures field; show 0 when healthy
+                                let failures: u64 = if status == "live" { 0 } else { 1 };
                                 let rate_bps = src
-                                    .get("last_reading")
-                                    .and_then(|r| r.get("rate_bps"))
+                                    .get("last_rate_bps")
                                     .and_then(|v| v.as_u64());
                                 let rate_str = rate_bps
                                     .map(|b| b.to_string())

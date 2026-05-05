@@ -66,6 +66,35 @@ impl RelayHandle {
             .map_err(|_| anyhow!("relay connection closed"))
     }
 
+    /// Register a feed with the relay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the relay connection has been closed.
+    pub fn register_feed(
+        &self,
+        feed_id: impl Into<String>,
+        topic: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        kind: impl Into<String>,
+        rate: impl Into<String>,
+    ) -> Result<()> {
+        self.outbound_tx
+            .send(AgentInboundFrame::RegisterFeed {
+                feed: agent_relay::protocol::FeedDescriptor {
+                    feed_id: feed_id.into(),
+                    topic: topic.into(),
+                    name: name.into(),
+                    description: description.into(),
+                    kind: kind.into(),
+                    rate: rate.into(),
+                    schema: None,
+                },
+            })
+            .map_err(|_| anyhow!("relay connection closed"))
+    }
+
     /// Publish a message to a topic.  The relay fans the message out to all
     /// current subscribers of that topic.
     ///

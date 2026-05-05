@@ -945,7 +945,13 @@ pub fn format_dashboard_event(
         | DashboardEvent::EfficiencyTrendUpdated { .. }
         | DashboardEvent::IsfrRateComputed { .. }
         | DashboardEvent::IsfrSourceHealthChanged { .. }
-        | DashboardEvent::IsfrKeeperStateChanged { .. } => return None,
+        | DashboardEvent::IsfrKeeperStateChanged { .. }
+        | DashboardEvent::FeedTick { .. }
+        | DashboardEvent::FeedAgentOnline { .. }
+        | DashboardEvent::FeedAgentOffline { .. }
+        | DashboardEvent::ChainBlock { .. }
+        | DashboardEvent::ChainTx { .. }
+        | DashboardEvent::ChainContractEvent { .. } => return None,
     };
 
     let line = if pfx.is_empty() {

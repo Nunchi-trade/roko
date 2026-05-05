@@ -26,9 +26,11 @@ function resolveServeUrl(preferSameOrigin = true): string {
   const { protocol, hostname, port, origin } = window.location;
   if (protocol === 'file:') return 'http://localhost:6677';
 
-  // Vite dev server (for example :5173) talks to local roko serve directly.
+  // Vite dev server (for example :5173) — use relative paths so requests
+  // go through Vite's proxy to roko-serve. This ensures SSE, WebSocket,
+  // and REST all work correctly through a single origin.
   if (isLocalDevOrigin(hostname, port)) {
-    return `http://${hostWithPort(hostname, '6677')}`;
+    return preferSameOrigin ? '' : origin;
   }
 
   // In Docker/Railway, the API and frontend are served by the same origin.
@@ -38,6 +40,14 @@ function resolveServeUrl(preferSameOrigin = true): string {
 function resolveWsBase(): string {
   const env = viteEnv('VITE_ROKO_WS_BASE');
   if (env) return env.replace(/\/$/, '');
+
+  if (typeof window !== 'undefined') {
+    const { protocol, hostname, port } = window.location;
+    // On Vite dev server or same-origin: derive WS URL from current origin
+    // so WebSocket connections go through Vite's proxy.
+    const wsProto = protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProto}//${hostname}${port ? `:${port}` : ''}`;
+  }
 
   const httpBase = resolveServeUrl(false);
   return httpBase.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');

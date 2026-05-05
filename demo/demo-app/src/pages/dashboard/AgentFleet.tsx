@@ -399,13 +399,22 @@ export default function AgentFleet() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [topology, setTopology] = useState<TopoData>(EMPTY_TOPOLOGY);
   const [view, setView] = useState<FleetView>('list');
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchAll = useCallback(async () => {
-    const data = await get<Agent[]>('/api/managed-agents');
-    setAgents(Array.isArray(data) ? data : []);
+    try {
+      const data = await get<Agent[]>('/api/managed-agents');
+      setAgents(Array.isArray(data) ? data : []);
 
-    const topo = await get<TopoData>('/api/agents/topology');
-    setTopology((prev) => (sameTopology(prev, topo) ? prev : topo));
+      const topo = await get<TopoData>('/api/agents/topology');
+      setTopology((prev) => (sameTopology(prev, topo) ? prev : topo));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load agent fleet');
+    } finally {
+      setInitialLoading(false);
+    }
   }, [get]);
 
   // Initial fetch + 30s fallback poll
@@ -461,6 +470,18 @@ export default function AgentFleet() {
     [topology.edges],
   );
 
+  if (initialLoading) {
+    return (
+      <div className="dash-page progressive-reveal">
+        <div className="skeleton" style={{ height: 32, borderRadius: 6 }} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+        </div>
+      </div>
+    );
+  }
+
   /* View toggle badge */
   const viewToggle = (
     <span className="dash-inline--8">
@@ -483,7 +504,12 @@ export default function AgentFleet() {
   );
 
   return (
-    <div className="dash-page">
+    <div className="dash-page" style={{ animation: 'fadeInUp 0.35s var(--ease) both' }}>
+      {error && (
+        <div style={{ padding: '8px 12px', background: 'var(--rose-deep)', border: '1px solid var(--rose-dim)', borderRadius: 'var(--radius-md)', fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)', color: 'var(--rose-bright)', marginBottom: 8 }}>
+          {error}
+        </div>
+      )}
       {/* TOP MOSAIC */}
       <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
         <Mosaic columns={4}>

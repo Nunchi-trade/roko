@@ -268,6 +268,12 @@ fn dashboard_event_type(event: &roko_core::dashboard_snapshot::DashboardEvent) -
         DashboardEvent::IsfrRateComputed { .. } => "isfr_rate_computed",
         DashboardEvent::IsfrSourceHealthChanged { .. } => "isfr_source_health_changed",
         DashboardEvent::IsfrKeeperStateChanged { .. } => "isfr_keeper_state_changed",
+        DashboardEvent::ChainBlock { .. } => "chain_block",
+        DashboardEvent::ChainTx { .. } => "chain_tx",
+        DashboardEvent::ChainContractEvent { .. } => "chain_contract_event",
+        DashboardEvent::FeedTick { .. } => "feed_tick",
+        DashboardEvent::FeedAgentOnline { .. } => "feed_agent_online",
+        DashboardEvent::FeedAgentOffline { .. } => "feed_agent_offline",
     }
 }
 

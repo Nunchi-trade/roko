@@ -27,6 +27,8 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/feeds", get(list_feeds).post(create_feed))
+        // Catalog must be registered before the wildcard `/feeds/{id}`.
+        .route("/feeds/catalog", get(get_feed_catalog))
         // Runtime feed routes must be registered before the wildcard `/feeds/{id}`
         // so that "/feeds/runtime" is not captured as id="runtime".
         .route("/feeds/runtime", get(list_runtime_feeds))
@@ -77,6 +79,24 @@ struct CreateFeedResponse {
 struct DeleteFeedResponse {
     id: String,
     deleted: bool,
+}
+
+// ── Feed catalog types ───────────────────────────────────────────
+
+use crate::state::{FeedCatalogAgent, FeedCatalogEntry};
+
+#[derive(Debug, Serialize)]
+struct FeedCatalogResponse {
+    agents: Vec<FeedCatalogAgent>,
+    feeds: Vec<FeedCatalogEntry>,
+    stats: FeedCatalogStats,
+}
+
+#[derive(Debug, Serialize)]
+struct FeedCatalogStats {
+    total_agents: usize,
+    total_feeds: usize,
+    messages_per_sec: f64,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -161,6 +181,24 @@ async fn delete_feed(
         return Err(ApiError::not_found(format!("feed '{id}' not found")));
     }
     Ok(Json(DeleteFeedResponse { id, deleted }))
+}
+
+// ── Feed catalog handler ─────────────────────────────────────────
+
+/// `GET /api/feeds/catalog` — aggregated feed catalog from feed agents.
+async fn get_feed_catalog(
+    State(state): State<Arc<AppState>>,
+) -> Json<FeedCatalogResponse> {
+    let snapshot = state.feed_agent_catalog.read().await;
+    Json(FeedCatalogResponse {
+        agents: snapshot.agents.clone(),
+        feeds: snapshot.feeds.clone(),
+        stats: FeedCatalogStats {
+            total_agents: snapshot.agents.len(),
+            total_feeds: snapshot.feeds.len(),
+            messages_per_sec: snapshot.messages_per_sec,
+        },
+    })
 }
 
 // ── Runtime feed handlers ────────────────────────────────────────

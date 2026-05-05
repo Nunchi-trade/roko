@@ -168,6 +168,11 @@ export type ServerEvent =
   | { type: 'chain_contract_event'; blockNumber: number; txHash: string;
        logIndex: number; contract: string; eventName: string;
        decoded: Record<string, unknown> }
+  // Feed agents
+  | { type: 'feed_tick'; agentId: string; feedId: string; topic: string;
+       payload: unknown; timestampMs: number }
+  | { type: 'feed_agent_online'; agentId: string; name: string; feedCount: number }
+  | { type: 'feed_agent_offline'; agentId: string }
   // System
   | { type: 'server_shutdown' }
   | { type: 'error'; message: string };

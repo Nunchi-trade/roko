@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useLiveApi } from './useLiveApi';
 import { useBenchSSE } from './useBenchSSE';
+import { useContextEventSubscription } from '../contexts/EventStreamContext';
+import { useDebouncedRefetch } from './useDebouncedRefetch';
 import type {
   AgentStrategy,
   BenchSuite,
@@ -171,21 +173,29 @@ export function useBench() {
     })();
   }, [get]);
 
+  // Refetch history (used by mount + SSE)
+  const refetchHistory = useCallback(async () => {
+    try {
+      const raw = await get<{ runs: BenchRun[] } | BenchRun[]>('/api/bench/runs');
+      const h = Array.isArray(raw) ? raw : (raw?.runs ?? []);
+      setHistory(h.filter((r) => r.config));
+    } catch {
+      setHistory([]);
+    }
+  }, [get]);
+
   // Fetch history on mount
   useEffect(() => {
     setHistoryLoading(true);
-    (async () => {
-      try {
-        const raw = await get<{ runs: BenchRun[] } | BenchRun[]>('/api/bench/runs');
-        const h = Array.isArray(raw) ? raw : (raw?.runs ?? []);
-        setHistory(h.filter((r) => r.config));
-      } catch {
-        setHistory([]);
-      } finally {
-        setHistoryLoading(false);
-      }
-    })();
-  }, [get]);
+    refetchHistory().finally(() => setHistoryLoading(false));
+  }, [refetchHistory]);
+
+  // Auto-refresh history when a bench run completes (SSE from global stream)
+  const debouncedHistoryRefetch = useDebouncedRefetch(refetchHistory, 2000);
+  useContextEventSubscription(
+    ['BenchRunCompleted'],
+    debouncedHistoryRefetch,
+  );
 
   // ETA computation
   const eta = (() => {

@@ -1,7 +1,7 @@
 .memory-panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   padding: 16px;
   height: 100%;
   overflow-y: auto;
@@ -14,24 +14,36 @@
 }
 
 .memory-panel-title {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
   font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: var(--text-dim, #666);
+  color: var(--text-dim);
 }
 
 .memory-panel-live {
+  font-family: var(--mono);
   font-size: 10px;
+  font-weight: 600;
   padding: 2px 8px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-dim, #555);
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
 }
 
 .memory-panel-live.connected {
-  color: var(--status-success, #4ade80);
-  background: rgba(74, 222, 128, 0.1);
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+.memory-panel-description {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-soft);
+  line-height: 1.5;
+  margin-bottom: 12px;
 }
 
 .memory-panel-phases {
@@ -41,34 +53,39 @@
 
 .memory-panel-phase {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
   text-align: center;
   padding: 8px 4px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--text-primary) 2%, transparent);
+  border: 1px solid var(--glass-border);
   transition: border-color 0.3s, background 0.3s;
 }
 
 .memory-panel-phase--active {
-  border-color: rgba(74, 222, 128, 0.3);
-  background: rgba(74, 222, 128, 0.05);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+  background: color-mix(in srgb, var(--success) 5%, transparent);
 }
 
 .memory-panel-phase--done {
-  border-color: rgba(74, 222, 128, 0.2);
+  border-color: color-mix(in srgb, var(--success) 20%, transparent);
 }
 
 .memory-panel-phase-label {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
   font-size: 9px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-dim, #555);
+  color: var(--text-dim);
 }
 
 .memory-panel-phase--active .memory-panel-phase-label,
 .memory-panel-phase--done .memory-panel-phase-label {
-  color: var(--status-success, #4ade80);
+  color: var(--success);
 }
 
 .memory-panel-phase-dot {
@@ -76,63 +93,67 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--text-dim, #444);
-  margin-bottom: 4px;
+  background: var(--text-dim);
 }
 
 .memory-panel-phase--active .memory-panel-phase-dot {
-  background: var(--status-success, #4ade80);
-  box-shadow: 0 0 6px rgba(74, 222, 128, 0.4);
+  background: var(--success);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--success) 40%, transparent);
 }
 
 .memory-panel-phase--done .memory-panel-phase-dot {
-  background: var(--status-success, #4ade80);
+  background: var(--success);
 }
 
 .memory-panel-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 10px;
 }
 
 .memory-panel-column {
   padding: 12px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text-primary) 2%, transparent);
+  border: 1px solid var(--glass-border);
   transition: border-color 0.3s;
 }
 
 .memory-panel-column--cold {
-  border-color: rgba(96, 165, 250, 0.2);
+  border-color: color-mix(in srgb, var(--blue, #61afef) 20%, transparent);
 }
 
 .memory-panel-column--warm {
-  border-color: rgba(74, 222, 128, 0.2);
+  border-color: color-mix(in srgb, var(--success) 20%, transparent);
 }
 
 .memory-panel-column-label {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
   font-size: 10px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--glass-border) 50%, transparent);
 }
 
 .memory-panel-column--cold .memory-panel-column-label {
-  color: var(--status-active, #60a5fa);
+  color: var(--blue, #61afef);
+  border-bottom-color: color-mix(in srgb, var(--blue, #61afef) 15%, transparent);
 }
 
 .memory-panel-column--warm .memory-panel-column-label {
-  color: var(--status-success, #4ade80);
+  color: var(--success);
+  border-bottom-color: color-mix(in srgb, var(--success) 15%, transparent);
 }
 
 .memory-panel-metric {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  padding: 4px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  padding: 5px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--glass-border) 40%, transparent);
 }
 
 .memory-panel-metric:last-child {
@@ -143,96 +164,52 @@
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-dim, #555);
+  color: var(--text-dim);
 }
 
 .memory-panel-metric-value {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
   font-size: 14px;
   font-weight: 600;
-  color: var(--text-primary, #eee);
+  color: var(--text-primary);
 }
 
 .memory-panel-metric-value--empty {
-  color: var(--text-dim, #444);
+  color: var(--text-ghost);
 }
 
 .memory-panel-transfer {
   text-align: center;
-  padding: 16px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  padding: 16px 12px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text-primary) 2%, transparent);
+  border: 1px solid var(--glass-border);
 }
 
 .memory-panel-transfer-title {
+  font-family: var(--mono);
   font-size: 10px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--text-dim, #666);
+  color: var(--text-dim);
   margin-bottom: 8px;
 }
 
 .memory-panel-transfer-value {
-  font-family: var(--font-mono, monospace);
-  font-size: 28px;
+  font-family: var(--mono);
+  font-size: 24px;
   font-weight: 700;
   line-height: 1;
-  color: var(--text-primary, #eee);
+  color: var(--text-primary);
 }
 
 .memory-panel-transfer-value--savings {
-  color: var(--status-success, #4ade80);
+  color: var(--success);
 }
 
 .memory-panel-transfer-label {
   font-size: 11px;
-  color: var(--text-dim, #555);
-  margin-top: 4px;
-}
-
-.memory-panel-knowledge {
-  margin-top: 4px;
-  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
-  padding-top: 12px;
-}
-
-.memory-panel-knowledge-title {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-dim, #666);
-  margin-bottom: 6px;
-}
-
-.memory-panel-knowledge-row {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  font-size: 11px;
-  padding: 3px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-}
-
-.memory-panel-knowledge-type {
-  font-family: var(--font-mono, monospace);
-  font-size: 9px;
-  text-transform: uppercase;
-  flex-shrink: 0;
-  min-width: 55px;
-}
-
-.memory-panel-knowledge-type--ingested {
-  color: var(--status-active, #60a5fa);
-}
-
-.memory-panel-knowledge-type--consumed {
-  color: var(--status-success, #4ade80);
-}
-
-.memory-panel-knowledge-content {
-  color: var(--text-dim, #666);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--text-dim);
+  margin-top: 6px;
 }

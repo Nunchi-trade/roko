@@ -173,6 +173,17 @@ export function useBenchRuns() {
     const ts = new Date().toLocaleTimeString();
 
     switch (lastEvent.type) {
+      case 'BenchRunStarted':
+        setActiveRun((prev) => {
+          if (!prev) return prev;
+          return { ...prev, total: lastEvent.total_tasks };
+        });
+        setFeed((f): FeedItem[] => [
+          { text: `Run started: ${lastEvent.suite_id} (${lastEvent.total_tasks} tasks)`, type: 'start' as const, ts },
+          ...f,
+        ].slice(0, 100));
+        break;
+
       case 'BenchTaskStarted':
         setAgentOutput([]);
         setCurrentAgentId(null);
@@ -314,17 +325,13 @@ export function useBenchRuns() {
     try {
       const res = await post<{ id: string }>('/api/bench/runs', {
         suite_id: suite.id,
-        config: {
+        label: `${model} / ${suite.name}`,
+        overrides: {
           model,
-          provider,
+          backend: provider || undefined,
           temperature: config.temperature,
           max_tokens: config.maxTokens,
-          timeout_secs: config.timeoutSecs,
           strategy: config.strategy,
-          retries: config.retries,
-          gates: config.gates,
-          max_cost_usd: config.maxCostUsd,
-          parallel: config.parallel,
         },
       });
 

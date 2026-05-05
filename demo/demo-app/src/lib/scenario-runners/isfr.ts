@@ -36,22 +36,22 @@ export const ISFR_COMMANDS: CommandDef[] = [
 export const isfrScenario: ClickableScenario = {
   id: 'isfr',
   title: 'ISFR',
-  subtitle: 'Four specialized agents compute a DeFi risk-free rate.',
+  subtitle: 'Four AI agents collaborate to compute a composite DeFi benchmark rate from lending, staking, and yield data.',
   panes: 4,
-  labels: ['ISFRKeeper', 'Lending Scout', 'Staking Scout', 'ISFR Oracle'],
+  labels: ['Rate Keeper', 'Lending Analyst', 'Staking Analyst', 'Rate Oracle'],
   panel: true,
   promptBar: false,
   mirageBar: true,
   category: 'chain',
-  features: ['Agent swarm', 'Rate aggregation', 'Oracle synthesis'],
+  features: ['4 parallel agents', 'Lending + staking analysis', 'Composite rate synthesis'],
   durationHint: '<3 min',
   accent: 'amber',
   icon: 'chain',
   steps: [
-    { label: 'Poll', sublabel: 'rate sources' },
-    { label: 'Scout', sublabel: 'lending and staking' },
-    { label: 'Monitor', sublabel: 'composite rate' },
-    { label: 'Synthesize', sublabel: 'final ISFR' },
+    { label: 'Poll sources', sublabel: 'keeper collects raw rate data' },
+    { label: 'Analyze', sublabel: 'scouts study lending and staking yields' },
+    { label: 'Aggregate', sublabel: 'combine into weighted composite' },
+    { label: 'Publish', sublabel: 'oracle publishes final ISFR' },
   ],
   commands: ISFR_COMMANDS,
 
@@ -81,9 +81,11 @@ export const isfrScenario: ClickableScenario = {
     if (result.cost) ctx.setMetric(`cost-${commandId}`, result.cost);
     if (result.tokens) ctx.setMetric(`tokens-${commandId}`, result.tokens);
 
-    // Also feed sidebar stats
+    // Also feed sidebar stats (model/cost/tokens/time) for provenance
+    if (result.model) ctx.setMetric('model', result.model);
     if (result.cost) ctx.setMetric('cost', result.cost);
     if (result.tokens) ctx.setMetric('tokens', result.tokens);
+    ctx.setMetric('time', `${(result.elapsed ?? 0).toFixed(1)}s`);
 
     return { ok: result.ok, error: result.error };
   },

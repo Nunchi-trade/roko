@@ -23,10 +23,10 @@ function fmtTokens(n: number): string {
 type FlowStep = 'connect' | 'scan' | 'write' | 'recommend';
 
 const FLOW_STEPS: { id: FlowStep; label: string; desc: string; icon: string }[] = [
-  { id: 'connect', label: 'Connect', desc: 'Verify local Ethereum fork', icon: '1' },
-  { id: 'scan', label: 'Scan', desc: 'Query DeFi lending rates', icon: '2' },
-  { id: 'write', label: 'Write', desc: 'Store analysis to knowledge', icon: '3' },
-  { id: 'recommend', label: 'Recommend', desc: 'USDC allocation strategy', icon: '4' },
+  { id: 'connect', label: 'Connect', desc: 'Verify Anvil fork is running', icon: '1' },
+  { id: 'scan', label: 'Read Rates', desc: 'Query Aave V3 + Compound lending rates', icon: '2' },
+  { id: 'write', label: 'Save Analysis', desc: 'Write structured analysis to knowledge store', icon: '3' },
+  { id: 'recommend', label: 'Strategy', desc: 'Recommend optimal USDC allocation', icon: '4' },
 ];
 
 export default function OracleFlowPanel({
@@ -56,10 +56,16 @@ export default function OracleFlowPanel({
   return (
     <section className="oracle-panel" aria-label="Oracle flow">
       <div className="oracle-panel-header">
-        <span className="oracle-panel-title">Oracle Flow</span>
+        <span className="oracle-panel-title">Oracle Flow: Data → Knowledge → Strategy</span>
         <span className={`oracle-panel-live${hasAnyData ? ' connected' : ''}`}>
           {panelState === 'pending' ? 'ready' : 'live'}
         </span>
+      </div>
+
+      <div className="oracle-panel-description">
+        A data agent reads live DeFi lending rates from a local Ethereum fork (Anvil) and writes
+        structured analysis to the knowledge store. A strategy agent then reads that analysis and
+        recommends an optimal USDC allocation across protocols.
       </div>
 
       <div className="oracle-panel-flow">

@@ -101,9 +101,9 @@ export function useTerminal(sessionId?: string) {
     const id = sessionId ?? `t${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
     const term = new Terminal({
       theme: rosedustTheme,
-      fontFamily: "'JetBrainsMono Nerd Font Mono', 'JetBrains Mono', 'SF Mono', monospace",
-      fontSize: 12,
-      lineHeight: 1.1,
+      fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace",
+      fontSize: 13,
+      lineHeight: 1.25,
       letterSpacing: 0,
       cursorBlink: true,
       cursorStyle: 'bar',
@@ -330,7 +330,7 @@ export function useTerminal(sessionId?: string) {
           if (!settled) {
             settled = true;
             oscListeners.delete(listener);
-            console.warn(`[useTerminal] execCmd timed out after ${timeout}ms: ${cmd.slice(0, 80)}`);
+            console.warn(`[useTerminal] execCmd timed out (${timeout}ms): ${cmd.slice(0, 60)}`);
             resolve({ ok: false, exitCode: -1 });
           }
         }, timeout);
@@ -402,7 +402,7 @@ export function useTerminal(sessionId?: string) {
     function connectWs() {
       if (disposed) return;
       const url = `${WS_BASE}/ws/terminal/${id}`;
-      console.log(`[useTerminal:${id}] connecting to ${url}`);
+      console.debug(`[useTerminal:${id}] connecting to ${url}`);
       const ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
 
@@ -443,7 +443,7 @@ export function useTerminal(sessionId?: string) {
             if (!disposed) setShellWarning(null);
             handle.status = 'connected';
             if (!disposed) setStatus('connected');
-            console.log(`[useTerminal:${id}] shell ready (prompt detected)`);
+            console.debug(`[useTerminal:${id}] shell ready (prompt detected)`);
           } else {
             // Prompt not found but WS is open — mark connected anyway
             // so scenarios can attempt to proceed (they have their own checks).
@@ -481,28 +481,60 @@ export function useTerminal(sessionId?: string) {
 
       ws.onmessage = (e: MessageEvent) => {
         if (disposed) return;
+        let raw: string;
         if (e.data instanceof ArrayBuffer) {
-          const text = new TextDecoder().decode(e.data);
-          const cleaned = stripTerminalNoise(text);
-          if (!ready) {
-            if (!muted) pendingMessages.push(new TextEncoder().encode(cleaned));
-            appendOutput(cleaned);
-            return;
-          }
-          if (cleaned.length > 0) {
-            if (!muted) term.write(cleaned);
-            appendOutput(cleaned);
-          }
+          raw = new TextDecoder().decode(e.data);
         } else if (typeof e.data === 'string') {
-          const cleaned = stripTerminalNoise(e.data);
-          if (!ready) {
-            if (!muted) pendingMessages.push(new TextEncoder().encode(cleaned));
-            appendOutput(cleaned);
-            return;
+          raw = e.data;
+        } else {
+          return;
+        }
+
+        // Always append raw text to outBuf for marker/prompt detection.
+        appendOutput(raw);
+
+        // Always write raw data through xterm's parser so OSC 7777
+        // markers are intercepted — even during muted (silent) mode.
+        // The key insight: term.parser.registerOscHandler only fires
+        // when data passes through term.write(). Skipping it during
+        // muted mode caused execCmd to always time out for silent commands.
+        //
+        // To hide visual output during muted mode, we write to an offscreen
+        // buffer instead: the OSC handler still fires, but the visible
+        // terminal doesn't show the command text.
+        if (!ready) {
+          pendingMessages.push(new TextEncoder().encode(raw));
+          return;
+        }
+
+        if (muted) {
+          // During muted mode, we still need the OSC parser to fire.
+          // Write the raw data so the parser processes it, but immediately
+          // erase visible output by clearing the terminal line.
+          // Actually, we only need to feed it through the parser for OSC.
+          // Detect OSC 7777 manually instead of relying on term.write.
+          const oscMatch = raw.match(/\x1b\]7777;D;(-?\d+);([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
+          if (oscMatch) {
+            const exitCode = parseInt(oscMatch[1], 10);
+            const marker = oscMatch[2];
+            for (const listener of oscListeners) {
+              listener(exitCode, marker);
+            }
           }
+        } else {
+          // For visible commands, also check for OSC 7777 markers before
+          // stripping them — in case execCmd is ever called without silent.
+          const oscMatch = raw.match(/\x1b\]7777;D;(-?\d+);([^\x07\x1b]*?)(?:\x07|\x1b\\)/);
+          if (oscMatch) {
+            const exitCode = parseInt(oscMatch[1], 10);
+            const marker = oscMatch[2];
+            for (const listener of oscListeners) {
+              listener(exitCode, marker);
+            }
+          }
+          const cleaned = stripTerminalNoise(raw);
           if (cleaned.length > 0) {
-            if (!muted) term.write(cleaned);
-            appendOutput(cleaned);
+            term.write(cleaned);
           }
         }
       };

@@ -15,7 +15,7 @@ export function useCountUp(target: number, duration = 900, enabled = true): numb
   const valRef = useRef(0);
 
   useEffect(() => {
-    if (!enabled || target === 0) {
+    if (!enabled) {
       valRef.current = target;
       setVal(target);
       prevTarget.current = target;
