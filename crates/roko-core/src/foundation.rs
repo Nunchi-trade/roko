@@ -150,7 +150,7 @@ pub struct ModelCallResponse {
 }
 
 /// Token usage and cost from a model call.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
