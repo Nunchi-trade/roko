@@ -12,6 +12,10 @@ use anyhow::{Context, Result};
 use roko_core::RuntimeEvent;
 use roko_core::agent::ModelSpec;
 use roko_core::config::GatesConfig;
+use roko_core::defaults::{
+    DEFAULT_AGENT_TURN_LIMIT, DEFAULT_RUNNER_MAX_CONCURRENT_PLANS,
+    DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT,
+};
 // TimeoutConfig-derived helpers: agent_dispatch_timeout, plan_total_timeout,
 // llm_call_timeout, gate_timeout — see below.
 use roko_core::runtime_event::WorkflowOutcome as RuntimeWorkflowOutcome;
@@ -21,13 +25,13 @@ use roko_daimon::{
     TaskStrategyObservation,
 };
 use roko_fs::RokoLayout;
-use roko_gate::PlanComplexity;
+use roko_gate::{PlanComplexity, classify_gate_failure, render_failure_classification};
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
     RecoveryEngine,
 };
-use roko_runtime::HttpEventSink;
+use roko_runtime::{HttpEventSink, RunLedger, WorkflowConfig};
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
@@ -41,6 +45,7 @@ use crate::dispatch::{
 use crate::inline::DiffEntry;
 use crate::knowledge_helpers::{build_knowledge_routing_advice, neuro_prompt_task_category};
 use crate::task_parser::TaskDef;
+use roko_learn::post_gate_reflection::{PostGateReflectionStore, ReflectionGateOutcome};
 use roko_neuro::KnowledgeStore;
 
 use super::agent_events::{AgentStreamBuffer, handle_agent_event};
@@ -59,8 +64,6 @@ use super::types::{
     RetryAction, RunConfig, RunOutcome, RunTotals, RunnerEvent, RunnerFailureKind,
     TaskAttemptOutcome, TaskAttemptRef, TaskAttemptStatus,
 };
-
-const DEFAULT_AGENT_TURN_LIMIT: u32 = 50;
 
 // ─── RunReport ──────────────────────────────────────────────────────────
 
@@ -200,7 +203,7 @@ pub async fn run(
     let task_timeout_secs = duration_secs(agent_dispatch_timeout(config));
 
     let exec_config = ExecutorConfig {
-        max_concurrent_plans: 4,
+        max_concurrent_plans: DEFAULT_RUNNER_MAX_CONCURRENT_PLANS,
         max_concurrent_tasks,
         max_auto_fix_iterations: config.max_retries,
         task_timeout_secs,
@@ -441,6 +444,36 @@ pub async fn run(
     let mut state = RunState::new(total_tasks);
     let mut stream_buf = AgentStreamBuffer::new();
     let mut dream_completion_pending = false;
+
+    // Run ledger — optional enhancement for tracking task starts, completions,
+    // and gate outcomes in a typed JSONL file.
+    let mut run_ledger: Option<RunLedger> = match std::panic::catch_unwind(
+        std::panic::AssertUnwindSafe(|| {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let prompt_summary = plans
+                .first()
+                .map(|p| p.id.clone())
+                .unwrap_or_else(|| "multi-plan".to_string());
+            RunLedger::new(
+                state.run_id(),
+                prompt_summary,
+                WorkflowConfig::default(),
+                now_ms,
+            )
+        }),
+    ) {
+        Ok(ledger) => {
+            debug!("run ledger initialized");
+            Some(ledger)
+        }
+        Err(_) => {
+            warn!("failed to initialize run ledger — continuing without it");
+            None
+        }
+    };
 
     // Compute task fingerprints once at startup so every subsequent
     // `save_snapshot` writes them into `run-state.json` for the strict
@@ -1069,21 +1102,39 @@ pub async fn run(
                                 // agent understands what went wrong and can adjust.
                                 {
                                     let attempt_num = state.iteration_for(&completion.plan_id, &completion.task_id) + 1;
-                                    let gate_output: String = completion.output.chars().take(3000).collect();
-                                    let agent_prev: String = state.agent_output.chars().take(2000).collect();
-                                    let strategy_hint = if state.iteration_for(&completion.plan_id, &completion.task_id) >= 3 {
-                                        "Your previous approaches have failed multiple times. \
-                                         You MUST try a fundamentally different strategy."
-                                    } else {
-                                        "Try a different approach than your previous attempt."
-                                    };
-                                    let replan_context = format!(
-                                        "\n\n## IMPORTANT: Your previous attempt failed\n\n\
-                                         This is attempt {attempt_num}.\n\n\
-                                         ### Gate error output\n```\n{gate_output}\n```\n\n\
-                                         ### What you did last time\n```\n{agent_prev}\n```\n\n\
-                                         {strategy_hint}",
+                                    let mut replan_context = build_gate_retry_context(
+                                        &completion.output,
+                                        &state.agent_output,
+                                        attempt_num,
                                     );
+
+                                    // Append lessons from past post-gate reflections.
+                                    let gate_name = completion
+                                        .verdicts
+                                        .iter()
+                                        .find(|v| !v.passed)
+                                        .map(|v| v.gate_name.as_str())
+                                        .unwrap_or("unknown");
+                                    let lessons = lessons_from_post_gate_reflections(
+                                        &config.layout.learn_dir(),
+                                        gate_name,
+                                        &completion.task_id,
+                                    );
+                                    if !lessons.is_empty() {
+                                        replan_context.push_str(
+                                            "\n\n### Lessons from past failures on this gate\n",
+                                        );
+                                        for lesson in &lessons {
+                                            replan_context
+                                                .push_str(&format!("- {lesson}\n"));
+                                        }
+                                        debug!(
+                                            gate = %gate_name,
+                                            lessons = lessons.len(),
+                                            "post-gate reflection lessons added to retry prompt"
+                                        );
+                                    }
+
                                     state.set_replan_context(
                                         &completion.plan_id,
                                         &completion.task_id,
@@ -4243,6 +4294,35 @@ fn gate_effect_key(plan_id: &str, task_id: &str, rung: u32, kind: GateCompletion
     format!("{kind:?}:{plan_id}:{task_id}:{rung}")
 }
 
+/// Build enriched retry context for the agent after a gate failure.
+///
+/// Uses structured error classification from `roko_gate` to provide the agent
+/// with a machine-readable analysis of what went wrong, alongside truncated
+/// excerpts of the raw gate output and previous agent output.
+fn build_gate_retry_context(gate_output: &str, prev_agent_output: &str, attempt_num: u32) -> String {
+    let classification = classify_gate_failure("gate", gate_output);
+    let analysis = render_failure_classification(&classification);
+
+    let gate_excerpt = if gate_output.len() > 3000 {
+        &gate_output[..3000]
+    } else {
+        gate_output
+    };
+    let agent_excerpt = if prev_agent_output.len() > 2000 {
+        &prev_agent_output[..2000]
+    } else {
+        prev_agent_output
+    };
+
+    format!(
+        "## IMPORTANT: Your previous attempt failed\n\n\
+         Attempt {attempt_num} failed.\n\n\
+         ### Error analysis\n{analysis}\n\n\
+         ### Gate error output\n```\n{gate_excerpt}\n```\n\n\
+         ### What you did last time\n```\n{agent_excerpt}\n```"
+    )
+}
+
 /// Commit working tree changes for a completed task.
 ///
 /// Only acts if there are uncommitted changes. Silently succeeds if git is
@@ -4288,6 +4368,33 @@ fn commit_task_changes(workdir: &std::path::Path, plan_id: &str, task_id: &str) 
     }
 }
 
+/// Extract lessons from past post-gate reflections for a specific gate.
+///
+/// Returns up to 3 de-duplicated lessons from failed reflections with confidence
+/// above 0.3. If the store file is missing or malformed, returns an empty vec.
+fn lessons_from_post_gate_reflections(
+    learn_dir: &Path,
+    gate_name: &str,
+    _task_id: &str,
+) -> Vec<String> {
+    let path = learn_dir.join("post-gate-reflections.json");
+    let store = PostGateReflectionStore::load(&path);
+
+    let mut lessons: Vec<String> = store
+        .records
+        .iter()
+        .filter(|r| r.trigger_gate == gate_name)
+        .filter(|r| matches!(r.outcome, ReflectionGateOutcome::Failed))
+        .filter(|r| r.confidence > 0.3)
+        .filter(|r| !r.proposed_lesson.is_empty())
+        .map(|r| r.proposed_lesson.clone())
+        .collect();
+
+    lessons.dedup();
+    lessons.truncate(3);
+    lessons
+}
+
 fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -> RunReport {
     let plan_reports: Vec<PlanReport> = plans
         .iter()
@@ -4324,5 +4431,242 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
         total_agent_calls: state.total_agent_calls,
         duration: state.elapsed(),
         failure_reasons: state.failure_reasons.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_gate_retry_context_compile_error_produces_analysis() {
+        let gate_output = "error[E0433]: failed to resolve: use of undeclared crate or module `foo`\n\
+                           --> src/lib.rs:3:5\n  |\n3 | use foo::bar;\n  |     ^^^ use of undeclared crate or module `foo`";
+        let agent_output = "I added `use foo::bar;` to import the module.";
+        let result = build_gate_retry_context(gate_output, agent_output, 2);
+
+        assert!(result.contains("## IMPORTANT: Your previous attempt failed"));
+        assert!(result.contains("Attempt 2 failed."));
+        assert!(result.contains("### Error analysis"));
+        // The analysis should contain structured JSON with the classification
+        assert!(result.contains("\"primary\""));
+        assert!(result.contains("### Gate error output"));
+        assert!(result.contains("error[E0433]"));
+        assert!(result.contains("### What you did last time"));
+        assert!(result.contains("use foo::bar"));
+    }
+
+    #[test]
+    fn build_gate_retry_context_truncates_long_output() {
+        let gate_output = "x".repeat(5000);
+        let agent_output = "y".repeat(4000);
+        let result = build_gate_retry_context(&gate_output, &agent_output, 1);
+
+        // Gate output truncated to 3000 chars
+        let gate_section_start = result.find("### Gate error output").unwrap();
+        let agent_section_start = result.find("### What you did last time").unwrap();
+        let gate_section = &result[gate_section_start..agent_section_start];
+        // Count the 'x' chars in the gate section — should be 3000, not 5000
+        let x_count = gate_section.chars().filter(|c| *c == 'x').count();
+        assert_eq!(x_count, 3000);
+
+        // Agent output truncated to 2000 chars
+        let agent_section = &result[agent_section_start..];
+        let y_count = agent_section.chars().filter(|c| *c == 'y').count();
+        assert_eq!(y_count, 2000);
+    }
+
+    #[test]
+    fn build_gate_retry_context_test_output_preserves_test_names() {
+        let gate_output = "test result: FAILED. 9 passed; 1 failed; 0 ignored\n\
+                           failures:\n    tests::my_important_test\n\
+                           thread 'tests::my_important_test' panicked at assertion failed: expected 42, got 0";
+        let agent_output = "I implemented the function but forgot to handle the edge case.";
+        let result = build_gate_retry_context(gate_output, agent_output, 3);
+
+        assert!(result.contains("Attempt 3 failed."));
+        assert!(result.contains("tests::my_important_test"));
+        assert!(result.contains("assertion failed"));
+        // Classification should identify this as a test failure
+        assert!(result.contains("test_expectation_failure"));
+    }
+}
+
+#[cfg(test)]
+mod tests_post_gate_reflection_lessons {
+    use super::*;
+    use roko_learn::post_gate_reflection::{
+        PostGateReflectionRecord, PostGateReflectionStore, ReflectionAdmissionStatus,
+        ReflectionGateOutcome,
+    };
+    use tempfile::TempDir;
+
+    fn make_record(
+        gate: &str,
+        outcome: ReflectionGateOutcome,
+        confidence: f64,
+        lesson: &str,
+    ) -> PostGateReflectionRecord {
+        PostGateReflectionRecord {
+            reflection_id: format!("test-{}", lesson.len()),
+            plan_id: None,
+            task_id: Some("task-1".to_string()),
+            episode_id: None,
+            trigger_gate: gate.to_string(),
+            outcome,
+            failure_pattern_ids: vec![],
+            pass_evidence: vec![],
+            proposed_lesson: lesson.to_string(),
+            confidence,
+            evidence_count: 1,
+            admission_status: ReflectionAdmissionStatus::Candidate,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn missing_store_path_returns_empty_vec() {
+        let dir = TempDir::new().unwrap();
+        let learn_dir = dir.path().join("nonexistent");
+        let result = lessons_from_post_gate_reflections(&learn_dir, "compile", "task-1");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn matching_failed_records_are_included() {
+        let dir = TempDir::new().unwrap();
+        let learn_dir = dir.path();
+        let store = PostGateReflectionStore {
+            records: vec![
+                make_record(
+                    "compile",
+                    ReflectionGateOutcome::Failed,
+                    0.5,
+                    "Fix type mismatch in handler",
+                ),
+                make_record(
+                    "compile",
+                    ReflectionGateOutcome::Failed,
+                    0.6,
+                    "Check import paths",
+                ),
+            ],
+            candidates: vec![],
+        };
+        store
+            .save(&learn_dir.join("post-gate-reflections.json"))
+            .unwrap();
+
+        let result = lessons_from_post_gate_reflections(learn_dir, "compile", "task-1");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "Fix type mismatch in handler");
+        assert_eq!(result[1], "Check import paths");
+    }
+
+    #[test]
+    fn only_top_3_lessons_returned() {
+        let dir = TempDir::new().unwrap();
+        let learn_dir = dir.path();
+        let store = PostGateReflectionStore {
+            records: vec![
+                make_record("test", ReflectionGateOutcome::Failed, 0.5, "Lesson A"),
+                make_record("test", ReflectionGateOutcome::Failed, 0.6, "Lesson B"),
+                make_record("test", ReflectionGateOutcome::Failed, 0.7, "Lesson C"),
+                make_record("test", ReflectionGateOutcome::Failed, 0.8, "Lesson D"),
+                make_record("test", ReflectionGateOutcome::Failed, 0.9, "Lesson E"),
+            ],
+            candidates: vec![],
+        };
+        store
+            .save(&learn_dir.join("post-gate-reflections.json"))
+            .unwrap();
+
+        let result = lessons_from_post_gate_reflections(learn_dir, "test", "task-1");
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn passed_outcomes_excluded() {
+        let dir = TempDir::new().unwrap();
+        let learn_dir = dir.path();
+        let store = PostGateReflectionStore {
+            records: vec![
+                make_record(
+                    "compile",
+                    ReflectionGateOutcome::Passed,
+                    0.8,
+                    "Good approach",
+                ),
+                make_record(
+                    "compile",
+                    ReflectionGateOutcome::Failed,
+                    0.5,
+                    "Fix the bug",
+                ),
+            ],
+            candidates: vec![],
+        };
+        store
+            .save(&learn_dir.join("post-gate-reflections.json"))
+            .unwrap();
+
+        let result = lessons_from_post_gate_reflections(learn_dir, "compile", "task-1");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "Fix the bug");
+    }
+
+    #[test]
+    fn low_confidence_records_excluded() {
+        let dir = TempDir::new().unwrap();
+        let learn_dir = dir.path();
+        let store = PostGateReflectionStore {
+            records: vec![
+                make_record(
+                    "compile",
+                    ReflectionGateOutcome::Failed,
+                    0.2,
+                    "Low confidence",
+                ),
+                make_record(
+                    "compile",
+                    ReflectionGateOutcome::Failed,
+                    0.5,
+                    "High confidence",
+                ),
+            ],
+            candidates: vec![],
+        };
+        store
+            .save(&learn_dir.join("post-gate-reflections.json"))
+            .unwrap();
+
+        let result = lessons_from_post_gate_reflections(learn_dir, "compile", "task-1");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "High confidence");
+    }
+
+    #[test]
+    fn different_gate_records_excluded() {
+        let dir = TempDir::new().unwrap();
+        let learn_dir = dir.path();
+        let store = PostGateReflectionStore {
+            records: vec![
+                make_record("test", ReflectionGateOutcome::Failed, 0.5, "Test lesson"),
+                make_record(
+                    "compile",
+                    ReflectionGateOutcome::Failed,
+                    0.5,
+                    "Compile lesson",
+                ),
+            ],
+            candidates: vec![],
+        };
+        store
+            .save(&learn_dir.join("post-gate-reflections.json"))
+            .unwrap();
+
+        let result = lessons_from_post_gate_reflections(learn_dir, "compile", "task-1");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "Compile lesson");
     }
 }
