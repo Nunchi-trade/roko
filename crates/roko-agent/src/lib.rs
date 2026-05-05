@@ -70,6 +70,7 @@ pub mod nl_to_format;
 pub mod ollama;
 pub mod openai_agent;
 pub mod openai_compat_backend;
+pub mod observer;
 pub mod perplexity;
 pub mod pointer;
 pub mod pool;
@@ -121,6 +122,7 @@ pub use model_call_service::ModelCallService;
 pub use multi_pool::{KillReport, MultiAgentPool, WarmEntry};
 pub use ollama::agent::{OllamaAgent, OllamaLlmBackend};
 pub use openai_compat_backend::OpenAiCompatLlmBackend;
+pub use observer::{InferenceObserver, NoopInferenceObserver};
 pub use perplexity::{
     Annotation, PerplexityChatAgent, PerplexityDeepResearchAgent, PerplexityEmbedAgent,
     PerplexityMetadata, PerplexitySearchClient, SearchOptions, SearchResult,

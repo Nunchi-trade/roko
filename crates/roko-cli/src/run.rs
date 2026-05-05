@@ -450,6 +450,9 @@ fn build_workflow_effect_services(
         affect_enabled: true,
         cascade_enabled,
         run_id: Some(format!("cli_workflow_{}", Utc::now().timestamp_millis())),
+        inference_observer: Some(Arc::new(
+            crate::inference_observer::RuntimeEventInferenceObserver::new(),
+        )),
     })
     .map_err(|error| anyhow!("build workflow services: {error}"))?;
 

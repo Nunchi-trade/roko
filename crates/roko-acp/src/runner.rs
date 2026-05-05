@@ -465,6 +465,7 @@ pub async fn run_with_workflow_engine(
         affect_enabled: false,
         cascade_enabled: true,
         run_id: Some(format!("acp_workflow_{session_id}")),
+        inference_observer: None,
     })
     .map_err(|error| anyhow::anyhow!("build workflow services: {error}"))?
     .effect_services();
