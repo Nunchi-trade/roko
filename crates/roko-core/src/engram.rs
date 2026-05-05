@@ -92,6 +92,9 @@ pub struct Engram {
     /// Optional emotional metadata associated with this engram.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emotional_tag: Option<EmotionalTag>,
+    /// Demurrage balance in [0.0, 1.0]. Decays over time; refreshed on access.
+    #[serde(default = "default_balance")]
+    pub balance: f64,
 }
 
 impl Engram {
@@ -142,6 +145,11 @@ impl Engram {
     #[must_use]
     pub fn age_ms(&self, now_ms: i64) -> i64 {
         (now_ms - self.created_at_ms).max(0)
+    }
+
+    /// Reset the demurrage balance to full (1.0), as if freshly accessed.
+    pub fn touch(&mut self) {
+        self.balance = 1.0;
     }
 
     /// Get a tag value by key.
@@ -311,6 +319,7 @@ pub struct EngramBuilder {
     fingerprint: Option<HdcFingerprint>,
     attestation: Option<Attestation>,
     emotional_tag: Option<EmotionalTag>,
+    balance: f64,
 }
 
 impl EngramBuilder {
@@ -329,6 +338,7 @@ impl EngramBuilder {
             fingerprint: None,
             attestation: None,
             emotional_tag: None,
+            balance: 1.0,
         }
     }
 
@@ -405,6 +415,13 @@ impl EngramBuilder {
         self
     }
 
+    /// Set the initial demurrage balance (defaults to 1.0).
+    #[must_use]
+    pub fn balance(mut self, balance: f64) -> Self {
+        self.balance = balance;
+        self
+    }
+
     /// Finalize the engram, computing its content hash.
     #[must_use]
     pub fn build(self) -> Engram {
@@ -422,10 +439,16 @@ impl EngramBuilder {
             tags: self.tags,
             attestation: self.attestation,
             emotional_tag: self.emotional_tag,
+            balance: self.balance,
         };
         engram.id = engram.content_hash();
         engram
     }
+}
+
+/// Default demurrage balance for new or deserialized engrams.
+fn default_balance() -> f64 {
+    1.0
 }
 
 /// Current Unix time in milliseconds.
@@ -448,6 +471,7 @@ mod tests {
         assert!(s.fingerprint.is_none());
         assert!(s.attestation.is_none());
         assert!(s.emotional_tag.is_none());
+        assert!((s.balance - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -699,5 +723,53 @@ mod tests {
             left.at_position(13),
             Some(HdcVector::from_seed(b"left").permute(13))
         );
+    }
+
+    #[test]
+    fn builder_balance_defaults_to_one() {
+        let s = Engram::builder(Kind::Task).build();
+        assert!((s.balance - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn builder_balance_sets_custom_value() {
+        let s = Engram::builder(Kind::Task).balance(0.42).build();
+        assert!((s.balance - 0.42).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn content_hash_ignores_balance() {
+        let a = Engram::builder(Kind::Task)
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .balance(1.0)
+            .build();
+        let b = Engram::builder(Kind::Task)
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .balance(0.3)
+            .build();
+        assert_eq!(a.id, b.id);
+    }
+
+    #[test]
+    fn serde_defaults_missing_balance_to_one() {
+        // Serialize an engram, strip the balance field, then deserialize.
+        let s = Engram::builder(Kind::Task)
+            .body(Body::text("hello"))
+            .created_at_ms(0)
+            .build();
+        let mut json: serde_json::Value = serde_json::to_value(&s).unwrap();
+        json.as_object_mut().unwrap().remove("balance");
+        let parsed: Engram = serde_json::from_value(json).unwrap();
+        assert!((parsed.balance - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn touch_resets_balance_to_one() {
+        let mut s = Engram::builder(Kind::Task).balance(0.1).build();
+        assert!((s.balance - 0.1).abs() < f64::EPSILON);
+        s.touch();
+        assert!((s.balance - 1.0).abs() < f64::EPSILON);
     }
 }
