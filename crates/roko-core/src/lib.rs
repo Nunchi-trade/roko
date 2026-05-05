@@ -104,6 +104,8 @@ pub mod heartbeat;
 pub mod immune;
 /// Atomic file I/O utilities for crash-safe state persistence.
 pub mod io;
+/// ISFRFeed — relay-to-bus bridge for ISFR rate data.
+pub mod isfr_feed;
 /// Marketplace job types shared between serve, TUI, and CLI.
 pub mod job;
 pub mod kind;
