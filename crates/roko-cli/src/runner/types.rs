@@ -1294,6 +1294,9 @@ pub struct RunConfig {
     /// re-emits it as a normalized `ProjectionEvent` for TUI / HTTP / CLI
     /// subscribers. `None` means events are not mirrored.
     pub projection: Option<Arc<super::projection::Projection>>,
+    /// Optional non-blocking HTTP sink for forwarding canonical RuntimeEvents
+    /// to a running `roko serve` process.
+    pub http_event_sink: Option<roko_runtime::HttpEventSink>,
     /// When true, print real-time agent and task lifecycle events to
     /// stderr instead of showing a spinner. Enabled in non-quiet,
     /// non-json, non-approval CLI mode.
@@ -1416,6 +1419,7 @@ impl RunConfig {
             // through the full runner setup (tests, integration shims).
             feedback_facade: None,
             projection: None,
+            http_event_sink: None,
         }
     }
 }
@@ -1453,6 +1457,7 @@ impl Default for RunConfig {
             feed_registry: None,
             feedback_facade: None,
             projection: None,
+            http_event_sink: None,
             stream_to_stderr: false,
             warm_cache: true,
         }
@@ -1492,6 +1497,7 @@ impl std::fmt::Debug for RunConfig {
                 &self.connector_registry.as_ref().map(|_| ".."),
             )
             .field("feed_registry", &self.feed_registry.as_ref().map(|_| ".."))
+            .field("http_event_sink", &self.http_event_sink.as_ref().map(|_| ".."))
             .field("stream_to_stderr", &self.stream_to_stderr)
             .field("warm_cache", &self.warm_cache)
             .finish()

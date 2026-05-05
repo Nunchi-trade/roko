@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 use roko_core::agent::ModelSpec;
 use roko_core::config::GatesConfig;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
+use roko_core::runtime_event::WorkflowOutcome as RuntimeWorkflowOutcome;
+use roko_core::RuntimeEvent;
 use roko_core::{AgentRole, ContentHash, PhaseKind, PlanPhase};
 use roko_daimon::{
     AffectEngine as _, AffectEvent, DispatchParams, SomaticSignal, StrategyCoordinates,
@@ -24,6 +26,7 @@ use roko_orchestrator::{
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
     RecoveryEngine,
 };
+use roko_runtime::HttpEventSink;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
@@ -183,6 +186,9 @@ pub async fn run(
     };
 
     let mut config = config.clone();
+    if config.http_event_sink.is_none() {
+        config.http_event_sink = HttpEventSink::from_env();
+    }
     let paths = PersistPaths::from_workdir(&config.workdir)?;
     let snapshot_writer = SnapshotWriter::new(4);
     persist::cleanup_orphaned_agents(&paths);
@@ -1649,6 +1655,7 @@ fn emit_runner_event(
         tui,
         config.projection.as_ref(),
         config.feedback_facade.as_ref(),
+        config.http_event_sink.as_ref(),
         event,
         None,
     );
@@ -1665,7 +1672,7 @@ fn emit_runner_event_facadeless(
     tui: &TuiBridge,
     event: RunnerEvent,
 ) {
-    emit_runner_event_with_facades(paths, state, tui, None, None, event, None);
+    emit_runner_event_with_facades(paths, state, tui, None, None, None, event, None);
 }
 
 /// Internal variant accepting the optional projection + feedback facades.
@@ -1675,6 +1682,7 @@ fn emit_runner_event_with_facades(
     tui: &TuiBridge,
     projection: Option<&Arc<super::projection::Projection>>,
     feedback_facade: Option<&Arc<crate::runtime_feedback::FeedbackFacade>>,
+    http_event_sink: Option<&HttpEventSink>,
     event: RunnerEvent,
     feedback_tasks: Option<&mut tokio::task::JoinSet<()>>,
 ) {
@@ -1699,6 +1707,12 @@ fn emit_runner_event_with_facades(
                 // counter for diagnostics.
             }
         }
+    }
+
+    // ── Forward canonical RuntimeEvent over HTTP, if configured ─────────
+    if let Some(sink) = http_event_sink {
+        let runtime_event = runner_event_to_runtime_event(&event);
+        sink.emit(runtime_event.clone());
     }
 
     // ── Translate to FeedbackEvent and fan out ──────────────────────────
@@ -1748,6 +1762,169 @@ fn emit_runner_event_with_facades(
                 });
             }
         }
+    }
+}
+
+fn runner_event_to_runtime_event(event: &RunnerEvent) -> RuntimeEvent {
+    match event {
+        RunnerEvent::RunStarted {
+            run_id,
+            plan_ids,
+            total_tasks,
+            resumed,
+            ..
+        } => RuntimeEvent::WorkflowStarted {
+            run_id: run_id.clone(),
+            template: "runner-v2".to_string(),
+            prompt: format!(
+                "plans={} total_tasks={} resumed={}",
+                plan_ids.join(","),
+                total_tasks,
+                resumed
+            ),
+        },
+        RunnerEvent::RunCompleted {
+            run_id, outcome, ..
+        } => RuntimeEvent::WorkflowCompleted {
+            run_id: run_id.clone(),
+            outcome: runtime_workflow_outcome(*outcome),
+        },
+        RunnerEvent::AgentDispatchStarted {
+            run_id,
+            agent_id,
+            role,
+            requested_model,
+            ..
+        } => RuntimeEvent::AgentSpawned {
+            run_id: run_id.clone(),
+            agent_id: agent_id.clone(),
+            role: role.clone(),
+            model: requested_model.clone(),
+        },
+        RunnerEvent::AgentDispatchCompleted {
+            run_id,
+            agent_id,
+            outcome:
+                AgentDispatchOutcome::SpawnFailed
+                | AgentDispatchOutcome::Failed
+                | AgentDispatchOutcome::Exited,
+            message,
+            ..
+        } => RuntimeEvent::AgentFailed {
+            run_id: run_id.clone(),
+            agent_id: agent_id.clone(),
+            error: message.clone().unwrap_or_else(|| event.message()),
+        },
+        RunnerEvent::AgentCompleted {
+            run_id,
+            agent_id,
+            outcome,
+            total_cost_usd,
+            exit_code,
+            message,
+            ..
+        } if agent_completion_succeeded(*outcome, *exit_code) => RuntimeEvent::AgentCompleted {
+            run_id: run_id.clone(),
+            agent_id: agent_id.clone(),
+            output: message.clone().unwrap_or_else(|| event.message()),
+            tokens_used: 0,
+            cost_usd: total_cost_usd.unwrap_or(0.0),
+        },
+        RunnerEvent::AgentCompleted {
+            run_id,
+            agent_id,
+            message,
+            ..
+        } => RuntimeEvent::AgentFailed {
+            run_id: run_id.clone(),
+            agent_id: agent_id.clone(),
+            error: message.clone().unwrap_or_else(|| event.message()),
+        },
+        RunnerEvent::GateDispatchStarted {
+            run_id,
+            attempt,
+            kind,
+            rung,
+            ..
+        } => RuntimeEvent::GateStarted {
+            run_id: run_id.clone(),
+            gate_name: runtime_gate_name(*kind, attempt),
+            rung: (*rung).min(u32::from(u8::MAX)) as u8,
+        },
+        RunnerEvent::GateCompleted {
+            run_id,
+            attempt,
+            kind,
+            passed: true,
+            duration_ms,
+            ..
+        } => RuntimeEvent::GatePassed {
+            run_id: run_id.clone(),
+            gate_name: runtime_gate_name(*kind, attempt),
+            duration_ms: *duration_ms,
+        },
+        RunnerEvent::GateCompleted {
+            run_id,
+            attempt,
+            kind,
+            output,
+            duration_ms,
+            ..
+        } => RuntimeEvent::GateFailed {
+            run_id: run_id.clone(),
+            gate_name: runtime_gate_name(*kind, attempt),
+            output: output.clone(),
+            duration_ms: *duration_ms,
+        },
+        _ => RuntimeEvent::FeedbackRecorded {
+            run_id: runner_event_run_id(event).to_string(),
+            kind: event.event_type().to_string(),
+            summary: event.message(),
+        },
+    }
+}
+
+fn runtime_workflow_outcome(outcome: RunOutcome) -> RuntimeWorkflowOutcome {
+    match outcome {
+        RunOutcome::Succeeded => RuntimeWorkflowOutcome::Success { commit_hash: None },
+        RunOutcome::Failed => RuntimeWorkflowOutcome::Halted {
+            reason: "runner failed".to_string(),
+        },
+        RunOutcome::Cancelled => RuntimeWorkflowOutcome::Cancelled,
+    }
+}
+
+fn agent_completion_succeeded(outcome: AgentDispatchOutcome, exit_code: Option<i32>) -> bool {
+    matches!(outcome, AgentDispatchOutcome::Completed)
+        || (matches!(outcome, AgentDispatchOutcome::Exited) && exit_code.unwrap_or(0) == 0)
+}
+
+fn runtime_gate_name(kind: GateCompletionKind, attempt: &TaskAttemptRef) -> String {
+    let kind = match kind {
+        GateCompletionKind::Gate => "gate",
+        GateCompletionKind::PlanVerify => "plan_verify",
+        GateCompletionKind::Merge => "merge",
+    };
+    format!("{kind}:{}:{}", attempt.plan_id.as_str(), attempt.task_id.as_str())
+}
+
+fn runner_event_run_id(event: &RunnerEvent) -> &str {
+    match event {
+        RunnerEvent::ResumeMarker { run_id, .. }
+        | RunnerEvent::RunStarted { run_id, .. }
+        | RunnerEvent::RunCompleted { run_id, .. }
+        | RunnerEvent::PlanStarted { run_id, .. }
+        | RunnerEvent::PlanCompleted { run_id, .. }
+        | RunnerEvent::TaskAttemptStarted { run_id, .. }
+        | RunnerEvent::TaskAttemptCompleted { run_id, .. }
+        | RunnerEvent::AgentDispatchStarted { run_id, .. }
+        | RunnerEvent::AgentDispatchCompleted { run_id, .. }
+        | RunnerEvent::AgentCompleted { run_id, .. }
+        | RunnerEvent::GateDispatchStarted { run_id, .. }
+        | RunnerEvent::GateCompleted { run_id, .. }
+        | RunnerEvent::PromptAssembled { run_id, .. }
+        | RunnerEvent::MergeBackendCompleted { run_id, .. }
+        | RunnerEvent::RetryDecision { run_id, .. } => run_id,
     }
 }
 

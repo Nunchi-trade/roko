@@ -509,6 +509,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 feed_registry: Some(feed_registry),
                 feedback_facade: Some(feedback_facade),
                 projection: Some(projection),
+                http_event_sink: None,
                 stream_to_stderr: !approval && !cli.quiet && !cli.json,
                 warm_cache: true,
             };
