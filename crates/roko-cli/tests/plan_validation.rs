@@ -26,8 +26,19 @@ mod plan_validation {
             let role_line = role
                 .map(|value| format!("role = \"{value}\"\n"))
                 .unwrap_or_default();
+            let files_line = if extra.contains("files =") || extra.contains("write_files =") {
+                String::new()
+            } else {
+                "files = [\"src/lib.rs\"]\n".to_string()
+            };
+            let verify_line = if extra.contains("verify =") {
+                String::new()
+            } else {
+                "verify = [{ phase = \"compile\", command = \"cargo check -p roko-cli\" }]\n"
+                    .to_string()
+            };
             format!(
-                "[meta]\nplan = \"{plan_id}\"\n\n[[task]]\nid = \"T1\"\ntitle = \"{title}\"\n{role_line}depends_on = []\n{extra}"
+                "[meta]\nplan = \"{plan_id}\"\n\n[[task]]\nid = \"T1\"\ntitle = \"{title}\"\n{role_line}depends_on = []\n{files_line}{verify_line}{extra}"
             )
         }
 
@@ -127,9 +138,18 @@ mod plan_validation {
             );
 
             assert_eq!(report.totals.plans_checked, 1);
-            assert_eq!(report.totals.errors, 0);
+            assert_eq!(report.totals.errors, 1);
             assert_eq!(report.totals.warnings, 1);
             let diagnostics = first_diagnostics(&report);
+            assert!(
+                diagnostics.iter().any(|diag| {
+                    diag.rule_id == "PLAN_035"
+                        && diag
+                            .message
+                            .contains("unknown role 'wizard' (valid: implementer")
+                }),
+                "unknown role should produce schema error: {diagnostics:?}"
+            );
             assert!(
                 diagnostics.iter().any(|diag| {
                     diag.rule_id == "PLAN_008"
