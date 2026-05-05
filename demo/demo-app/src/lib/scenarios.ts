@@ -106,6 +106,7 @@ export interface CommandDef {
 
 export interface ClickableScenario extends Omit<Scenario, 'run'> {
   commands: CommandDef[];
+  resetState?: () => void;
   runCommand(ctx: ScenarioContext, commandId: string): Promise<{ ok: boolean; error?: string }>;
 }
 

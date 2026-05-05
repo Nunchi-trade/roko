@@ -867,8 +867,11 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     resetSidebarState();
     cmdReset();
     resetRokoResolution();
+    if (isClickableScenario(scenario)) {
+      scenario.resetState?.();
+    }
     workspaceEnteredRef.current = false;
-  }, [playback, timeline, clearCompletionTimers, resetSidebarState, cmdReset]);
+  }, [playback, timeline, clearCompletionTimers, resetSidebarState, cmdReset, scenario]);
 
   // ── Imperative handle ──────────────────────────────────────
   useImperativeHandle(ref, () => ({

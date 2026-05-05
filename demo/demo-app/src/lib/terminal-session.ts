@@ -73,32 +73,27 @@ export async function resolveRoko(handle: TerminalHandle): Promise<string> {
   if (rokoResolved) return resolvedRoko;
 
   handle.outputBuffer = '';
-  // Use a unique marker so we can distinguish real output from the echoed command text.
-  // The PTY echoes the full command (including 'echo RP') back into outputBuffer.
-  // By using a dynamic marker, we ensure our check can't match the echo.
-  const marker = `__RK_${Date.now().toString(36)}__`;
+  const marker = `__ROKO_${crypto.randomUUID().slice(0, 8)}__`;
   const result = await handle.execCmd(
-    `command -v roko >/dev/null 2>&1 && echo "${marker}RP" || { test -x ./target/release/roko && echo "${marker}RR:$PWD/target/release/roko" || { test -x ./target/debug/roko && echo "${marker}RD:$PWD/target/debug/roko" || echo "${marker}RN"; }; }`,
+    `command -v roko >/dev/null 2>&1 && echo "${marker}PATH" || { test -x ./target/release/roko && echo "${marker}RELEASE:$PWD/target/release/roko" || { test -x ./target/debug/roko && echo "${marker}DEBUG:$PWD/target/debug/roko" || echo "${marker}NONE"; }; }`,
     activeTimeouts.binaryDetection,
     { silent: true },
   );
   if (result.ok || result.exitCode >= 0) {
-    const buf = handle.outputBuffer;
-    if (buf.includes(`${marker}RP`)) {
+    const detection = markerPayload(handle.outputBuffer, marker);
+    if (detection === 'PATH') {
       resolvedRoko = 'roko';
-    } else if (buf.includes(`${marker}RR:`)) {
-      const m = buf.match(new RegExp(`${marker}RR:(\\S+)`));
-      resolvedRoko = m ? m[1] : './target/release/roko';
-    } else if (buf.includes(`${marker}RD:`)) {
-      const m = buf.match(new RegExp(`${marker}RD:(\\S+)`));
-      resolvedRoko = m ? m[1] : './target/debug/roko';
-    } else if (buf.includes(`${marker}RN`)) {
+    } else if (detection?.startsWith('RELEASE:')) {
+      resolvedRoko = detection.slice('RELEASE:'.length) || './target/release/roko';
+    } else if (detection?.startsWith('DEBUG:')) {
+      resolvedRoko = detection.slice('DEBUG:'.length) || './target/debug/roko';
+    } else if (detection === 'NONE') {
       throw new Error(
         'roko binary not found. Build it (cargo build -p roko-cli --release) or add it to PATH.',
       );
     } else {
       // Unexpected output — warn but don't throw (resilience)
-      console.warn('[resolveRoko] unexpected detection output, falling back to "roko":', buf.slice(-200));
+      console.warn('[resolveRoko] unexpected detection output, falling back to "roko":', handle.outputBuffer.slice(-200));
       resolvedRoko = 'roko';
     }
   }
@@ -106,7 +101,7 @@ export async function resolveRoko(handle: TerminalHandle): Promise<string> {
   // Validate the resolved path is executable (skip for bare 'roko' which relies on PATH)
   if (resolvedRoko !== 'roko') {
     handle.outputBuffer = '';
-    const check = await handle.execCmd(`test -x ${resolvedRoko}`, activeTimeouts.execCheck, { silent: true });
+    const check = await handle.execCmd(`test -x ${shellQuote(resolvedRoko)}`, activeTimeouts.execCheck, { silent: true });
     if (!check.ok) {
       console.warn('[resolveRoko] resolved path not executable, falling back:', resolvedRoko);
       resolvedRoko = 'roko';
@@ -127,6 +122,16 @@ export function resetRokoResolution() {
 /** Get the resolved roko command. */
 export function getRoko(): string {
   return resolvedRoko;
+}
+
+function markerPayload(buffer: string, marker: string): string | null {
+  for (const rawLine of stripAnsi(buffer).split(/[\r\n]+/)) {
+    const line = rawLine.trimStart();
+    if (line.startsWith(marker)) {
+      return line.slice(marker.length).trim();
+    }
+  }
+  return null;
 }
 
 function shellQuote(value: string): string {
@@ -156,20 +161,30 @@ export async function ensureWorkspaceCwd(
 /**
  * Build a roko CLI command string.
  *
- * NOTE: --repo is NOT injected because showCmd() already calls
- * ensureWorkspaceCwd() to cd into the workspace before typing.
- * The CLI defaults to cwd when --repo is omitted.
- *
- * --model is injected as belt-and-suspenders: the workspace roko.toml
- * should have default_model configured, but --model handles the race
- * window between workspace creation and the first config update.
+ * Commands run from the workspace cwd. Model selection is only passed to
+ * command families that perform model work; status, validation, promotion,
+ * and other local commands rely on workspace config/cwd alone.
  */
 export function roko(ctx: ScenarioContext, subcommand: string): string {
   const bin = getRoko();
-  if (ctx.activeModel) {
+  if (ctx.activeModel && acceptsModelFlag(subcommand)) {
     return `${bin} --model ${shellQuote(ctx.activeModel)} ${subcommand}`;
   }
   return `${bin} ${subcommand}`;
+}
+
+function acceptsModelFlag(subcommand: string): boolean {
+  const cmd = subcommand.trim();
+  if (/(^|\s)--model(?:=|\s|$)/.test(cmd)) return false;
+
+  return (
+    /^run\b/.test(cmd) ||
+    /^do\b/.test(cmd) ||
+    /^plan\s+run\b/.test(cmd) ||
+    /^prd\s+draft\s+(?:new|edit)\b/.test(cmd) ||
+    /^prd\s+plan\b/.test(cmd) ||
+    /^research\b/.test(cmd)
+  );
 }
 
 // ── Workspace entry ──────────────────────────────────────────

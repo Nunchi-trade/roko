@@ -15,6 +15,10 @@ let runOutcome: {
   sawReplan: boolean;
 } | null = null;
 
+export function resetGateRetryState() {
+  runOutcome = null;
+}
+
 // ── Static command definitions ────────────────────────────────
 
 export const GATE_RETRY_COMMANDS: CommandDef[] = [
@@ -59,6 +63,7 @@ export const gateRetry: ClickableScenario = {
   durationHint: '~75s',
   accent: 'amber',
   icon: 'gate',
+  resetState: resetGateRetryState,
   steps: [
     { label: 'First attempt',     sublabel: 'roko run' },
     { label: 'Gate failure',      sublabel: 'compile/test/clippy' },

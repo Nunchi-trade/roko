@@ -49,7 +49,7 @@ const state = {
   results: [] as { elapsed: number; cost: string | null; tokens: string | null }[],
 };
 
-function resetState() {
+export function resetProviderRaceState() {
   state.costs = [null, null, null, null];
   state.tokens = [null, null, null, null];
   state.finishOrder = [];
@@ -69,6 +69,7 @@ export const providerRace: ClickableScenario = {
   durationHint: '~60s',
   accent: 'teal',
   icon: 'race',
+  resetState: resetProviderRaceState,
   steps: [
     { label: 'Setup', sublabel: 'init workspaces' },
     { label: 'Race start', sublabel: 'dispatch all 4' },
@@ -90,7 +91,7 @@ export const providerRace: ClickableScenario = {
 
       // Reset state when the first race command runs
       if (state.finishOrder.length === 0 && state.costs.every(c => c === null)) {
-        resetState();
+        resetProviderRaceState();
       }
 
       const provider = providerNames[paneIndex];

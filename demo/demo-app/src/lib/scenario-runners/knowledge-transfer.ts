@@ -5,6 +5,10 @@ import { showCmd, roko, trackMetrics } from '../terminal-session';
 // Module-level state to track the Beta workspace across runCommand calls
 let betaWorkspaceDir: string | null = null;
 
+export function resetKnowledgeTransferState() {
+  betaWorkspaceDir = null;
+}
+
 export const KNOWLEDGE_TRANSFER_COMMANDS: CommandDef[] = [
   { id: 'alpha-build',     command: 'roko run "Build a REST API in Rust using actix-web for user management..."',      description: 'Alpha builds User API (cold start)',   timeout: 300000, target: { pane: 0 } },
   { id: 'alpha-learn',     command: 'roko learn all',                                                                  description: 'Inspect Alpha learning state',         timeout: 60000,  target: { pane: 0 } },
@@ -27,6 +31,7 @@ export const knowledgeTransfer: ClickableScenario = {
   durationHint: '~90s',
   accent: 'emerald',
   icon: 'transfer',
+  resetState: resetKnowledgeTransferState,
   steps: [
     { label: 'Setup workspaces', sublabel: 'roko init x2' },
     { label: 'Alpha builds User API', sublabel: 'roko run (cold)' },
