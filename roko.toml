@@ -1107,7 +1107,11 @@ rpc_url = "http://127.0.0.1:8545"
 pool_address = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
 
 [relay]
+url = "ws://127.0.0.1:9011/relay/agents/ws"
 heartbeat_interval_secs = 30
+
+[feed_agents]
+enabled = true
 
 [runner]
 plan_timeout_secs = 3600

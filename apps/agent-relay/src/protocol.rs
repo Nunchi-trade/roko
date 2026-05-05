@@ -68,6 +68,22 @@ pub struct RelayMessageResponse {
     pub response: Value,
 }
 
+/// Descriptor for a data feed an agent can provide.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FeedDescriptor {
+    pub feed_id: String,
+    pub topic: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub rate: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<Value>,
+}
+
 /// Frames the relay receives from agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -101,6 +117,14 @@ pub enum AgentInboundFrame {
         topic: String,
         msg_type: String,
         payload: serde_json::Value,
+    },
+    /// Register a data feed this agent provides.
+    RegisterFeed {
+        feed: FeedDescriptor,
+    },
+    /// Unregister a previously registered feed.
+    UnregisterFeed {
+        feed_id: String,
     },
 }
 
@@ -239,5 +263,13 @@ pub enum RelayEvent {
     WorkspaceHeartbeat {
         workspace_id: String,
         agents_count: u32,
+    },
+    FeedRegistered {
+        agent_id: String,
+        feed: FeedDescriptor,
+    },
+    FeedUnregistered {
+        agent_id: String,
+        feed_id: String,
     },
 }

@@ -49,6 +49,9 @@ pub fn app(state: Arc<RelayState>) -> Router {
             "/relay/workspaces/{id}",
             axum::routing::delete(unregister_workspace),
         )
+        // Feed registration endpoints
+        .route("/relay/feeds", get(list_feeds))
+        .route("/relay/feeds/{agent_id}", get(agent_feeds))
         // Feed metadata endpoints (A5)
         .route("/relay/topics", get(list_topics))
         .route("/relay/topics/{topic}/messages", get(topic_messages))

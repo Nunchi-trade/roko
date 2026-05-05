@@ -105,11 +105,13 @@ cmd_up() {
     echo ""
     info "Shutting down..."
     [ -n "${MIRAGE_PID:-}" ]         && kill "$MIRAGE_PID" 2>/dev/null || true
+    [ -n "${RELAY_PID:-}" ]          && kill "$RELAY_PID" 2>/dev/null || true
     [ -n "${SERVE_PID:-}" ]          && kill "$SERVE_PID" 2>/dev/null || true
     [ -n "${VITE_PID:-}" ]           && kill "$VITE_PID"  2>/dev/null || true
     [ -n "${LENDING_SCOUT_PID:-}" ]  && kill "$LENDING_SCOUT_PID" 2>/dev/null || true
     [ -n "${STAKING_SCOUT_PID:-}" ]  && kill "$STAKING_SCOUT_PID" 2>/dev/null || true
     lsof -ti:$SERVE_PORT 2>/dev/null | xargs kill 2>/dev/null || true
+    lsof -ti:9011 2>/dev/null | xargs kill 2>/dev/null || true
     lsof -ti:8545 2>/dev/null | xargs kill 2>/dev/null || true
     wait 2>/dev/null
     ok "Done."
@@ -169,6 +171,41 @@ cmd_up() {
         (cd contracts && forge build) || warn "forge build failed"
       fi
     fi
+
+    # Start agent-relay (WebSocket bridge between on-chain and roko serve)
+    local relay_stale
+    relay_stale=$(pids_on_port 9011)
+    if [ -n "$relay_stale" ]; then
+      warn "Killing stale process(es) on :9011 — PIDs: $relay_stale"
+      echo "$relay_stale" | xargs kill 2>/dev/null || true
+      sleep 1
+    fi
+
+    info "Building agent-relay..."
+    cargo build -p agent-relay 2>&1
+
+    info "Starting agent-relay on :9011..."
+    ./target/debug/agent-relay \
+      --bind 127.0.0.1:9011 \
+      --rpc-ws-url ws://127.0.0.1:8545 \
+      --chain-id 31337 &
+    RELAY_PID=$!
+
+    # Wait for relay health
+    echo -n "[dev] Waiting for agent-relay..."
+    for i in $(seq 1 10); do
+      if curl -sf http://127.0.0.1:9011/relay/health >/dev/null 2>&1; then
+        echo " ready!"
+        break
+      fi
+      if [ "$i" -eq 10 ]; then
+        echo " timeout (relay may still be starting)"
+      fi
+      sleep 1
+      echo -n "."
+    done
+
+    export ROKO_AGENT_RELAY_URL="ws://127.0.0.1:9011/relay/agents/ws"
   fi
 
   # Build
@@ -224,14 +261,16 @@ cmd_up() {
 
   echo ""
   echo "${BOLD}═══════════════════════════════════════════════════════${RESET}"
-  $chain && echo "  mirage-rs   → http://localhost:8545 (mainnet fork)"
-  echo "  roko serve  → http://localhost:$SERVE_PORT"
-  $no_vite || echo "  demo-app    → http://localhost:$VITE_PORT"
+  $chain && echo "  mirage-rs     → http://localhost:8545 (mainnet fork)"
+  $chain && echo "  agent-relay   → http://localhost:9011 (15 feed agents)"
+  echo "  roko serve    → http://localhost:$SERVE_PORT"
+  $no_vite || echo "  demo-app      → http://localhost:$VITE_PORT"
   if $chain; then
-    echo "  ISFR data   → LIVE (on-chain via mirage-rs)"
-    echo "  ISFR oracle → keeper auto-submits each epoch"
+    echo "  ISFR data     → LIVE (on-chain via mirage-rs)"
+    echo "  ISFR oracle   → keeper auto-submits each epoch"
+    echo "  Feed agents   → 15 active (4 keepers + 11 derived)"
   else
-    echo "  ISFR data   → MOCK (use --chain for live data)"
+    echo "  ISFR data     → MOCK (use --chain for live data)"
   fi
   echo "  Ctrl+C to stop all"
   echo "${BOLD}═══════════════════════════════════════════════════════${RESET}"

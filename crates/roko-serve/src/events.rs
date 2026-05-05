@@ -650,6 +650,24 @@ pub enum ServerEvent {
         decoded: serde_json::Value,
     },
 
+    /// A feed agent published new data.
+    FeedTick {
+        agent_id: String,
+        feed_id: String,
+        topic: String,
+        payload: serde_json::Value,
+        timestamp_ms: i64,
+    },
+
+    /// A feed agent came online.
+    FeedAgentOnline {
+        agent_id: String,
+        name: String,
+        feed_count: usize,
+    },
+
+    /// A feed agent went offline.
+    FeedAgentOffline { agent_id: String },
 }
 
 #[cfg(test)]

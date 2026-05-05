@@ -157,10 +157,12 @@ export default function Bench() {
 
   // Detect run completion for burst effect
   const prevRunStatus = useRef(activeRun?.status);
+  const summaryRef = useRef(activeRunSummary);
+  summaryRef.current = activeRunSummary;
   useEffect(() => {
     if (prevRunStatus.current === 'running' && activeRun?.status === 'completed') {
       setRunCompleted(true);
-      const passRate = activeRunSummary?.pass_rate;
+      const passRate = summaryRef.current?.pass_rate;
       toast(
         passRate != null
           ? `Benchmark complete: ${(passRate * 100).toFixed(0)}% pass rate`
@@ -171,7 +173,7 @@ export default function Bench() {
       return () => clearTimeout(timer);
     }
     prevRunStatus.current = activeRun?.status;
-  }, [activeRun?.status, activeRunSummary, toast]);
+  }, [activeRun?.status, toast]);
 
   // Fetch pareto data when analysis tab opens
   useEffect(() => {
