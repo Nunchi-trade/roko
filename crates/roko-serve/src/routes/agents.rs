@@ -1442,11 +1442,10 @@ async fn proxy_sidecar_stream(
     }
 
     let connect_timeout = state.load_roko_config().timeouts.health_check();
-    let (mut socket, _response) =
-        tokio::time::timeout(connect_timeout, connect_async(request))
-            .await
-            .map_err(|_| "connect sidecar stream timed out".to_string())?
-            .map_err(|error| format!("connect sidecar stream: {error}"))?;
+    let (mut socket, _response) = tokio::time::timeout(connect_timeout, connect_async(request))
+        .await
+        .map_err(|_| "connect sidecar stream timed out".to_string())?
+        .map_err(|error| format!("connect sidecar stream: {error}"))?;
     socket
         .send(WsMessage::Text(prompt.into()))
         .await

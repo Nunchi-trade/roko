@@ -246,11 +246,8 @@ pub(crate) async fn cmd_do(
         .map(|resolved| resolved.config)
         .unwrap_or_default();
     let scope_config = scope_model_config_from_cli_config(&preview_config);
-    let resolved_complexity = roko_cli::scope_resolver::ScopeResolver::resolve(
-        &prompt,
-        &scope_config,
-    )
-    .await;
+    let resolved_complexity =
+        roko_cli::scope_resolver::ScopeResolver::resolve(&prompt, &scope_config).await;
     let complexity = if plan {
         promote_to_planned_complexity(resolved_complexity)
     } else {
@@ -422,7 +419,10 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
-    let mut truncated = value.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut truncated = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     truncated.push_str("...");
     truncated
 }
@@ -491,8 +491,9 @@ pub(crate) async fn cmd_run(
         let server_config =
             roko_serve::ServerBuildConfig::new(workdir.clone(), runtime, roko_config, None, None)
                 .with_state_hub(state_hub);
-        let (state, handle) =
-            roko_serve::ServerBuilder::new(server_config).start_background().await?;
+        let (state, handle) = roko_serve::ServerBuilder::new(server_config)
+            .start_background()
+            .await?;
         if !cli.quiet {
             eprintln!("▸ HTTP server started on :6677");
         }

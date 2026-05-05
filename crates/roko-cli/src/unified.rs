@@ -202,15 +202,13 @@ async fn spawn_background_serve(
             return None;
         }
     };
-    let server_config = roko_serve::ServerBuildConfig::new(
-        workdir.to_path_buf(),
-        runtime,
-        roko_config,
-        None,
-        None,
-    )
-    .with_state_hub(state_hub);
-    match roko_serve::ServerBuilder::new(server_config).start_background().await {
+    let server_config =
+        roko_serve::ServerBuildConfig::new(workdir.to_path_buf(), runtime, roko_config, None, None)
+            .with_state_hub(state_hub);
+    match roko_serve::ServerBuilder::new(server_config)
+        .start_background()
+        .await
+    {
         Ok(pair) => Some(pair),
         Err(e) => {
             tracing::warn!("background serve failed to start: {e:#}");

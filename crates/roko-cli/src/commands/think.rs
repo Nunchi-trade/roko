@@ -34,9 +34,12 @@ pub(crate) async fn cmd_think(
     };
     let explain_topic = matching_explain_topic(question);
     let knowledge_store = roko_neuro::KnowledgeStore::for_workdir(&workdir);
-    let knowledge_entries = knowledge_store
-        .query(question, 5)
-        .with_context(|| format!("query knowledge store at {}", knowledge_store.path().display()))?;
+    let knowledge_entries = knowledge_store.query(question, 5).with_context(|| {
+        format!(
+            "query knowledge store at {}",
+            knowledge_store.path().display()
+        )
+    })?;
     let research_hits = research_artifact_hits(&workdir, &keywords)?;
 
     if cli.json {
@@ -83,9 +86,9 @@ pub(crate) async fn cmd_think(
 
 fn extract_keywords(question: &str) -> Vec<String> {
     const STOPWORDS: &[&str] = &[
-        "a", "about", "an", "and", "are", "as", "at", "be", "codebase", "does", "for", "how",
-        "in", "is", "it", "of", "on", "or", "our", "the", "this", "to", "what", "where",
-        "with", "work", "works",
+        "a", "about", "an", "and", "are", "as", "at", "be", "codebase", "does", "for", "how", "in",
+        "is", "it", "of", "on", "or", "our", "the", "this", "to", "what", "where", "with", "work",
+        "works",
     ];
 
     let mut keywords = Vec::new();
@@ -112,7 +115,11 @@ fn matching_explain_topic(question: &str) -> Option<String> {
     let lower = question.to_ascii_lowercase();
     roko_cli::explain::topic_names()
         .into_iter()
-        .find(|topic| lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| word == *topic))
+        .find(|topic| {
+            lower
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|word| word == *topic)
+        })
         .map(str::to_string)
 }
 
@@ -214,7 +221,9 @@ fn research_artifact_hits(workdir: &Path, keywords: &[String]) -> Result<Vec<Res
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let haystack = format!(
             "{}\n{}",
-            path.file_stem().and_then(|s| s.to_str()).unwrap_or_default(),
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default(),
             content
         )
         .to_ascii_lowercase();

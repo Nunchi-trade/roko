@@ -74,7 +74,11 @@ pub fn adjusted_adaptive_budget_for(
     complexity: Complexity,
     context_window_tokens: usize,
 ) -> AdjustedBudget {
-    adjusted_budget_from_base(role, adaptive_budget_for(role, context_window_tokens), complexity)
+    adjusted_budget_from_base(
+        role,
+        adaptive_budget_for(role, context_window_tokens),
+        complexity,
+    )
 }
 
 fn adjusted_budget_from_base(

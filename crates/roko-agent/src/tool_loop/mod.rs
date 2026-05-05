@@ -194,9 +194,7 @@ enum OverflowAction {
 }
 
 fn trace_turn(iterations: usize) -> u32 {
-    let capped = iterations
-        .saturating_add(1)
-        .min(u32::MAX as usize);
+    let capped = iterations.saturating_add(1).min(u32::MAX as usize);
     capped as u32
 }
 

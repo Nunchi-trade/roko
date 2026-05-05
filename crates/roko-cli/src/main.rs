@@ -462,13 +462,16 @@ Examples:
         workdir: Option<PathBuf>,
     },
     /// Adjust behavior by writing roko.toml.
-    #[command(subcommand, after_help = "\
+    #[command(
+        subcommand,
+        after_help = "\
 Examples:
   roko tune routing
   roko tune gates
   roko tune budget
   roko tune model sonnet
-  roko tune model haiku")]
+  roko tune model haiku"
+    )]
     Tune(TuneCmd),
 
     // ── Knowledge (neuro + dreams + custody + archive) ──────────────
@@ -2175,16 +2178,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 )
                 .await;
             }
-            commands::util::cmd_run(
-                cli,
-                workdir,
-                prompt,
-                serve,
-                share,
-                provider,
-                max_retries,
-            )
-            .await
+            commands::util::cmd_run(cli, workdir, prompt, serve, share, provider, max_retries).await
         }
         Command::Do {
             plan,
@@ -2196,16 +2190,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             prompt,
         } => {
             commands::util::cmd_do(
-                cli,
-                None,
-                prompt,
-                plan,
-                yes,
-                ghost,
-                compare,
-                r#continue,
-                no_cascade,
-                None,
+                cli, None, prompt, plan, yes, ghost, compare, r#continue, no_cascade, None,
             )
             .await
         }

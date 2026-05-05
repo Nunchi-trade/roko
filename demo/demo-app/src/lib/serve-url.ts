@@ -61,12 +61,23 @@ function resolveMirageWs(): string | null {
   if (typeof window === 'undefined') return 'ws://localhost:8545';
 
   const { protocol, hostname } = window.location;
-  if (protocol === 'https:') return null;
+  if (protocol === 'https:') {
+    // On HTTPS origins, proxy through roko-serve instead of direct loopback.
+    return `${resolveWsBase()}/api/rpc`;
+  }
   return `ws://${hostWithPort(hostname, '8545')}`;
 }
 
 export const MIRAGE_WS_URL = resolveMirageWs();
 
-export const MIRAGE_EVENTS_WS_URL = MIRAGE_WS_URL
-  ? `${MIRAGE_WS_URL.replace(/\/$/, '')}/api/ws?insights=true&pheromones=true&agents=true`
-  : null;
+function resolveMirageEventsWs(): string | null {
+  if (MIRAGE_WS_URL === null) return null;
+
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    return `${resolveWsBase()}/api/rpc/events?insights=true&pheromones=true&agents=true`;
+  }
+
+  return `${MIRAGE_WS_URL.replace(/\/$/, '')}/api/ws?insights=true&pheromones=true&agents=true`;
+}
+
+export const MIRAGE_EVENTS_WS_URL = resolveMirageEventsWs();

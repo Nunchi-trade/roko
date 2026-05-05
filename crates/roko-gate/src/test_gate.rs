@@ -30,7 +30,9 @@ pub struct TestGate {
 }
 
 fn timeout_ms(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX).max(1)
+    u64::try_from(duration.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 fn default_timeout_ms() -> u64 {

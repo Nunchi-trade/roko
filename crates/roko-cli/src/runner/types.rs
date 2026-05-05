@@ -1497,7 +1497,10 @@ impl std::fmt::Debug for RunConfig {
                 &self.connector_registry.as_ref().map(|_| ".."),
             )
             .field("feed_registry", &self.feed_registry.as_ref().map(|_| ".."))
-            .field("http_event_sink", &self.http_event_sink.as_ref().map(|_| ".."))
+            .field(
+                "http_event_sink",
+                &self.http_event_sink.as_ref().map(|_| ".."),
+            )
             .field("stream_to_stderr", &self.stream_to_stderr)
             .field("warm_cache", &self.warm_cache)
             .finish()

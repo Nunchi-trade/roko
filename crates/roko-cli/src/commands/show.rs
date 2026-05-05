@@ -119,7 +119,10 @@ fn render_overview(state: &ShowState) -> String {
     let mut out = header(state, "overview");
     push_section(&mut out, "work items");
     if state.work_items.is_empty() {
-        push_empty(&mut out, "No work items found in .roko/work, .roko/jobs, or plans.");
+        push_empty(
+            &mut out,
+            "No work items found in .roko/work, .roko/jobs, or plans.",
+        );
     } else {
         for item in state.work_items.iter().take(8) {
             push_work_item_row(&mut out, item);
@@ -175,7 +178,11 @@ fn render_costs(state: &ShowState) -> String {
     let efficiency = &state.data.efficiency;
     push_section(&mut out, "summary");
     push_kv(&mut out, "turns", &efficiency.event_count.to_string());
-    push_kv(&mut out, "total cost", &format_cost(efficiency.total_cost_usd));
+    push_kv(
+        &mut out,
+        "total cost",
+        &format_cost(efficiency.total_cost_usd),
+    );
     push_kv(
         &mut out,
         "avg turn cost",
@@ -194,7 +201,10 @@ fn render_costs(state: &ShowState) -> String {
     let by_model = cost_by_model(state);
     push_section(&mut out, "by model");
     if by_model.is_empty() {
-        push_empty(&mut out, "No model cost events found in .roko/learn/efficiency.jsonl.");
+        push_empty(
+            &mut out,
+            "No model cost events found in .roko/learn/efficiency.jsonl.",
+        );
     } else {
         for (model, aggregate) in by_model {
             push_kv(
@@ -214,13 +224,20 @@ fn render_costs(state: &ShowState) -> String {
     let by_task = cost_by_task(state);
     push_section(&mut out, "by task");
     if by_task.is_empty() {
-        push_empty(&mut out, "No task cost events found in .roko/learn/efficiency.jsonl.");
+        push_empty(
+            &mut out,
+            "No task cost events found in .roko/learn/efficiency.jsonl.",
+        );
     } else {
         for (task, aggregate) in by_task.into_iter().take(12) {
             push_kv(
                 &mut out,
                 &task,
-                &format!("{} | {} turn(s)", format_cost(aggregate.cost_usd), aggregate.turns),
+                &format!(
+                    "{} | {} turn(s)",
+                    format_cost(aggregate.cost_usd),
+                    aggregate.turns
+                ),
             );
         }
     }
@@ -228,13 +245,20 @@ fn render_costs(state: &ShowState) -> String {
     let by_day = cost_by_day(state);
     push_section(&mut out, "by day");
     if by_day.is_empty() {
-        push_empty(&mut out, "No dated cost events found in .roko/learn/efficiency.jsonl.");
+        push_empty(
+            &mut out,
+            "No dated cost events found in .roko/learn/efficiency.jsonl.",
+        );
     } else {
         for (day, aggregate) in by_day {
             push_kv(
                 &mut out,
                 &day,
-                &format!("{} | {} turn(s)", format_cost(aggregate.cost_usd), aggregate.turns),
+                &format!(
+                    "{} | {} turn(s)",
+                    format_cost(aggregate.cost_usd),
+                    aggregate.turns
+                ),
             );
         }
     }
@@ -274,7 +298,10 @@ fn render_knowledge(state: &ShowState) -> String {
 
     push_section(&mut out, "recent entries");
     if entries.is_empty() {
-        push_empty(&mut out, "No knowledge entries found in .roko/neuro/knowledge.jsonl.");
+        push_empty(
+            &mut out,
+            "No knowledge entries found in .roko/neuro/knowledge.jsonl.",
+        );
     } else {
         let mut sorted = entries.clone();
         sorted.sort_by(|left, right| right.created_at.cmp(&left.created_at));
@@ -289,11 +316,7 @@ fn render_knowledge(state: &ShowState) -> String {
                 &entry.id,
                 &format!(
                     "{} | {} | conf {:.2} | {} | {}",
-                    entry.kind,
-                    entry.tier,
-                    entry.confidence,
-                    tags,
-                    entry.content_preview
+                    entry.kind, entry.tier, entry.confidence, tags, entry.content_preview
                 ),
             );
         }
@@ -305,14 +328,22 @@ fn render_plans(state: &ShowState) -> String {
     let mut out = header(state, "plans");
     if let Some(current) = &state.data.current_plan_execution {
         push_section(&mut out, "current");
-        push_kv(&mut out, "plan", &format!("{} | {}", current.plan_id, current.plan_title));
+        push_kv(
+            &mut out,
+            "plan",
+            &format!("{} | {}", current.plan_id, current.plan_title),
+        );
         push_kv(
             &mut out,
             "tasks",
             &format!("{}/{}", current.tasks_done, current.tasks_total),
         );
         if let Some(task) = &current.current_task {
-            push_kv(&mut out, "current task", &format!("{} | {}", task.task_id, task.description));
+            push_kv(
+                &mut out,
+                "current task",
+                &format!("{} | {}", task.task_id, task.description),
+            );
         }
     }
 
@@ -343,7 +374,10 @@ fn render_learning(state: &ShowState) -> String {
     push_section(&mut out, "routing");
     let router = &state.data.cascade_router;
     if router.model_slugs.is_empty() && router.confidence_stats.is_empty() {
-        push_empty(&mut out, "No cascade router state found in .roko/learn/cascade-router.json.");
+        push_empty(
+            &mut out,
+            "No cascade router state found in .roko/learn/cascade-router.json.",
+        );
     } else {
         push_kv(&mut out, "models", &router.model_slugs.join(", "));
         for (model, stats) in router.confidence_stats.iter() {
@@ -361,7 +395,10 @@ fn render_learning(state: &ShowState) -> String {
 
     push_section(&mut out, "experiments");
     if state.data.experiments.is_empty() {
-        push_empty(&mut out, "No prompt experiments found in .roko/learn/experiments.json.");
+        push_empty(
+            &mut out,
+            "No prompt experiments found in .roko/learn/experiments.json.",
+        );
     } else {
         for experiment in state.data.experiments.iter().take(10) {
             let winner = experiment.winner_id.as_deref().unwrap_or("none");
@@ -378,7 +415,10 @@ fn render_learning(state: &ShowState) -> String {
 
     push_section(&mut out, "gates");
     if state.data.gate_results_page.gate_rows.is_empty() {
-        push_empty(&mut out, "No gate signal rows found in .roko/engrams.jsonl.");
+        push_empty(
+            &mut out,
+            "No gate signal rows found in .roko/engrams.jsonl.",
+        );
     } else {
         for gate in state.data.gate_results_page.gate_rows.iter().take(10) {
             push_kv(
@@ -408,7 +448,10 @@ fn render_learning(state: &ShowState) -> String {
             &format_percent(cfactor.components.knowledge_growth),
         );
     } else {
-        push_empty(&mut out, "No C-Factor snapshots found in .roko/learn/c-factor.jsonl.");
+        push_empty(
+            &mut out,
+            "No C-Factor snapshots found in .roko/learn/c-factor.jsonl.",
+        );
     }
     out
 }
@@ -417,7 +460,10 @@ fn render_history(state: &ShowState) -> String {
     let mut out = header(state, "history");
     push_section(&mut out, "state events");
     if state.data.event_log.is_empty() {
-        push_empty(&mut out, "No event log entries found in .roko/state/events.json.");
+        push_empty(
+            &mut out,
+            "No event log entries found in .roko/state/events.json.",
+        );
     } else {
         let mut events = state.data.event_log.clone();
         events.sort_by_key(|event| event.timestamp_ms);
@@ -433,7 +479,10 @@ fn render_history(state: &ShowState) -> String {
 
     push_section(&mut out, "recent turns");
     if state.data.efficiency_events.is_empty() {
-        push_empty(&mut out, "No efficiency events found in .roko/learn/efficiency.jsonl.");
+        push_empty(
+            &mut out,
+            "No efficiency events found in .roko/learn/efficiency.jsonl.",
+        );
     } else {
         for event in state.data.efficiency_events.iter().rev().take(12).rev() {
             push_kv(
@@ -465,7 +514,11 @@ fn render_work_detail(state: &ShowState, work_id: &str) -> Result<String> {
     push_kv(&mut out, "id", &item.id);
     push_kv(&mut out, "kind", &item.kind);
     push_kv(&mut out, "status", &item.status);
-    push_kv(&mut out, "source", &display_rel(&state.workdir, &item.source));
+    push_kv(
+        &mut out,
+        "source",
+        &display_rel(&state.workdir, &item.source),
+    );
     if !item.prompt.is_empty() {
         push_kv(&mut out, "prompt", &item.prompt);
     }
@@ -493,7 +546,10 @@ fn render_work_detail(state: &ShowState, work_id: &str) -> Result<String> {
         push_kv(
             &mut out,
             "tasks",
-            &format!("{}/{} done, {} failed", plan.tasks_done, plan.task_count, plan.tasks_failed),
+            &format!(
+                "{}/{} done, {} failed",
+                plan.tasks_done, plan.task_count, plan.tasks_failed
+            ),
         );
         if let Some(error) = plan.last_error.as_deref().filter(|error| !error.is_empty()) {
             push_kv(&mut out, "last error", error);
@@ -542,11 +598,18 @@ fn render_work_detail(state: &ShowState, work_id: &str) -> Result<String> {
         push_kv(
             &mut out,
             &event.event_type,
-            &format!("{} | {}", event_scope(&event.plan_id, &event.task_id), event.message),
+            &format!(
+                "{} | {}",
+                event_scope(&event.plan_id, &event.task_id),
+                event.message
+            ),
         );
     }
     if !wrote_event {
-        push_empty(&mut out, "No related events found in .roko/state/events.json.");
+        push_empty(
+            &mut out,
+            "No related events found in .roko/state/events.json.",
+        );
     }
 
     Ok(out)
@@ -627,10 +690,10 @@ fn work_item_from_json_path(path: &Path, kind: &str) -> Option<WorkItemSummary> 
     let id = value_string(&value, &["id", "work_id", "job_id"])
         .or_else(|| file_stem(path))
         .unwrap_or_else(|| String::from("unknown"));
-    let status = value_string(&value, &["status", "state"])
-        .unwrap_or_else(|| String::from("recorded"));
-    let prompt = value_string(&value, &["prompt", "intent", "title", "description"])
-        .unwrap_or_default();
+    let status =
+        value_string(&value, &["status", "state"]).unwrap_or_else(|| String::from("recorded"));
+    let prompt =
+        value_string(&value, &["prompt", "intent", "title", "description"]).unwrap_or_default();
     let tasks_done = value_usize_path(
         &value,
         &[
@@ -660,7 +723,10 @@ fn work_item_from_json_path(path: &Path, kind: &str) -> Option<WorkItemSummary> 
             &["cost_summary", "total_usd"][..],
         ],
     );
-    let created = value_string(&value, &["created", "created_at", "started_at", "updated_at"]);
+    let created = value_string(
+        &value,
+        &["created", "created_at", "started_at", "updated_at"],
+    );
     Some(WorkItemSummary {
         id,
         kind: String::from(kind),
@@ -773,16 +839,18 @@ fn agent_rows(state: &ShowState) -> Vec<AgentRow> {
     }
 
     for event in &state.data.efficiency_events {
-        by_agent.entry(event.agent_id.clone()).or_insert_with(|| AgentRow {
-            id: event.agent_id.clone(),
-            summary: format!(
-                "{} | {} | {} | last {}",
-                non_empty(&event.role, "agent"),
-                non_empty(&event.model, "unknown-model"),
-                non_empty(&event.plan_id, "workspace"),
-                non_empty(&event.timestamp, "unknown-time")
-            ),
-        });
+        by_agent
+            .entry(event.agent_id.clone())
+            .or_insert_with(|| AgentRow {
+                id: event.agent_id.clone(),
+                summary: format!(
+                    "{} | {} | {} | last {}",
+                    non_empty(&event.role, "agent"),
+                    non_empty(&event.model, "unknown-model"),
+                    non_empty(&event.plan_id, "workspace"),
+                    non_empty(&event.timestamp, "unknown-time")
+                ),
+            });
     }
 
     by_agent.into_values().collect()
@@ -796,9 +864,17 @@ fn push_learning_summary(state: &ShowState, out: &mut String) {
         trials += stats.trials as usize;
         successes += stats.successes as usize;
     }
-    push_kv(out, "routing confidence", &format_percent(ratio(successes, trials)));
+    push_kv(
+        out,
+        "routing confidence",
+        &format_percent(ratio(successes, trials)),
+    );
     push_kv(out, "routing trials", &trials.to_string());
-    push_kv(out, "experiments", &state.data.experiments.len().to_string());
+    push_kv(
+        out,
+        "experiments",
+        &state.data.experiments.len().to_string(),
+    );
     if let Some(cfactor) = &state.data.cfactor {
         push_kv(out, "c-factor", &format!("{:.2}", cfactor.overall));
     } else {
@@ -995,7 +1071,10 @@ fn truncate(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
-    let mut out = value.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut out = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     out.push('.');
     out
 }

@@ -6,9 +6,7 @@
 //! file context, sibling task awareness for parallel execution, and per-task
 //! learning packs.
 
-use super::common::{
-    self, AdaptiveBudget, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for,
-};
+use super::common::{self, AdaptiveBudget, REFERENCE_CONTEXT_WINDOW_TOKENS, adaptive_budget_for};
 use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use roko_core::AgentRole;
@@ -135,11 +133,14 @@ fn push_base_sections(
     );
     // 3. workspace_map — Session / High / Middle / hard_cap 1.5k
     sections.push(
-        PromptSection::new("workspace_map", truncate(&input.workspace_map, workspace_map_cap))
-            .with_priority(SectionPriority::High)
-            .with_cache_layer(CacheLayer::Workspace)
-            .with_placement(Placement::Middle)
-            .with_hard_cap(workspace_map_cap),
+        PromptSection::new(
+            "workspace_map",
+            truncate(&input.workspace_map, workspace_map_cap),
+        )
+        .with_priority(SectionPriority::High)
+        .with_cache_layer(CacheLayer::Workspace)
+        .with_placement(Placement::Middle)
+        .with_hard_cap(workspace_map_cap),
     );
     // 4. brief — Session / High / Middle / hard_cap 2k
     sections.push(
@@ -171,11 +172,14 @@ fn push_base_sections(
     // 7. ignored_tests — Session / Low / Middle / hard_cap 500
     if !input.ignored_tests.is_empty() {
         sections.push(
-            PromptSection::new("ignored_tests", truncate(&input.ignored_tests, ignored_tests_cap))
-                .with_priority(SectionPriority::Low)
-                .with_cache_layer(CacheLayer::Workspace)
-                .with_placement(Placement::Middle)
-                .with_hard_cap(ignored_tests_cap),
+            PromptSection::new(
+                "ignored_tests",
+                truncate(&input.ignored_tests, ignored_tests_cap),
+            )
+            .with_priority(SectionPriority::Low)
+            .with_cache_layer(CacheLayer::Workspace)
+            .with_placement(Placement::Middle)
+            .with_hard_cap(ignored_tests_cap),
         );
     }
     // 8. assignment — Task / Critical / End

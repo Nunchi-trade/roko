@@ -275,7 +275,10 @@ impl SessionManager {
     }
 
     pub(crate) fn configure_server_env_from_addr(&self, addr: SocketAddr, config: &RokoConfig) {
-        self.configure_server_env(serve_url_from_socket_addr(addr), configured_auth_token(config));
+        self.configure_server_env(
+            serve_url_from_socket_addr(addr),
+            configured_auth_token(config),
+        );
     }
 
     fn configure_server_env(&self, serve_url: String, auth_token: Option<String>) {

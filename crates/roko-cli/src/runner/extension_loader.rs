@@ -120,10 +120,7 @@ pub fn load_extensions(
     chain: &mut ExtensionChain,
 ) -> usize {
     let layout = RokoLayout::for_project(workdir);
-    let scan_dirs = [
-        layout.extensions_dir(),
-        workdir.join("plugins"),
-    ];
+    let scan_dirs = [layout.extensions_dir(), workdir.join("plugins")];
 
     let mut loaded = 0usize;
 

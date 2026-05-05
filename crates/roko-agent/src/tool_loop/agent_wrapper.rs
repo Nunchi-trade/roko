@@ -93,9 +93,12 @@ impl ToolLoopAgent {
         input: &Engram,
         output: &ToolLoopOutput,
     ) -> AgentResult {
-        result
-            .trace
-            .extend(output.turn_traces.iter().map(|trace| Self::trace_signal(input, trace)));
+        result.trace.extend(
+            output
+                .turn_traces
+                .iter()
+                .map(|trace| Self::trace_signal(input, trace)),
+        );
         result
     }
 

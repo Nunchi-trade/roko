@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 
 use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
+use roko_core::RuntimeEvent;
 use roko_core::agent::ModelSpec;
 use roko_core::config::GatesConfig;
 use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::runtime_event::WorkflowOutcome as RuntimeWorkflowOutcome;
-use roko_core::RuntimeEvent;
 use roko_core::{AgentRole, ContentHash, PhaseKind, PlanPhase};
 use roko_daimon::{
     AffectEngine as _, AffectEvent, DispatchParams, SomaticSignal, StrategyCoordinates,
@@ -101,45 +101,41 @@ fn duration_secs(duration: Duration) -> u64 {
 }
 
 fn duration_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX).max(1)
+    u64::try_from(duration.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 fn agent_dispatch_timeout(config: &RunConfig) -> Duration {
-    config
-        .roko_config
-        .as_deref()
-        .map_or_else(|| Duration::from_secs(config.timeout_secs), |cfg| {
-            cfg.timeouts.agent_dispatch()
-        })
+    config.roko_config.as_deref().map_or_else(
+        || Duration::from_secs(config.timeout_secs),
+        |cfg| cfg.timeouts.agent_dispatch(),
+    )
 }
 
 fn plan_total_timeout(config: &RunConfig) -> Duration {
-    config
-        .roko_config
-        .as_deref()
-        .map_or_else(|| Duration::from_secs(config.plan_timeout_secs), |cfg| {
-            cfg.timeouts.plan_total()
-        })
+    config.roko_config.as_deref().map_or_else(
+        || Duration::from_secs(config.plan_timeout_secs),
+        |cfg| cfg.timeouts.plan_total(),
+    )
 }
 
 fn llm_call_timeout(config: &RunConfig) -> Duration {
-    config
-        .roko_config
-        .as_deref()
-        .map_or_else(|| roko_core::config::TimeoutConfig::default().llm_call(), |cfg| {
-            cfg.timeouts.llm_call()
-        })
+    config.roko_config.as_deref().map_or_else(
+        || roko_core::config::TimeoutConfig::default().llm_call(),
+        |cfg| cfg.timeouts.llm_call(),
+    )
 }
 
 fn gate_timeout(config: &RunConfig, rung: u32) -> Duration {
-    config
-        .roko_config
-        .as_deref()
-        .map_or_else(|| Duration::from_secs(config.timeout_secs), |cfg| match rung {
+    config.roko_config.as_deref().map_or_else(
+        || Duration::from_secs(config.timeout_secs),
+        |cfg| match rung {
             0 => cfg.timeouts.gate_compile(),
             1 => cfg.timeouts.gate_clippy(),
             _ => cfg.timeouts.gate_test(),
-        })
+        },
+    )
 }
 
 // ─── RunContext ──────────────────────────────────────────────────────────
@@ -1905,7 +1901,11 @@ fn runtime_gate_name(kind: GateCompletionKind, attempt: &TaskAttemptRef) -> Stri
         GateCompletionKind::PlanVerify => "plan_verify",
         GateCompletionKind::Merge => "merge",
     };
-    format!("{kind}:{}:{}", attempt.plan_id.as_str(), attempt.task_id.as_str())
+    format!(
+        "{kind}:{}:{}",
+        attempt.plan_id.as_str(),
+        attempt.task_id.as_str()
+    )
 }
 
 fn runner_event_run_id(event: &RunnerEvent) -> &str {
@@ -2068,9 +2068,8 @@ fn render_daimon_prompt_context(hook: &DaimonTaskHook) -> Option<String> {
             hook.signal.valence, hook.signal.intensity
         ));
         if hook.signal.valence <= -0.2 {
-            content.push_str(
-                "\nInterpretation: slow down, prefer caution, and verify risky moves.",
-            );
+            content
+                .push_str("\nInterpretation: slow down, prefer caution, and verify risky moves.");
         } else if hook.signal.valence >= 0.2 {
             content.push_str(
                 "\nInterpretation: this strategy region has positive prior outcomes; keep momentum without skipping checks.",
@@ -2801,7 +2800,9 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     ready_queue_depth: 0,
                     max_queue_wait_hours: 0.0,
                     daimon_policy: daimon_policy_for_hook(daimon_hook.as_ref()),
-                    thinking_level: daimon_hook.as_ref().map(|_| default_effort_label(ctx.config)),
+                    thinking_level: daimon_hook
+                        .as_ref()
+                        .map(|_| default_effort_label(ctx.config)),
                     temperament: None,
                     previous_model: None,
                     plan_context_tokens: None,
@@ -3441,10 +3442,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             );
             let merger = PlanMerger::new(
                 ctx.merge_queue.clone(),
-                PlanMergerConfig::new(
-                    ctx.config.workdir.clone(),
-                    gate_timeout(ctx.config, 0),
-                ),
+                PlanMergerConfig::new(ctx.config.workdir.clone(), gate_timeout(ctx.config, 0)),
             );
             match merger.submit(request, ctx.gate_tx.clone()) {
                 MergeDispatch::Reserved {

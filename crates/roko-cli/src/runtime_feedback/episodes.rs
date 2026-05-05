@@ -113,9 +113,7 @@ fn attach_episode_hdc_fingerprint(
     let outcome_text = if outcome.output.trim().is_empty() {
         format!(
             "succeeded={} model={} provider={}",
-            succeeded,
-            &outcome.model,
-            &outcome.provider
+            succeeded, &outcome.model, &outcome.provider
         )
     } else {
         outcome.output.clone()

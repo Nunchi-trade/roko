@@ -659,6 +659,70 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
                     });
                 }
             }
+            CoreRuntimeEvent::InferenceStarted {
+                run_id,
+                request_id,
+                model,
+                agent_id,
+                ..
+            } => {
+                if self.accepts_run(run_id) {
+                    self.publish(CognitiveEvent::ToolCallStart {
+                        tool_call_id: inference_call_id(request_id),
+                        title: format!("Inference: {model} ({agent_id})"),
+                        kind: ToolCallKind::Other,
+                        locations: None,
+                    });
+                }
+            }
+            CoreRuntimeEvent::InferenceCompleted {
+                run_id,
+                request_id,
+                model,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                duration_ms,
+                ..
+            } => {
+                if self.accepts_run(run_id) {
+                    self.accumulated_tokens
+                        .fetch_add(*input_tokens + *output_tokens, Ordering::Relaxed);
+                    self.publish(CognitiveEvent::ToolCallComplete {
+                        tool_call_id: inference_call_id(request_id),
+                        status: ToolCallStatus::Completed,
+                        content: vec![text_block(format!(
+                            "{model}: {input_tokens} input tokens, {output_tokens} output tokens, ${cost_usd:.4}, {duration_ms}ms"
+                        ))],
+                    });
+                }
+            }
+            CoreRuntimeEvent::InferenceFailed {
+                run_id,
+                request_id,
+                model,
+                error,
+                ..
+            } => {
+                if self.accepts_run(run_id) {
+                    self.publish(CognitiveEvent::ToolCallComplete {
+                        tool_call_id: inference_call_id(request_id),
+                        status: ToolCallStatus::Failed,
+                        content: vec![text_block(format!("{model}: {error}"))],
+                    });
+                }
+            }
+            CoreRuntimeEvent::AgentTrace {
+                run_id, reasoning, ..
+            } => {
+                if self.accepts_run(run_id) {
+                    if let Some(reasoning) = reasoning {
+                        if !reasoning.trim().is_empty() {
+                            self.publish(CognitiveEvent::ThinkingChunk(reasoning.clone()));
+                        }
+                    }
+                }
+            }
             CoreRuntimeEvent::WorkflowCompleted { run_id, outcome } => {
                 if self.accepts_run(run_id) {
                     let total_tokens = self.accumulated_tokens.load(Ordering::Relaxed);
@@ -684,6 +748,11 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
                 }
             }
             CoreRuntimeEvent::AgentSpawned { .. }
+            | CoreRuntimeEvent::TaskFailed { .. }
+            | CoreRuntimeEvent::RunStarted { .. }
+            | CoreRuntimeEvent::RunCompleted { .. }
+            | CoreRuntimeEvent::KnowledgeIngested { .. }
+            | CoreRuntimeEvent::KnowledgeConsumed { .. }
             | CoreRuntimeEvent::FeedbackRecorded { .. }
             | CoreRuntimeEvent::StateCheckpointed { .. } => {}
         }
@@ -830,6 +899,10 @@ fn plan_status(phase: &str, active: &[&str], pending: &[&str]) -> PlanStatus {
 
 fn gate_call_id(gate_name: &str) -> String {
     format!("gate-{gate_name}")
+}
+
+fn inference_call_id(request_id: &str) -> String {
+    format!("inference-{request_id}")
 }
 
 fn text_block(text: String) -> ContentBlock {

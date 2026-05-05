@@ -257,9 +257,8 @@ impl RokoCliRuntime {
         // `run_once_with_config` is the only bench entry point that creates
         // playbooks, so this store can be initialized on demand from the same
         // workspace.
-        self.playbook_store.get_or_init(|| {
-            PlaybookStore::new(RokoLayout::for_project(workdir).playbooks_dir())
-        })
+        self.playbook_store
+            .get_or_init(|| PlaybookStore::new(RokoLayout::for_project(workdir).playbooks_dir()))
     }
 }
 
@@ -564,16 +563,15 @@ fn build_runner_config(
             .with_sink(Arc::new(crate::runtime_feedback::EpisodeSink::at(
                 &episodes_path,
             )))
-            .with_sink(Arc::new(crate::runtime_feedback::RoutingObservationSink::new(
-                cascade_router.clone(),
-            )))
             .with_sink(Arc::new(
-                crate::runtime_feedback::KnowledgeIngestionSink::at(&knowledge_path)
-                    .with_ingestor(Arc::new(
-                        crate::runtime_feedback::NeuroKnowledgeIngestor::new(
-                            KnowledgeStore::for_workdir(workdir),
-                        ),
+                crate::runtime_feedback::RoutingObservationSink::new(cascade_router.clone()),
+            ))
+            .with_sink(Arc::new(
+                crate::runtime_feedback::KnowledgeIngestionSink::at(&knowledge_path).with_ingestor(
+                    Arc::new(crate::runtime_feedback::NeuroKnowledgeIngestor::new(
+                        KnowledgeStore::for_workdir(workdir),
                     )),
+                ),
             )),
     );
 

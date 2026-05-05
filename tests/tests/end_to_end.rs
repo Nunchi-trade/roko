@@ -14,7 +14,7 @@
 //! This is the proof that the 7-primitive architecture can run a
 //! Mori-like workflow end-to-end.
 
-use roko_agent::{Agent, ExecAgent, MockAgent};
+use roko_agent::{Agent, ExecAgent, MockAgent, safety::SafetyLayer};
 use roko_compose::{CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority};
 use roko_core::{
     Body, Budget, Compose, ContentHash, Context, Decay, Engram, Kind, Provenance, Query, React,
@@ -325,7 +325,7 @@ async fn exec_agent_integrates_with_composer() {
         .unwrap();
 
     // ExecAgent with `cat` echoes the prompt back.
-    let agent = ExecAgent::new("cat", vec![]);
+    let agent = ExecAgent::new("cat", vec![], SafetyLayer::with_defaults());
     let result = agent.run(&prompt, &Context::now()).await;
     assert!(result.success);
     let echoed = result.output.body.as_text().unwrap();

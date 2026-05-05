@@ -381,7 +381,11 @@ impl CliProviderConfig {
             args.push("--append-system-prompt".to_string());
             args.push(request.system_prompt.clone());
         }
-        if let Some(effort) = request.effort.as_ref().filter(|effort| !effort.trim().is_empty()) {
+        if let Some(effort) = request
+            .effort
+            .as_ref()
+            .filter(|effort| !effort.trim().is_empty())
+        {
             args.push("--effort".to_string());
             args.push(effort.clone());
         }

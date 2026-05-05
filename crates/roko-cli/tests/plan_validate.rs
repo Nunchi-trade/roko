@@ -115,7 +115,10 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
     assert_eq!(assert.get_output().status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(stdout.contains("PLAN_035"), "missing PLAN_035: {stdout}");
-    assert!(stdout.contains("missing 'files'"), "missing files diagnostic: {stdout}");
+    assert!(
+        stdout.contains("missing 'files'"),
+        "missing files diagnostic: {stdout}"
+    );
 }
 
 #[test]

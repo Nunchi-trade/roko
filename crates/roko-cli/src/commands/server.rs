@@ -29,20 +29,16 @@ pub(crate) async fn cmd_up(cli: &Cli, workdir: PathBuf) -> Result<i32> {
     let config = resolve_config_for_workdir(cli, &workdir)?;
     let repo_registry = RepoRegistry::load(&config, &workdir).unwrap_or_default();
     let state_hub = roko_serve::state::AppState::state_hub_for_workdir(&workdir);
-    let runtime = RokoCliRuntime::new_with_state_hub(config, repo_registry, state_hub.clone())
-        .into_arc();
+    let runtime =
+        RokoCliRuntime::new_with_state_hub(config, repo_registry, state_hub.clone()).into_arc();
     let roko_config = roko_core::config::loader::load_config_unified(&workdir)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let server_config = roko_serve::ServerBuildConfig::new(
-        workdir.clone(),
-        runtime,
-        roko_config,
-        None,
-        None,
-    )
-    .with_state_hub(state_hub);
-    let (serve_state, serve_handle) =
-        roko_serve::ServerBuilder::new(server_config).start_background().await?;
+    let server_config =
+        roko_serve::ServerBuildConfig::new(workdir.clone(), runtime, roko_config, None, None)
+            .with_state_hub(state_hub);
+    let (serve_state, serve_handle) = roko_serve::ServerBuilder::new(server_config)
+        .start_background()
+        .await?;
 
     // `start_server_background` binds before returning; this short pause keeps
     // the existing startup output order stable while background tasks settle.

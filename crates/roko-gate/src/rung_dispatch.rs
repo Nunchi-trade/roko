@@ -332,9 +332,7 @@ async fn run_generated_test_gate(
     if let Some(timeout_ms) = gate_timeout_ms(config) {
         gate = gate.with_timeout_ms(timeout_ms);
     }
-    gate
-        .verify(base_signal, ctx)
-        .await
+    gate.verify(base_signal, ctx).await
 }
 
 async fn run_verify_chain_gate(
@@ -423,9 +421,7 @@ async fn run_integration_gate(
     if let Some(timeout_ms) = gate_timeout_ms(config) {
         gate = gate.with_timeout_ms(timeout_ms);
     }
-    gate
-        .verify(base_signal, ctx)
-        .await
+    gate.verify(base_signal, ctx).await
 }
 
 fn default_timeout_for_rung(rung: Rung) -> Duration {

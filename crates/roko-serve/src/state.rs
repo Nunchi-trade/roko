@@ -445,6 +445,11 @@ pub struct AppState {
     pub active_matrix_runs: RwLock<HashMap<String, MatrixRunHandle>>,
     /// Ephemeral workspaces created via the API (keyed by workspace id).
     pub ephemeral_workspaces: RwLock<HashMap<String, WorkspaceInfo>>,
+
+    /// Upstream mirage JSON-RPC URL for reverse proxy (`ROKO_MIRAGE_URL`).
+    pub mirage_url: Option<String>,
+    /// Upstream agent-relay URL for reverse proxy (`ROKO_AGENT_RELAY_URL`).
+    pub agent_relay_url: Option<String>,
 }
 
 /// A tracked bench run with its background task handle.
@@ -480,10 +485,7 @@ impl AppState {
     pub fn state_hub_for_workdir(workdir: &Path) -> roko_core::SharedStateHub {
         let layout = RokoLayout::for_project(workdir);
         let event_log_path = layout.root().join("events.jsonl");
-        roko_core::SharedStateHub::new(roko_core::StateHub::with_event_log(
-            1024,
-            &event_log_path,
-        ))
+        roko_core::SharedStateHub::new(roko_core::StateHub::with_event_log(1024, &event_log_path))
     }
 
     /// Construct a new `AppState` from the working directory and loaded configs.
@@ -641,6 +643,12 @@ impl AppState {
             active_bench_runs: RwLock::new(HashMap::new()),
             active_matrix_runs: RwLock::new(HashMap::new()),
             ephemeral_workspaces: RwLock::new(HashMap::new()),
+            mirage_url: std::env::var("ROKO_MIRAGE_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            agent_relay_url: std::env::var("ROKO_AGENT_RELAY_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
 

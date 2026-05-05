@@ -44,6 +44,10 @@ mod workflows;
 mod workspaces;
 mod ws;
 
+mod proxy_ws;
+mod relay_proxy;
+mod rpc_proxy;
+
 use std::convert::Infallible;
 use std::net::IpAddr;
 use std::num::NonZeroU32;
@@ -180,6 +184,7 @@ pub fn build_router(
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())
         .merge(sse::routes())
+        .merge(rpc_proxy::routes())
         .route("/workflow/events", get(workflow_sse_handler));
 
     let api = if api_auth.enabled {
@@ -235,6 +240,7 @@ pub fn build_router(
         .merge(terminal)
         .nest("/api", api)
         .merge(ws)
+        .merge(relay_proxy::routes())
         // SPA fallback — serves embedded React app for all unmatched routes
         .fallback(crate::embedded::serve_embedded);
 

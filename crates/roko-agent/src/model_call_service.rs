@@ -362,13 +362,7 @@ impl ModelCallService {
         }
     }
 
-    fn inference_started(
-        &self,
-        request_id: &str,
-        model: &str,
-        agent_id: &str,
-        auto_routed: bool,
-    ) {
+    fn inference_started(&self, request_id: &str, model: &str, agent_id: &str, auto_routed: bool) {
         if let Some(observer) = &self.inference_observer {
             observer.on_start(&self.run_id, request_id, model, agent_id, auto_routed);
         }
@@ -842,7 +836,11 @@ struct AgentTracePayload {
 }
 
 fn agent_trace_payloads(result: &crate::agent::AgentResult) -> Vec<AgentTracePayload> {
-    result.trace.iter().filter_map(agent_trace_payload).collect()
+    result
+        .trace
+        .iter()
+        .filter_map(agent_trace_payload)
+        .collect()
 }
 
 fn agent_trace_payload(signal: &Engram) -> Option<AgentTracePayload> {

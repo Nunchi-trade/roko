@@ -16,7 +16,10 @@ pub(crate) async fn cmd_tune(cli: &Cli, cmd: TuneCmd) -> Result<i32> {
                 ("routing.mode", "auto_override".to_string()),
                 ("routing.algorithm", "linucb".to_string()),
                 ("routing.fast_task_model", "claude-haiku-4-5".to_string()),
-                ("routing.standard_task_model", "claude-sonnet-4-6".to_string()),
+                (
+                    "routing.standard_task_model",
+                    "claude-sonnet-4-6".to_string(),
+                ),
                 ("routing.complex_task_model", "claude-opus-4-6".to_string()),
                 ("routing.context_strategy", "hybrid".to_string()),
                 ("routing.weights.quality", "0.55".to_string()),
@@ -50,7 +53,8 @@ pub(crate) async fn cmd_tune(cli: &Cli, cmd: TuneCmd) -> Result<i32> {
         .iter()
         .map(|(key, value)| ((*key).to_string(), value.clone()))
         .collect::<HashMap<_, _>>();
-    roko_cli::tui::config_meta::save_pending_edits(&workdir, &pending).map_err(anyhow::Error::msg)?;
+    roko_cli::tui::config_meta::save_pending_edits(&workdir, &pending)
+        .map_err(anyhow::Error::msg)?;
 
     let path = workdir.join("roko.toml");
     println!("tuned {label} in {}", path.display());

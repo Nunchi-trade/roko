@@ -417,9 +417,8 @@ fn ensure_workflow_agent_configured(
     agent_command_source: crate::config::Source,
     overrides: &CliOverrides,
 ) -> anyhow::Result<()> {
-    let has_model_override = config.agent.model.is_some()
-        || overrides.model.is_some()
-        || overrides.provider.is_some();
+    let has_model_override =
+        config.agent.model.is_some() || overrides.model.is_some() || overrides.provider.is_some();
     if agent_command_source == crate::config::Source::Default
         && config.agent.command == "cat"
         && !has_model_override

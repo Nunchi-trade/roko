@@ -301,7 +301,10 @@ impl ServerBuilder {
         let state_hub = self.config.state_hub.clone();
         if self.state.is_none() {
             self.state = Some(Arc::new(build_app_state(
-                workdir, runtime, roko_config, state_hub,
+                workdir,
+                runtime,
+                roko_config,
+                state_hub,
             )?));
         }
         let state = Arc::clone(self.state.as_ref().expect("state just set"));

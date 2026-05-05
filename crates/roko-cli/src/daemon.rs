@@ -324,12 +324,8 @@ pub async fn daemon_start(workdir: &Path, foreground: bool, port: u16) -> Result
     let daimon_strategy_space = cli_config.daimon.strategy_space.clone();
     let repo_registry = RepoRegistry::load(&cli_config, workdir).unwrap_or_default();
     let state_hub = AppState::state_hub_for_workdir(workdir);
-    let runtime = RokoCliRuntime::new_with_state_hub(
-        cli_config,
-        repo_registry,
-        state_hub.clone(),
-    )
-    .into_arc();
+    let runtime =
+        RokoCliRuntime::new_with_state_hub(cli_config, repo_registry, state_hub.clone()).into_arc();
     let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
     let state = Arc::new(AppState::new_with_daimon_strategy_and_state_hub(
         workdir.to_path_buf(),
