@@ -14,6 +14,7 @@ mod connectors;
 mod deployments;
 mod diagnosis;
 mod dream;
+mod event_ingest;
 mod feeds;
 mod gateway;
 mod heartbeats;
@@ -160,6 +161,7 @@ pub fn build_router(
         .merge(projections::routes())
         .merge(neuro::routes())
         .merge(dream::routes())
+        .merge(event_ingest::routes())
         .merge(gateway::routes())
         .merge(chain::routes())
         .merge(connectors::routes())
