@@ -1,7 +1,7 @@
 //! `roko doctor` bootstrap diagnostics for self-hosted workspaces.
 
 use crate::config::{ConfigLayer, ConfigPaths, resolve_paths};
-use crate::{Config, load_layered};
+use crate::{Config, load_resolved_config};
 use anyhow::{Context as _, Result};
 use reqwest::Url;
 use roko_fs::RokoLayout;
@@ -274,7 +274,7 @@ fn load_active_config(workdir: &Path, config_override: Option<&Path>) -> Result<
         || paths.global.is_file()
         || paths.project.is_some()
     {
-        Some(load_layered(workdir)?.config)
+        Some(load_resolved_config(workdir)?.config)
     } else {
         None
     };

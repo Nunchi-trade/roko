@@ -1040,7 +1040,7 @@ fn resolve_model_selection_for_workdir(
     workdir: &std::path::Path,
     requested: &str,
 ) -> Result<crate::model_selection::EffectiveModelSelection, crate::model_selection::Error> {
-    let resolved = match crate::config::load_layered(workdir) {
+    let resolved = match crate::config::load_resolved_config(workdir) {
         Ok(resolved) => resolved.config,
         Err(_) => {
             // No layered config on disk: build a minimal one so the
@@ -1528,7 +1528,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
 fn build_unified_inline_agent_session(
     workdir: std::path::PathBuf,
 ) -> std::result::Result<(ChatAgentSession, Option<String>, CostTable), ChatInlineDispatchError> {
-    let resolved = crate::config::load_layered(&workdir)
+    let resolved = crate::config::load_resolved_config(&workdir)
         .map_err(|source| ChatInlineDispatchError::ConfigLoad { source })?;
     let config = resolved.config;
 

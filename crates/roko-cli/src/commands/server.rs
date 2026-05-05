@@ -265,7 +265,7 @@ pub(crate) async fn cmd_deploy_railway(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("Checking security posture...");
     check_security_posture(&config, unsafe_public)?;
-    let deploy_webhooks = match load_layered(&workdir) {
+    let deploy_webhooks = match load_resolved_config(&workdir) {
         Ok(resolved) => resolved.config.serve.deploy.webhooks,
         Err(err) => {
             warn!(

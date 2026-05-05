@@ -8,7 +8,7 @@
 use crate::config::{
     AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
     ResolvedConfig, RunnerLayer, ServeAuthLayer, ServeLayer, Source, ToolsLayer, apply_layer_value,
-    detect_clis, global_config_path, load_layered, resolve_paths,
+    detect_clis, global_config_path, load_resolved_config, resolve_paths,
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::agent::ProviderKind;
@@ -213,14 +213,14 @@ fn default_executor_layer() -> ExecutorLayer {
 
 /// Print the effective merged config with `[source]` tags on each field.
 pub fn cmd_show(workdir: &Path) -> Result<()> {
-    let resolved = load_layered(workdir)?;
+    let resolved = load_resolved_config(workdir)?;
     print_resolved(&resolved);
     Ok(())
 }
 
 /// Print the resolved config paths (global + project + env override).
 pub fn cmd_path(workdir: &Path) -> Result<()> {
-    let resolved = load_layered(workdir)?;
+    let resolved = load_resolved_config(workdir)?;
     let global_exists = if resolved.paths.global.is_file() {
         "exists"
     } else {
@@ -591,7 +591,7 @@ fn write_atomic_restricted(path: &Path, text: &str) -> Result<()> {
 
 /// Open `$EDITOR` on the global or project config file (creating it if needed).
 pub fn cmd_edit(workdir: &Path, which: EditTarget) -> Result<()> {
-    let resolved = load_layered(workdir)?;
+    let resolved = load_resolved_config(workdir)?;
     let path = match which {
         EditTarget::Global => resolved.paths.global,
         EditTarget::Project => resolved
@@ -623,7 +623,7 @@ pub fn cmd_edit(workdir: &Path, which: EditTarget) -> Result<()> {
 
 /// Set a single dotted-key value and write it to the chosen layer file.
 pub fn cmd_set(workdir: &Path, target: EditTarget, key: &str, value: &str) -> Result<()> {
-    let resolved = load_layered(workdir)?;
+    let resolved = load_resolved_config(workdir)?;
     let path = match target {
         EditTarget::Global | EditTarget::Auto => resolved.paths.global,
         EditTarget::Project => resolved

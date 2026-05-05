@@ -14,7 +14,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use roko_serve::bench::BenchStrategy;
 
-use crate::config::load_layered;
+use crate::config::load_resolved_config;
 use crate::inline::primitives::*;
 use crate::inline::styled;
 use crate::inline::symbols;
@@ -559,7 +559,7 @@ async fn run_task_real(workdir: &Path, task: &BenchTask, mode: &str) -> Result<B
     // Load the project config from `roko.toml` in `workdir`. Fall back to a
     // minimal default (command = "claude") when no config file is present so
     // that `roko bench demo --real` works even from a bare directory.
-    let mut config = load_layered(workdir)
+    let mut config = load_resolved_config(workdir)
         .map(|resolved| resolved.config)
         .unwrap_or_else(|_| {
             let mut c = crate::config::Config::default();

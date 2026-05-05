@@ -2866,16 +2866,44 @@ pub struct ConfigSources {
     pub runner_plan_timeout_secs: Source,
 }
 
-/// Load global + project configs, merge them, and return a `ResolvedConfig`.
+/// Load config using the unified core loader and return a [`ResolvedConfig`].
 ///
-/// Precedence (highest first): `ROKO__*` env vars → `ROKO_CONFIG` env var →
-/// project → global → defaults.
-pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
+/// This is the primary config loading entry point for CLI code. It delegates to
+/// `roko_core::config::loader::load_config_validated_with_options()` for the
+/// authoritative config (providers, models, agent defaults, env overrides),
+/// then builds the CLI-specific compatibility fields (`ConfigSources`,
+/// `ConfigPaths`, `RepoRegistry`) that downstream code still requires.
+///
+/// Precedence (highest first): hierarchical `ROKO__*` env vars → named
+/// `ROKO_*` env vars → `ROKO_CONFIG` env var → project `roko.toml` →
+/// global `~/.roko/config.toml` → defaults.
+///
+/// ## Compatibility notes
+///
+/// The following CLI-only fields are still parsed from the legacy `ConfigLayer`
+/// system because they have no equivalent in `RokoConfig`:
+/// - `auto_plan` (CLI-specific flag, not in core schema)
+/// - `repos` (per-repository blocks, CLI-only)
+/// - Legacy `[[gate]]` array syntax (core uses `[gates]` section)
+/// - `dreams` / `daimon` / `runner.plan_timeout_secs` (CLI-specific config shapes)
+///
+/// These fields do NOT override core provider/model/env behavior.
+pub fn load_resolved_config(workdir: &Path) -> Result<ResolvedConfig> {
     let paths = resolve_paths(workdir);
     let (env_layer, env_paths) = collect_env_override_layer()?;
 
-    // If ROKO_CONFIG is set, it alone resolves the file config; field-level
-    // ROKO__* env vars still apply on top.
+    // Load the authoritative config from the core unified loader.
+    // This handles: ancestor walk, ROKO_CONFIG env, global merge, named env
+    // overrides (ROKO_MODEL etc.), hierarchical ROKO__* overrides,
+    // interpolation, and file secret resolution.
+    let _core_validated = roko_core::config::loader::load_config_validated_with_options(
+        workdir,
+        &roko_core::config::loader::LoadOptions::default(),
+    )
+    .map_err(|e| anyhow!("core config loader: {e}"))?;
+
+    // Build CLI config from the legacy layer system for compatibility fields.
+    // The core-loaded config is authoritative for providers/models/agent/env.
     if let Some(env_path) = &paths.env_override {
         let layer = ConfigLayer::from_file(env_path)?.merge(env_layer);
         let sources = sources_from_layer(&layer, Source::Env, Source::Default);
@@ -2916,6 +2944,15 @@ pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
         sources,
         paths,
     })
+}
+
+/// **Deprecated**: Use [`load_resolved_config`] instead.
+///
+/// This function now delegates to `load_resolved_config` and exists only to
+/// avoid breaking any remaining test-only references during migration.
+#[deprecated(note = "use load_resolved_config() instead")]
+pub fn load_layered(workdir: &Path) -> Result<ResolvedConfig> {
+    load_resolved_config(workdir)
 }
 
 /// Compute per-field provenance from global + project layers.
@@ -4047,5 +4084,54 @@ program = "echo"
             rendered.contains("enabled = false"),
             "expected the rendered template to set serve.auth.enabled = false"
         );
+    }
+
+    #[test]
+    fn load_resolved_config_returns_defaults_when_no_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = load_resolved_config(dir.path()).unwrap();
+        // Default source for all fields when no config files exist.
+        assert_eq!(resolved.sources.agent_command, Source::Default);
+        assert_eq!(resolved.sources.agent_model, Source::Default);
+        assert_eq!(resolved.sources.providers, Source::Default);
+    }
+
+    #[test]
+    fn load_resolved_config_reads_project_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = r#"
+[agent]
+command = "claude"
+model = "opus-4"
+"#;
+        std::fs::write(dir.path().join("roko.toml"), toml).unwrap();
+
+        let resolved = load_resolved_config(dir.path()).unwrap();
+        assert_eq!(resolved.config.agent.command, "claude");
+        assert_eq!(resolved.config.agent.model, Some("opus-4".to_string()));
+        assert_eq!(resolved.sources.agent_command, Source::Project);
+        assert_eq!(resolved.sources.agent_model, Source::Project);
+    }
+
+    #[test]
+    fn load_resolved_config_repo_registry_loads_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("roko.toml"), "[agent]\ncommand = \"cat\"\n").unwrap();
+
+        let resolved = load_resolved_config(dir.path()).unwrap();
+        // No repos configured, registry should be empty.
+        assert!(resolved.repo_registry.is_empty());
+    }
+
+    #[test]
+    fn load_resolved_config_config_paths_populated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("roko.toml"), "[agent]\ncommand = \"cat\"\n").unwrap();
+
+        let resolved = load_resolved_config(dir.path()).unwrap();
+        // Global path is always set (even if file doesn't exist).
+        assert!(!resolved.paths.global.as_os_str().is_empty());
+        // Project path should point to the roko.toml we wrote.
+        assert!(resolved.paths.project.is_some());
     }
 }

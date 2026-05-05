@@ -130,7 +130,7 @@ pub(crate) async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
         } => {
             let default_wd = resolve_workdir(cli);
             let wd = workdir.as_deref().unwrap_or(&default_wd);
-            let auth_cfg = load_layered(wd)
+            let auth_cfg = load_resolved_config(wd)
                 .map(|r| r.config.serve.auth)
                 .unwrap_or_default();
             let headers = match auth::resolve_api_key(&auth_cfg, None) {
@@ -288,7 +288,7 @@ pub(crate) async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
                 // Delegate to roko-serve
                 let default_wd = resolve_workdir(cli);
                 let wd = workdir.as_deref().unwrap_or(&default_wd);
-                let auth_cfg = load_layered(wd)
+                let auth_cfg = load_resolved_config(wd)
                     .map(|r| r.config.serve.auth)
                     .unwrap_or_default();
                 let headers = match auth::resolve_api_key(&auth_cfg, None) {

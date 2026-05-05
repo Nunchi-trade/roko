@@ -49,6 +49,7 @@ fn load_returns_defaults_when_no_file() {
     let opts = LoadOptions {
         merge_global: false,
         apply_env_overrides: false,
+        apply_hierarchical_env: false,
         strict_validation: false,
     };
     let config = load_config_with_options(dir.path(), &opts).unwrap();
@@ -75,6 +76,7 @@ api_key_env = "TEST_KEY"
     let opts = LoadOptions {
         merge_global: false,
         apply_env_overrides: false,
+        apply_hierarchical_env: false,
         strict_validation: false,
     };
     let config = load_config_with_options(dir.path(), &opts).unwrap();
@@ -115,6 +117,7 @@ base_url = "https://explicit.example/v1"
     let opts = LoadOptions {
         merge_global: false,
         apply_env_overrides: false,
+        apply_hierarchical_env: false,
         strict_validation: false,
     };
     let config = load_config_file(&explicit_path, &opts).unwrap();
@@ -148,6 +151,7 @@ supports_tools = true
     let opts = LoadOptions {
         merge_global: false,
         apply_env_overrides: false,
+        apply_hierarchical_env: false,
         strict_validation: false,
     };
     let config = load_config_with_options(dir.path(), &opts).unwrap();
@@ -196,6 +200,7 @@ context_window = 128000
     let opts = LoadOptions {
         merge_global: false,
         apply_env_overrides: false,
+        apply_hierarchical_env: false,
         strict_validation: false,
     };
     let config = load_config_with_options(dir.path(), &opts).unwrap();
@@ -253,6 +258,7 @@ tool_format = "openai_json"
     let opts = LoadOptions {
         merge_global: false,
         apply_env_overrides: false,
+        apply_hierarchical_env: false,
         strict_validation: false,
     };
     let config = load_config_with_options(dir.path(), &opts).unwrap();
@@ -485,6 +491,7 @@ fn project_roko_toml_loads_through_unified_loader() {
     let opts = LoadOptions {
         merge_global: false,
         apply_env_overrides: false,
+        apply_hierarchical_env: false,
         strict_validation: false,
     };
     let config =

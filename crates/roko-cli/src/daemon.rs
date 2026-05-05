@@ -129,7 +129,7 @@ pub struct SubscriptionSummary {
 }
 
 use crate::config::RepoRegistry;
-use crate::load_layered;
+use crate::load_resolved_config;
 use crate::serve_runtime::RokoCliRuntime;
 use roko_core::config::loader::load_config_unified;
 use roko_serve::{self, deploy, dispatch, dreams, feedback, fswatcher, scheduler, state::AppState};
@@ -318,7 +318,7 @@ pub async fn daemon_start(workdir: &Path, foreground: bool, port: u16) -> Result
     }
 
     let core_config = load_config_unified(workdir)?;
-    let cli_config = load_layered(workdir)?.config;
+    let cli_config = load_resolved_config(workdir)?.config;
     let dream_settings = cli_config.dreams.clone();
     let agent_settings = cli_config.agent.clone();
     let daimon_strategy_space = cli_config.daimon.strategy_space.clone();

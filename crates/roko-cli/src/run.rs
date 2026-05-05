@@ -367,7 +367,7 @@ fn resolve_workflow_model_selection(
     workdir: &std::path::Path,
     overrides: &CliOverrides,
 ) -> anyhow::Result<(Config, RokoConfig, EffectiveModelSelection)> {
-    let resolved = crate::config::load_layered(workdir)
+    let resolved = crate::config::load_resolved_config(workdir)
         .with_context(|| format!("load config for workflow engine in {}", workdir.display()))?;
     let mut config = resolved.config;
     ensure_workflow_agent_configured(&config, resolved.sources.agent_command, overrides)?;
