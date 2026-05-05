@@ -111,6 +111,7 @@ async fn create_workspace(
 
     let layout = RokoLayout::for_project(&dir);
     if let Err(e) = layout.ensure_dirs().await {
+        // Intentionally ignoring: best-effort cleanup of partially-created workspace
         let _ = tokio::fs::remove_dir_all(&dir).await;
         return Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -197,7 +198,14 @@ async fn delete_workspace(
 
     match info {
         Some(ws) => {
-            let _ = tokio::fs::remove_dir_all(&ws.path).await;
+            if let Err(err) = tokio::fs::remove_dir_all(&ws.path).await {
+                tracing::warn!(
+                    workspace_id = %id,
+                    path = %ws.path.display(),
+                    error = %err,
+                    "failed to remove ephemeral workspace directory"
+                );
+            }
             Ok(Json(json!({ "deleted": true, "id": id })))
         }
         None => Err((

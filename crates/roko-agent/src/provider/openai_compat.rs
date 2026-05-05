@@ -94,8 +94,13 @@ fn inject_provider_routing(
         return;
     };
 
-    if let Ok(value) = serde_json::to_value(routing) {
-        body.insert("provider".to_string(), value);
+    match serde_json::to_value(routing) {
+        Ok(value) => {
+            body.insert("provider".to_string(), value);
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize provider routing config for OpenRouter");
+        }
     }
 }
 
@@ -247,27 +252,36 @@ fn parse_allowed_tools_csv(csv: Option<&str>) -> Option<HashSet<&str>> {
     (!allowed.is_empty()).then_some(allowed)
 }
 
-fn block_on<F>(future: F) -> F::Output
+fn block_on<F>(future: F) -> Result<F::Output, AgentCreationError>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("create MCP discovery runtime")
-                .block_on(future)
-        })
-        .join()
-        .expect("join MCP discovery thread")
-    } else {
+    let build_rt = || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("create MCP discovery runtime")
-            .block_on(future)
+            .map_err(|e| {
+                AgentCreationError::MissingConfig(format!(
+                    "failed to create MCP discovery runtime: {e}"
+                ))
+            })
+    };
+
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(move || {
+            let rt = build_rt()?;
+            Ok(rt.block_on(future))
+        })
+        .join()
+        .unwrap_or_else(|_| {
+            Err(AgentCreationError::MissingConfig(
+                "MCP discovery thread panicked".to_string(),
+            ))
+        })
+    } else {
+        let rt = build_rt()?;
+        Ok(rt.block_on(future))
     }
 }
 
@@ -307,8 +321,8 @@ pub(crate) fn tool_registry_for_options(
                 mcp_config_path.display()
             ))
         })?;
-        let mcp_tools =
-            block_on(async move { discover_mcp_tools(&mcp_config).await }).map_err(|err| {
+        let mcp_tools = block_on(async move { discover_mcp_tools(&mcp_config).await })?
+            .map_err(|err| {
                 AgentCreationError::MissingConfig(format!(
                     "mcp tool discovery from {} failed: {err}",
                     mcp_config_path.display()
@@ -448,7 +462,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
 mod tests {
     use super::*;
     use crate::http::{HttpPostError, HttpPoster};
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Signal, Kind};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -456,8 +470,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    fn prompt(text: &str) -> Engram {
-        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Signal {
+        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn spawn_chat_server(

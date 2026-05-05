@@ -95,7 +95,14 @@ async fn update_config(
     {
         let workspaces = state.ephemeral_workspaces.read().await;
         for ws in workspaces.values() {
-            let _ = tokio::fs::write(ws.path.join("roko.toml"), &toml_str).await;
+            if let Err(err) = tokio::fs::write(ws.path.join("roko.toml"), &toml_str).await {
+                tracing::warn!(
+                    workspace_id = %ws.id,
+                    path = %ws.path.display(),
+                    error = %err,
+                    "failed to propagate config update to ephemeral workspace"
+                );
+            }
         }
     }
 

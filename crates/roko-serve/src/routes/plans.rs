@@ -300,7 +300,9 @@ async fn pause_plan(
     // Write a lightweight snapshot so the dashboard knows the plan is
     // paused and `POST /resume` can restart it.
     let snapshot_dir = state.workdir.join(".roko").join("state");
-    let _ = tokio::fs::create_dir_all(&snapshot_dir).await;
+    if let Err(err) = tokio::fs::create_dir_all(&snapshot_dir).await {
+        tracing::warn!(path = %snapshot_dir.display(), error = %err, "failed to create state dir for pause snapshot");
+    }
     let snapshot_path = snapshot_dir.join(format!("{id}.paused.json"));
     let snapshot = json!({
         "plan_id": id,
@@ -309,11 +311,14 @@ async fn pause_plan(
         "plan_dir": handle.plan_dir,
         "run_id": handle.id,
     });
-    let _ = tokio::fs::write(
+    if let Err(err) = tokio::fs::write(
         &snapshot_path,
         serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
     )
-    .await;
+    .await
+    {
+        tracing::warn!(path = %snapshot_path.display(), error = %err, "failed to write pause snapshot");
+    }
 
     // Remove from active set.
     active.remove(&id);
@@ -352,6 +357,7 @@ async fn resume_plan(
         .join(".roko")
         .join("state")
         .join(format!("{id}.paused.json"));
+    // Intentionally ignoring: file may not exist if plan was never paused
     let _ = tokio::fs::remove_file(&paused_path).await;
 
     // Re-execute (same logic as execute, but marks it as a resume).
@@ -518,11 +524,18 @@ async fn plan_chat(
                             .join(".roko")
                             .join("state")
                             .join(format!("{plan_id}.chat-response.json"));
-                        let _ = tokio::fs::write(
+                        if let Err(err) = tokio::fs::write(
                             &mutations_path,
                             serde_json::to_string_pretty(&mutations).unwrap_or_default(),
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::warn!(
+                                path = %mutations_path.display(),
+                                error = %err,
+                                "failed to write plan chat mutations response"
+                            );
+                        }
                     }
                 }
                 state_for_task.provider_health.record_success("default");
@@ -1100,7 +1113,10 @@ async fn record_review(
     comment: &str,
 ) {
     let reviews_path = workdir.join(".roko").join("state").join("reviews.jsonl");
-    let _ = tokio::fs::create_dir_all(reviews_path.parent().unwrap_or(workdir)).await;
+    if let Err(err) = tokio::fs::create_dir_all(reviews_path.parent().unwrap_or(workdir)).await {
+        tracing::warn!(path = %reviews_path.display(), error = %err, "failed to create reviews state directory");
+        return;
+    }
 
     let entry = serde_json::json!({
         "plan_id": plan_id,
@@ -1114,14 +1130,21 @@ async fn record_review(
     line.push('\n');
 
     // Append atomically.
-    if let Ok(mut f) = tokio::fs::OpenOptions::new()
+    match tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&reviews_path)
         .await
     {
-        use tokio::io::AsyncWriteExt;
-        let _ = f.write_all(line.as_bytes()).await;
+        Ok(mut f) => {
+            use tokio::io::AsyncWriteExt;
+            if let Err(err) = f.write_all(line.as_bytes()).await {
+                tracing::warn!(path = %reviews_path.display(), error = %err, "failed to write review entry");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(path = %reviews_path.display(), error = %err, "failed to open reviews file for append");
+        }
     }
 }
 

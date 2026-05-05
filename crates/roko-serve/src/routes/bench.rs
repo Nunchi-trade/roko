@@ -135,7 +135,9 @@ async fn start_bench_run(
         pass_rate: None,
         total_cost_usd: None,
     };
-    let _ = bench::append_index_entry(&state.workdir, &index_entry).await;
+    if let Err(err) = bench::append_index_entry(&state.workdir, &index_entry).await {
+        tracing::warn!(error = %err, "failed to append bench run index entry");
+    }
 
     // Publish start event.
     state.event_bus.publish(ServerEvent::BenchRunStarted {
@@ -196,7 +198,9 @@ async fn execute_bench_run(
             if let Ok(Some(mut run)) = bench::load_bench_run(&state.workdir, &run_id).await {
                 run.status = BenchRunStatus::Failed;
                 run.finished_at = Some(finished_at);
-                let _ = bench::save_bench_run(&state.workdir, &run).await;
+                if let Err(err) = bench::save_bench_run(&state.workdir, &run).await {
+                    tracing::warn!(error = %err, run_id = %run_id, "failed to save failed bench run state");
+                }
             }
 
             let failed_index_entry = BenchRunIndexEntry {
@@ -211,7 +215,9 @@ async fn execute_bench_run(
                 pass_rate: None,
                 total_cost_usd: None,
             };
-            let _ = bench::update_index_entry(&state.workdir, &failed_index_entry).await;
+            if let Err(err) = bench::update_index_entry(&state.workdir, &failed_index_entry).await {
+                tracing::warn!(error = %err, run_id = %run_id, "failed to update index for failed bench run");
+            }
 
             state.active_bench_runs.write().await.remove(&run_id);
             return;
@@ -375,10 +381,20 @@ async fn execute_bench_run(
         }
 
         // Update on-disk state periodically.
-        if let Ok(Some(mut run)) = bench::load_bench_run(&state.workdir, &run_id).await {
-            run.results = results.clone();
-            run.current_task_index = idx + 1;
-            let _ = bench::save_bench_run(&state.workdir, &run).await;
+        match bench::load_bench_run(&state.workdir, &run_id).await {
+            Ok(Some(mut run)) => {
+                run.results = results.clone();
+                run.current_task_index = idx + 1;
+                if let Err(err) = bench::save_bench_run(&state.workdir, &run).await {
+                    tracing::warn!(error = %err, run_id = %run_id, "failed to save periodic bench run state");
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(run_id = %run_id, "bench run file missing during periodic save");
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, run_id = %run_id, "failed to load bench run for periodic save");
+            }
         }
     }
 
@@ -386,13 +402,23 @@ async fn execute_bench_run(
     let summary = BenchRunSummary::from_results(&results);
     let finished_at = now_secs();
 
-    if let Ok(Some(mut run)) = bench::load_bench_run(&state.workdir, &run_id).await {
-        run.status = BenchRunStatus::Completed;
-        run.finished_at = Some(finished_at);
-        run.results = results;
-        run.summary = Some(summary.clone());
-        run.current_task_index = total_tasks;
-        let _ = bench::save_bench_run(&state.workdir, &run).await;
+    match bench::load_bench_run(&state.workdir, &run_id).await {
+        Ok(Some(mut run)) => {
+            run.status = BenchRunStatus::Completed;
+            run.finished_at = Some(finished_at);
+            run.results = results;
+            run.summary = Some(summary.clone());
+            run.current_task_index = total_tasks;
+            if let Err(err) = bench::save_bench_run(&state.workdir, &run).await {
+                tracing::warn!(error = %err, run_id = %run_id, "failed to save completed bench run");
+            }
+        }
+        Ok(None) => {
+            tracing::warn!(run_id = %run_id, "bench run file missing at finalization");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, run_id = %run_id, "failed to load bench run at finalization");
+        }
     }
 
     // Update index entry.
@@ -408,7 +434,9 @@ async fn execute_bench_run(
         pass_rate: Some(summary.pass_rate),
         total_cost_usd: Some(summary.total_cost_usd),
     };
-    let _ = bench::update_index_entry(&state.workdir, &index_entry).await;
+    if let Err(err) = bench::update_index_entry(&state.workdir, &index_entry).await {
+        tracing::warn!(error = %err, run_id = %run_id, "failed to update bench run index at completion");
+    }
 
     // Publish completion event.
     state.event_bus.publish(ServerEvent::BenchRunCompleted {
@@ -463,11 +491,19 @@ async fn delete_bench_run(
         handle.handle.abort();
     }
     // Mark as cancelled on disk if still running.
-    if let Ok(Some(mut run)) = bench::load_bench_run(&state.workdir, &id).await {
-        if run.status == BenchRunStatus::Running {
-            run.status = BenchRunStatus::Cancelled;
-            run.finished_at = Some(now_secs());
-            let _ = bench::save_bench_run(&state.workdir, &run).await;
+    match bench::load_bench_run(&state.workdir, &id).await {
+        Ok(Some(mut run)) => {
+            if run.status == BenchRunStatus::Running {
+                run.status = BenchRunStatus::Cancelled;
+                run.finished_at = Some(now_secs());
+                if let Err(err) = bench::save_bench_run(&state.workdir, &run).await {
+                    tracing::warn!(error = %err, bench_id = %id, "failed to save cancelled bench run state");
+                }
+            }
+        }
+        Ok(None) => {} // Already deleted, nothing to cancel
+        Err(err) => {
+            tracing::warn!(error = %err, bench_id = %id, "failed to load bench run for cancellation");
         }
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -736,6 +772,7 @@ impl BenchWorkdirCleanup {
 
 impl Drop for BenchWorkdirCleanup {
     fn drop(&mut self) {
+        // Intentionally ignoring: best-effort cleanup of temporary bench workdir
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
@@ -773,6 +810,7 @@ async fn scaffold_bench_workdir(suite_id: &str, run_id: &str) -> anyhow::Result<
     }
     .await
     {
+        // Intentionally ignoring: best-effort cleanup after scaffold failure
         let _ = tokio::fs::remove_dir_all(&dir).await;
         return Err(err);
     }

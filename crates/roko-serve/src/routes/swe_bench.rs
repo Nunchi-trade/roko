@@ -113,10 +113,19 @@ async fn start_swe_run(
                 // Save result to disk.
                 let path = swe_run_path(&swe_workdir, &result.run_id);
                 if let Some(parent) = path.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
+                    if let Err(err) = tokio::fs::create_dir_all(parent).await {
+                        tracing::warn!(path = %parent.display(), error = %err, "failed to create SWE-bench results directory");
+                    }
                 }
-                if let Ok(json) = serde_json::to_string_pretty(&result) {
-                    let _ = tokio::fs::write(&path, json).await;
+                match serde_json::to_string_pretty(&result) {
+                    Ok(json) => {
+                        if let Err(err) = tokio::fs::write(&path, json).await {
+                            tracing::warn!(path = %path.display(), error = %err, "failed to write SWE-bench run result");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to serialize SWE-bench run result");
+                    }
                 }
 
                 // Publish per-instance and completion events.
