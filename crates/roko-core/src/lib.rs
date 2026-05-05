@@ -263,7 +263,7 @@ pub use provenance::{
 pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
 pub use query::{Budget, Query};
 pub use roko_primitives::HdcVector;
-pub use runtime_event::{RuntimeEvent, WorkflowOutcome};
+pub use runtime_event::{RuntimeEvent, ToolCallSummary, WorkflowOutcome};
 pub use score::Score;
 pub use signal::{Signal, SignalBuilder};
 pub use signal_kinds::*;

@@ -3,6 +3,7 @@
 //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
 //! consume these via `EventBus<RuntimeEvent>`.
 
+use crate::foundation::TokenUsage;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -44,6 +45,13 @@ pub enum WorkflowOutcome {
     Halted { reason: String },
     /// Workflow was cancelled by the user.
     Cancelled,
+}
+
+/// Summary of a tool call captured during an agent turn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallSummary {
+    pub name: String,
+    pub result_preview: String,
 }
 
 /// Every event the workflow engine can emit.
@@ -125,10 +133,73 @@ pub enum RuntimeEvent {
         run_id: String,
         path: String,
     },
+
+    // Inference tracking
+    InferenceStarted {
+        request_id: String,
+        model: String,
+        agent_id: String,
+        auto_routed: bool,
+    },
+    InferenceCompleted {
+        request_id: String,
+        model: String,
+        agent_id: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+        duration_ms: u64,
+    },
+    InferenceFailed {
+        request_id: String,
+        model: String,
+        agent_id: String,
+        error: String,
+    },
+
+    // Agent traces
+    AgentTrace {
+        agent_id: String,
+        turn: u32,
+        tool_calls: Vec<ToolCallSummary>,
+        reasoning: Option<String>,
+        usage: TokenUsage,
+    },
+
+    // Demo run and task lifecycle
+    TaskFailed {
+        plan_id: String,
+        task_id: String,
+        error: String,
+        gate_failure: bool,
+    },
+    RunStarted {
+        run_id: String,
+        prompt: String,
+        complexity: String,
+    },
+    RunCompleted {
+        run_id: String,
+        success: bool,
+        cost_usd: f64,
+        duration_ms: u64,
+    },
+
+    // Knowledge flow
+    KnowledgeIngested {
+        entry_id: String,
+        topic: String,
+        source_agent: String,
+    },
+    KnowledgeConsumed {
+        entry_id: String,
+        topic: String,
+        consuming_agent: String,
+    },
 }
 
 impl RuntimeEvent {
-    /// Returns the run_id common to all event variants.
+    /// Returns the run-scoped identifier when this event carries one.
     pub fn run_id(&self) -> &str {
         match self {
             Self::WorkflowStarted { run_id, .. }
@@ -142,7 +213,16 @@ impl RuntimeEvent {
             | Self::GatePassed { run_id, .. }
             | Self::GateFailed { run_id, .. }
             | Self::FeedbackRecorded { run_id, .. }
-            | Self::StateCheckpointed { run_id, .. } => run_id,
+            | Self::StateCheckpointed { run_id, .. }
+            | Self::RunStarted { run_id, .. }
+            | Self::RunCompleted { run_id, .. } => run_id,
+            Self::TaskFailed { plan_id, .. } => plan_id,
+            Self::InferenceStarted { .. }
+            | Self::InferenceCompleted { .. }
+            | Self::InferenceFailed { .. }
+            | Self::AgentTrace { .. }
+            | Self::KnowledgeIngested { .. }
+            | Self::KnowledgeConsumed { .. } => "",
         }
     }
 
@@ -161,6 +241,15 @@ impl RuntimeEvent {
             Self::GateFailed { .. } => "gate_failed",
             Self::FeedbackRecorded { .. } => "feedback_recorded",
             Self::StateCheckpointed { .. } => "state_checkpointed",
+            Self::InferenceStarted { .. } => "inference_started",
+            Self::InferenceCompleted { .. } => "inference_completed",
+            Self::InferenceFailed { .. } => "inference_failed",
+            Self::AgentTrace { .. } => "agent_trace",
+            Self::TaskFailed { .. } => "task_failed",
+            Self::RunStarted { .. } => "run_started",
+            Self::RunCompleted { .. } => "run_completed",
+            Self::KnowledgeIngested { .. } => "knowledge_ingested",
+            Self::KnowledgeConsumed { .. } => "knowledge_consumed",
         }
     }
 }
@@ -207,5 +296,112 @@ mod tests {
         };
 
         assert!(outcome.to_string().contains("abc123"));
+    }
+
+    #[test]
+    fn new_runtime_event_variants_serialize_roundtrip() {
+        let events = vec![
+            (
+                RuntimeEvent::InferenceStarted {
+                    request_id: "req-1".into(),
+                    model: "claude-sonnet".into(),
+                    agent_id: "agent-1".into(),
+                    auto_routed: true,
+                },
+                "inference_started",
+            ),
+            (
+                RuntimeEvent::InferenceCompleted {
+                    request_id: "req-1".into(),
+                    model: "claude-sonnet".into(),
+                    agent_id: "agent-1".into(),
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cost_usd: 0.0123,
+                    duration_ms: 1200,
+                },
+                "inference_completed",
+            ),
+            (
+                RuntimeEvent::InferenceFailed {
+                    request_id: "req-2".into(),
+                    model: "claude-sonnet".into(),
+                    agent_id: "agent-1".into(),
+                    error: "rate limited".into(),
+                },
+                "inference_failed",
+            ),
+            (
+                RuntimeEvent::AgentTrace {
+                    agent_id: "agent-1".into(),
+                    turn: 2,
+                    tool_calls: vec![ToolCallSummary {
+                        name: "read_file".into(),
+                        result_preview: "loaded runtime_event.rs".into(),
+                    }],
+                    reasoning: Some("checking event coverage".into()),
+                    usage: TokenUsage {
+                        input_tokens: 200,
+                        output_tokens: 75,
+                        total_tokens: 275,
+                        cost_usd: 0.025,
+                    },
+                },
+                "agent_trace",
+            ),
+            (
+                RuntimeEvent::TaskFailed {
+                    plan_id: "plan-1".into(),
+                    task_id: "task-1".into(),
+                    error: "gate failed".into(),
+                    gate_failure: true,
+                },
+                "task_failed",
+            ),
+            (
+                RuntimeEvent::RunStarted {
+                    run_id: "run-1".into(),
+                    prompt: "ship demo".into(),
+                    complexity: "standard".into(),
+                },
+                "run_started",
+            ),
+            (
+                RuntimeEvent::RunCompleted {
+                    run_id: "run-1".into(),
+                    success: true,
+                    cost_usd: 0.42,
+                    duration_ms: 9000,
+                },
+                "run_completed",
+            ),
+            (
+                RuntimeEvent::KnowledgeIngested {
+                    entry_id: "entry-1".into(),
+                    topic: "event architecture".into(),
+                    source_agent: "agent-1".into(),
+                },
+                "knowledge_ingested",
+            ),
+            (
+                RuntimeEvent::KnowledgeConsumed {
+                    entry_id: "entry-1".into(),
+                    topic: "event architecture".into(),
+                    consuming_agent: "agent-2".into(),
+                },
+                "knowledge_consumed",
+            ),
+        ];
+
+        for (event, expected_kind) in events {
+            let value = serde_json::to_value(&event).expect("serialize runtime event");
+            assert_eq!(value["kind"], expected_kind);
+            assert!(value.get("data").is_some());
+
+            let decoded: RuntimeEvent =
+                serde_json::from_value(value).expect("deserialize runtime event");
+            assert_eq!(decoded, event);
+            assert_eq!(decoded.kind(), expected_kind);
+        }
     }
 }
