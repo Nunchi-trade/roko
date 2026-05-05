@@ -14748,9 +14748,9 @@ impl PlanRunner {
                 };
             let registry =
                 Arc::new(VecToolRegistry::from_tools(tools.clone())) as Arc<dyn ToolRegistry>;
-            let resolver: Arc<dyn HandlerResolver> = if self.chain_client.is_some() {
+            let resolver: Arc<dyn HandlerResolver> = if let Some(client) = &self.chain_client {
                 let chain_map = chain_handler_map(
-                    Arc::clone(self.chain_client.as_ref().unwrap()),
+                    Arc::clone(client),
                     self.chain_wallet.clone(),
                 );
                 Arc::new(chain_aware_resolver(chain_map))
