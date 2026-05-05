@@ -144,6 +144,7 @@ async fn dispatch_feeds_feedback_facade_and_projection() {
             model_source: ModelChoiceSource::TaskHint,
             succeeded: true,
             routing_context: None,
+            prompt_text: None,
         })
         .await
         .expect("fanout task completed");

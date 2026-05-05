@@ -33,6 +33,8 @@ pub struct AgentSpawnConfig {
     pub workdir: PathBuf,
     /// Maximum turns the agent can take.
     pub max_turns: u32,
+    /// Optional reasoning effort hint for providers that support it.
+    pub effort: Option<String>,
     /// Claude CLI binary path.
     pub program: PathBuf,
     /// Whether to skip permission checks.
@@ -62,6 +64,7 @@ impl AgentSpawnConfig {
             model,
             workdir: config.workdir.clone(),
             max_turns: 50,
+            effort: None,
             program: config.claude_program.clone(),
             dangerously_skip_permissions: config.dangerously_skip_permissions,
             mcp_config: config.mcp_config.clone(),
@@ -135,6 +138,7 @@ pub async fn spawn_agent(
         model: config.model.clone(),
         workdir: config.workdir.clone(),
         max_turns: config.max_turns,
+        effort: config.effort.clone(),
         dangerously_skip_permissions: config.dangerously_skip_permissions,
         mcp_config: config.mcp_config.clone(),
         resume_session: config.resume_session.clone(),

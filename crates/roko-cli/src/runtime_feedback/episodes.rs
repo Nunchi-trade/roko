@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use roko_learn::episode_logger::{Episode, EpisodeLogger, Usage};
+use roko_learn::hdc_fingerprint::{encode as encode_hdc_fingerprint, fingerprint_episode};
 
 use super::{FeedbackEvent, FeedbackSink};
 
@@ -53,6 +54,7 @@ impl FeedbackSink for EpisodeSink {
             task_id,
             outcome,
             succeeded,
+            prompt_text,
             ..
         } = event
         else {
@@ -78,6 +80,14 @@ impl FeedbackSink for EpisodeSink {
         episode
             .extra
             .insert("plan_id".into(), serde_json::Value::String(plan_id.clone()));
+        attach_episode_hdc_fingerprint(
+            &mut episode,
+            plan_id,
+            task_id,
+            outcome,
+            *succeeded,
+            prompt_text,
+        );
 
         self.logger
             .append(&episode)
@@ -85,6 +95,33 @@ impl FeedbackSink for EpisodeSink {
             .map_err(|err| anyhow::anyhow!("episode append failed: {err}"))?;
         Ok(())
     }
+}
+
+fn attach_episode_hdc_fingerprint(
+    episode: &mut Episode,
+    plan_id: &str,
+    task_id: &str,
+    outcome: &crate::dispatch::AgentOutcome,
+    succeeded: bool,
+    prompt_text: &Option<String>,
+) {
+    let prompt = prompt_text
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{plan_id}/{task_id}"));
+    let outcome_text = if outcome.output.trim().is_empty() {
+        format!(
+            "succeeded={} model={} provider={}",
+            succeeded,
+            &outcome.model,
+            &outcome.provider
+        )
+    } else {
+        outcome.output.clone()
+    };
+    let fingerprint = fingerprint_episode(&prompt, &outcome_text);
+    episode.hdc_fingerprint = Some(encode_hdc_fingerprint(&fingerprint));
 }
 
 #[cfg(test)]
@@ -121,6 +158,7 @@ mod tests {
             model_source: ModelChoiceSource::Router,
             succeeded: true,
             routing_context: None,
+            prompt_text: Some("system prompt\n\nuser prompt".into()),
         };
         sink.on_event(&event).await.unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
@@ -131,6 +169,7 @@ mod tests {
             "extra carries plan id"
         );
         assert!(contents.contains("\"task_id\":\"task-1\""));
+        assert!(contents.contains("\"hdc_fingerprint\""));
     }
 
     #[tokio::test]

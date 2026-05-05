@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use roko_core::config::TimeoutConfig;
 use roko_core::config::schema::RokoConfig;
@@ -1279,6 +1279,9 @@ pub struct RunConfig {
     pub extension_chain: Option<Arc<tokio::sync::Mutex<roko_core::extension::ExtensionChain>>>,
     /// Learned model selection router (persists across runs).
     pub cascade_router: Option<Arc<roko_learn::cascade_router::CascadeRouter>>,
+    /// Optional Daimon affect/somatic state used by runner v2 dispatch hooks.
+    /// `None` preserves smoke-test/default behavior without affect modulation.
+    pub daimon_state: Option<Arc<Mutex<roko_daimon::DaimonState>>>,
     /// MCP connector tracking registry.
     pub connector_registry: Option<Arc<std::sync::Mutex<roko_core::ConnectorRegistry>>>,
     /// Agent feed tracking registry.
@@ -1302,6 +1305,29 @@ pub struct RunConfig {
 }
 
 impl RunConfig {
+    /// Load the default Daimon state for a workdir.
+    #[must_use]
+    pub fn daimon_state_for_workdir(
+        workdir: impl AsRef<Path>,
+    ) -> Arc<Mutex<roko_daimon::DaimonState>> {
+        Arc::new(Mutex::new(roko_daimon::DaimonState::load_or_new(
+            crate::config_helpers::daimon_state_path(workdir.as_ref()),
+        )))
+    }
+
+    /// Load Daimon state and apply the configured strategy-space definition.
+    #[must_use]
+    pub fn daimon_state_with_strategy(
+        workdir: impl AsRef<Path>,
+        strategy_space: roko_daimon::StrategySpaceDefinition,
+    ) -> Arc<Mutex<roko_daimon::DaimonState>> {
+        let mut state = roko_daimon::DaimonState::load_or_new(
+            crate::config_helpers::daimon_state_path(workdir.as_ref()),
+        );
+        state.configure_strategy_space(strategy_space);
+        Arc::new(Mutex::new(state))
+    }
+
     /// Build a runner-v2 config from the effective project config.
     #[must_use]
     pub fn from_roko_config(workdir: PathBuf, plan_dir: PathBuf, roko_config: RokoConfig) -> Self {
@@ -1342,6 +1368,7 @@ impl RunConfig {
         let max_concurrent_tasks = roko_config.runner.max_concurrent_tasks.unwrap_or(4).max(1);
         let timeout_secs = roko_config.timeouts.agent_dispatch().as_secs().max(1);
         let plan_timeout_secs = roko_config.timeouts.plan_total().as_secs().max(1);
+        let daimon_state = Self::daimon_state_for_workdir(&workdir);
 
         Self {
             layout,
@@ -1377,6 +1404,7 @@ impl RunConfig {
             roko_config: Some(Arc::new(roko_config)),
             extension_chain: Some(extension_chain),
             cascade_router: Some(cascade_router),
+            daimon_state: Some(daimon_state),
             connector_registry: Some(connector_registry),
             feed_registry: Some(feed_registry),
             stream_to_stderr: false,
@@ -1420,6 +1448,7 @@ impl Default for RunConfig {
             roko_config: None,
             extension_chain: None,
             cascade_router: None,
+            daimon_state: None,
             connector_registry: None,
             feed_registry: None,
             feedback_facade: None,
@@ -1457,6 +1486,7 @@ impl std::fmt::Debug for RunConfig {
                 "cascade_router",
                 &self.cascade_router.as_ref().map(|_| ".."),
             )
+            .field("daimon_state", &self.daimon_state.as_ref().map(|_| ".."))
             .field(
                 "connector_registry",
                 &self.connector_registry.as_ref().map(|_| ".."),

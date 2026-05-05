@@ -565,6 +565,10 @@ fn build_runner_config(
         roko_config: Some(Arc::new(roko_config)),
         extension_chain: Some(extension_chain),
         cascade_router: Some(cascade_router),
+        daimon_state: Some(crate::runner::RunConfig::daimon_state_with_strategy(
+            workdir,
+            cli_config.daimon.strategy_space.clone(),
+        )),
         connector_registry: Some(connector_registry),
         feed_registry: Some(feed_registry),
         feedback_facade: None,

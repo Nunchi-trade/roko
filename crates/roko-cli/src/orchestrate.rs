@@ -17156,45 +17156,6 @@ impl PlanRunner {
         })
     }
 
-    /// Dispatch an agent and record a daimon appraisal for the outcome.
-    ///
-    /// This helper wraps [`dispatch_agent_with`] and centralizes the
-    /// daimon `TaskOutcome` appraisal that is uniform across all call sites.
-    /// Episode recording stays at individual call sites because it varies
-    /// per-context (plan run vs. replan vs. research, etc.).
-    async fn dispatch_and_record(
-        &mut self,
-        plan_id: &str,
-        role: AgentRole,
-        task: &str,
-        prompt_override: Option<String>,
-        model_override: Option<String>,
-        exec_dir_override: Option<PathBuf>,
-        system_prompt_override: Option<String>,
-    ) -> Result<DispatchOutcome> {
-        let outcome = self
-            .dispatch_agent_with(
-                plan_id,
-                role,
-                task,
-                prompt_override,
-                model_override,
-                exec_dir_override,
-                system_prompt_override,
-            )
-            .await;
-
-        let succeeded = outcome.is_ok();
-        if let Err(e) = self.daimon.appraise(AffectEvent::TaskOutcome {
-            task_id: task.to_string(),
-            succeeded,
-        }) {
-            tracing::warn!(error = %e, "daimon appraisal failed (non-fatal)");
-        }
-
-        outcome
-    }
-
     /// Run per-task verification steps.
     ///
     /// Returns `Ok(())` if all steps succeed. If a step fails, returns
