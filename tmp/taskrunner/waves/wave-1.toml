@@ -1,0 +1,80 @@
+# Wave 1: Parallel Fixes
+#
+# Independent bug fixes across all tracks. These tasks touch
+# different crates/files, so up to 20 can run in parallel.
+#
+# Gate: cargo build + test + clippy must pass before wave-2.
+
+[wave]
+name = "wave-1"
+description = "Independent bug fixes: IDE, terminal, runner, demo, wiring"
+max_parallel = 20
+
+# These groups can ALL run in parallel (no shared files)
+[[groups]]
+name = "ide-acp"
+description = "ACP sidecar fixes"
+tasks = []
+shared_files = ["crates/roko-acp/"]
+
+[[groups]]
+name = "terminal"
+description = "Terminal and chat stability"
+tasks = []
+shared_files = ["crates/roko-cli/src/chat_inline.rs"]
+
+[[groups]]
+name = "runner"
+description = "Runner v2 event loop fixes"
+tasks = []
+shared_files = ["crates/roko-cli/src/runner/"]
+
+[[groups]]
+name = "gates"
+description = "Gate pipeline fixes"
+tasks = []
+shared_files = ["crates/roko-gate/"]
+
+[[groups]]
+name = "learning"
+description = "Wire floating learning modules"
+tasks = []
+shared_files = ["crates/roko-learn/"]
+
+[[groups]]
+name = "serve"
+description = "HTTP server fixes"
+tasks = []
+shared_files = ["crates/roko-serve/"]
+
+[[groups]]
+name = "compose"
+description = "Prompt assembly fixes"
+tasks = []
+shared_files = ["crates/roko-compose/"]
+
+[[groups]]
+name = "demo-frontend"
+description = "Demo app UI fixes (TypeScript)"
+tasks = []
+shared_files = ["demo/demo-app/src/"]
+
+[[groups]]
+name = "foundation"
+description = "Foundational type changes needed by wave-2 (error hierarchy)"
+tasks = [81]
+shared_files = ["crates/roko-agent/src/error.rs", "crates/roko-gate/src/error.rs", "crates/roko-learn/src/error.rs", "crates/roko-compose/src/error.rs"]
+
+[[groups]]
+name = "v2-new-crate"
+description = "V2 Graph+Engine (new crate, no conflicts)"
+tasks = []
+shared_files = ["crates/roko-graph/"]
+
+[gate]
+commands = [
+    "cargo +nightly fmt --all --check",
+    "cargo build --workspace",
+    "cargo test --workspace",
+    "cargo clippy --workspace --no-deps -- -D warnings",
+]

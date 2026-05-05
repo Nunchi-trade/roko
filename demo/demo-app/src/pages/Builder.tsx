@@ -5,7 +5,6 @@ import { useRokoConfig } from '../hooks/useRokoConfig';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { useToast } from '../components/Toast';
 import GateBar from '../components/GateBar';
-import Pane from '../components/Pane';
 import './Builder.css';
 
 type BuildBtnState = 'idle' | 'running' | 'success' | 'error';
@@ -251,154 +250,147 @@ export default function Builder() {
 
   return (
     <div className="builder-page">
-      <div className="builder-header">
-        <span className="builder-title">Builder</span>
-        <span className="builder-info">type a request -- roko builds it live</span>
+      {/* ── Top: Prompt input as hero element ── */}
+      <div className="builder-top">
+        <form className={`builder-input${running ? ' running' : ''}`} onSubmit={handleSubmit}>
+          <span className="prompt-marker">{'\u25B8'}</span>
+          <div className="builder-input-wrap">
+            <input
+              ref={inputRef}
+              value={prompt}
+              onChange={handleInputChange}
+              onKeyDown={handleInputKeyDown}
+              onFocus={() => updateAutocomplete(prompt)}
+              onBlur={() => setTimeout(() => setShowAutocomplete(false), 150)}
+              placeholder="describe what to build..."
+              disabled={running}
+            />
+            {showAutocomplete && autocompleteItems.length > 0 && (
+              <div className="builder-autocomplete">
+                {autocompleteItems.map((item, i) => (
+                  <button
+                    key={item}
+                    className={`autocomplete-item${i === autocompleteIdx ? ' active' : ''}`}
+                    onMouseDown={() => selectAutocomplete(item)}
+                  >
+                    {item}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
-        {/* Workspace badge */}
-        <span className={`builder-workspace-badge${wsLoading ? ' loading' : ''}`}>
-          {wsLoading ? (
-            <span className="ws-spinner" />
-          ) : (
-            <span className="ws-path">{wsPath ? wsPath.split('/').pop() : 'workspace'}</span>
+          {/* Model selector — inline with input */}
+          <div className="builder-model-select" ref={modelRef}>
+            <button
+              type="button"
+              className="model-select-btn"
+              onClick={() => setShowModelDropdown(v => !v)}
+              disabled={!isLive || liveAllModels.length === 0}
+            >
+              {currentModelLabel || 'model'}
+            </button>
+            {showModelDropdown && (
+              <div className="model-dropdown">
+                {liveModelCatalog.map(group => (
+                  <div key={group.name} className="model-group">
+                    <div className="model-group-label">{group.name}</div>
+                    {group.models.map(m => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        className={`model-option${m.id === selectedModel ? ' active' : ''}`}
+                        onClick={() => {
+                          setSelectedModel(m.id);
+                          setShowModelDropdown(false);
+                        }}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {running && <span className="builder-processing-indicator" aria-hidden="true" />}
+          {isRunning && (
+            <button
+              type="button"
+              className="btn-cancel"
+              onClick={() => handle.current?.sendRaw('\x03')}
+            >
+              Cancel
+            </button>
           )}
-        </span>
-
-        {/* Model selector */}
-        <div className="builder-model-select" ref={modelRef}>
           <button
-            className="model-select-btn"
-            onClick={() => setShowModelDropdown(v => !v)}
-            disabled={!isLive || liveAllModels.length === 0}
+            type="submit"
+            className={`btn-build${btnState === 'success' ? ' success-flash' : ''}${btnState === 'error' ? ' error-flash' : ''}`}
+            disabled={running || !prompt.trim()}
           >
-            {currentModelLabel || 'No live models'}
+            {running && (
+              <span className="btn-build-progress">
+                <svg viewBox="0 0 100 30" preserveAspectRatio="none">
+                  <rect x="1" y="1" width="98" height="28" rx="4" ry="4" />
+                </svg>
+              </span>
+            )}
+            <span className="btn-build-inner">
+              {btnState === 'running' && <span className="btn-build-spinner" />}
+              {btnState === 'success' ? '\u2713 Done' : btnState === 'error' ? '\u2717 Error' : running ? 'Building...' : 'Build'}
+            </span>
           </button>
-          {showModelDropdown && (
-            <div className="model-dropdown">
-              {liveModelCatalog.map(group => (
-                <div key={group.name} className="model-group">
-                  <div className="model-group-label">{group.name}</div>
-                  {group.models.map(m => (
-                    <button
-                      key={m.id}
-                      className={`model-option${m.id === selectedModel ? ' active' : ''}`}
-                      onClick={() => {
-                        setSelectedModel(m.id);
-                        setShowModelDropdown(false);
-                      }}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        </form>
 
+        {/* Preset chips */}
         <div className="builder-presets">
           {PRESETS.map(p => (
-            <button key={p.label} className="preset-btn" onClick={() => submitTask(p.prompt)} disabled={running}>
+            <button key={p.label} className="preset-btn" onClick={() => { setPrompt(p.prompt); inputRef.current?.focus(); }} disabled={running}>
               {p.label}
             </button>
           ))}
         </div>
       </div>
 
-      <div className="builder-main">
-        <div className="builder-sidebar">
-          <Pane title="FILES">
-            {files.length === 0 ? (
-              <div className="file-placeholder">no project yet</div>
-            ) : (
-              files.map(f => (
-                <div key={f.name} className={`file-entry${f.isNew ? ' new' : ''}`}>
-                  <span className="file-icon">{f.isNew ? '+' : '\u00B7'}</span>
-                  {f.name}
-                </div>
-              ))
-            )}
-          </Pane>
-        </div>
-        <div className="builder-divider" />
-        <div className={`builder-terminal${terminalFlash ? ` ${terminalFlash}` : ''}`}>
-          {shellWarning && (
-            <div className="terminal-shell-warning">{shellWarning}</div>
-          )}
-          <div className="builder-terminal-inner" ref={attach} />
-        </div>
+      {/* ── Middle: Terminal (full width) ── */}
+      <div className={`builder-terminal${terminalFlash ? ` ${terminalFlash}` : ''}`}>
+        {shellWarning && (
+          <div className="terminal-shell-warning">{shellWarning}</div>
+        )}
+        <div className="builder-terminal-inner" ref={attach} />
+
+        {/* File pills — overlaid at bottom of terminal when files are detected */}
+        {files.length > 0 && (
+          <div className="builder-files-overlay">
+            {files.map(f => (
+              <span key={f.name} className={`file-pill${f.isNew ? ' new' : ''}`}>
+                {f.isNew && <span className="file-pill-dot" />}
+                {f.name}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
-      <form className={`builder-input${running ? ' running' : ''}`} onSubmit={handleSubmit}>
-        <span className="prompt-marker">{'\u25B8'}</span>
-        <div className="builder-input-wrap">
-          <input
-            ref={inputRef}
-            value={prompt}
-            onChange={handleInputChange}
-            onKeyDown={handleInputKeyDown}
-            onFocus={() => updateAutocomplete(prompt)}
-            onBlur={() => setTimeout(() => setShowAutocomplete(false), 150)}
-            placeholder="describe what to build..."
-            disabled={running}
-          />
-          {showAutocomplete && autocompleteItems.length > 0 && (
-            <div className="builder-autocomplete">
-              {autocompleteItems.map((item, i) => (
-                <button
-                  key={item}
-                  className={`autocomplete-item${i === autocompleteIdx ? ' active' : ''}`}
-                  onMouseDown={() => selectAutocomplete(item)}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
+      {/* ── Bottom: Gate bar + status in one compact row ── */}
+      <div className="builder-footer">
+        <div className="builder-gate-bar">
+          {isRunning && gates.every(g => g.status === 'pending') && (
+            <span className="gate-waiting">waiting for LLM...</span>
           )}
+          <GateBar gates={gates} />
         </div>
-        {running && <span className="builder-processing-indicator" aria-hidden="true" />}
-        {isRunning && (
-          <button
-            type="button"
-            className="btn-cancel"
-            onClick={() => handle.current?.sendRaw('\x03')}
-          >
-            Cancel
-          </button>
-        )}
-        <button
-          type="submit"
-          className={`btn-build${btnState === 'success' ? ' success-flash' : ''}${btnState === 'error' ? ' error-flash' : ''}`}
-          disabled={running || !prompt.trim()}
-        >
-          {running && (
-            <span className="btn-build-progress">
-              <svg viewBox="0 0 100 30" preserveAspectRatio="none">
-                <rect x="1" y="1" width="98" height="28" rx="4" ry="4" />
-              </svg>
-            </span>
-          )}
-          <span className="btn-build-inner">
-            {btnState === 'running' && <span className="btn-build-spinner" />}
-            {btnState === 'success' ? '\u2713 Done' : btnState === 'error' ? '\u2717 Error' : running ? 'Building...' : 'Build'}
+        <div className="builder-status-bar">
+          <span className="builder-status-text">{statusText}</span>
+          <span className={`builder-workspace-badge${wsLoading ? ' loading' : ''}`}>
+            {wsLoading ? <span className="ws-spinner" /> : (wsPath ? wsPath.split('/').pop() : 'workspace')}
           </span>
-        </button>
-      </form>
-
-      <div className="builder-gate-bar">
-        {isRunning && gates.every(g => g.status === 'pending') && (
-          <div className="gate-running">Running... waiting for LLM response</div>
-        )}
-        <GateBar gates={gates} />
-      </div>
-
-      <div className="builder-status-bar">
-        <span>{statusText}</span>
-        <span className="builder-status-conn">
-          <span className={`conn-dot ${status}`} />
-          {status}
-        </span>
-        <span>{files.length} files</span>
+          <span className="builder-status-conn">
+            <span className={`conn-dot ${status}`} />
+            {status}
+          </span>
+        </div>
       </div>
     </div>
   );

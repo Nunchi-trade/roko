@@ -1,0 +1,47 @@
+# Wave 0: Foundation
+#
+# These tasks fix core infrastructure that everything else depends on.
+# Lower parallelism because some tasks share files.
+#
+# Gate: cargo build + test + clippy must pass before wave-1 starts.
+
+[wave]
+name = "wave-0"
+description = "Config, core types, determinism — foundation for all other work"
+max_parallel = 5
+
+# File conflict groups: tasks within a group must run sequentially
+# (they touch the same files). Groups themselves can run in parallel.
+[[groups]]
+name = "config-core"
+description = "Config schema and loader changes"
+tasks = []  # task IDs will be added when tasks are created
+shared_files = [
+    "crates/roko-core/src/config/schema.rs",
+    "crates/roko-core/src/config/loader.rs",
+    "crates/roko-core/src/config/mod.rs",
+]
+
+[[groups]]
+name = "core-types"
+description = "Signal rename, Cell trait, balance field"
+tasks = []
+shared_files = [
+    "crates/roko-core/src/engram.rs",
+    "crates/roko-core/src/cell.rs",
+    "crates/roko-core/src/lib.rs",
+]
+
+[[groups]]
+name = "cleanup"
+description = "Dead code removal, tagging"
+tasks = []
+shared_files = []  # no shared files — fully parallel
+
+[gate]
+commands = [
+    "cargo +nightly fmt --all --check",
+    "cargo build --workspace",
+    "cargo test --workspace",
+    "cargo clippy --workspace --no-deps -- -D warnings",
+]

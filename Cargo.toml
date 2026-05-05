@@ -178,6 +178,7 @@ globset = "0.4"
 rand = "0.8"
 rand_chacha = "0.3"
 regex = "1"
+unicode-segmentation = "1"
 rusqlite = { version = "0.35", features = ["bundled"] }
 jsonwebtoken = "9"
 webbrowser = "1"

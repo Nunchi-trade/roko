@@ -1,0 +1,583 @@
+# Live task status — source of truth for what's claimed/done
+#
+# Updated by scripts/claim.sh, scripts/complete.sh
+# Read by scripts/next.sh, scripts/status.sh
+#
+# Status: pending|claimed|implemented|tested|wired|verified|done
+
+[meta]
+last_updated = "2026-05-06T01:00:00Z"
+total_tasks = 100
+implemented = 100
+wired = 0
+claimed = 0
+pending = 0
+# Batch 4 (2026-05-06): All 28 remaining tasks implemented by parallel agents.
+# Build PASS, Clippy PASS. P0 fixes applied. All waves 0-6 complete.
+
+# Deleted tasks:
+# 005 — subsumed by reworked 004 (Workspace/RokoLayout boundary includes path unification)
+# 011 — already implemented (MAX_AGENT_OUTPUT = 32_768 at agent_events.rs:17)
+# 021 (old) — replaced by demo redesign (don't patch code that's being replaced)
+# 022 — same as above
+
+# ─── Wave 0: Foundation (4 tasks) ──────────────────────────────────────
+
+[tasks.001]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Unified config loader: LayeredConfigLoader with source priority, env overlay, validation.
+
+[tasks.002]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.003]
+status = "implemented"
+agent = "taskrunner-agent-003"
+worktree = "wp-arch2"
+# Replaced hardcoded Duration::from_secs across chat.rs, evaluator.rs, event_loop.rs. Added 6 timeout helpers + 3 tests.
+
+[tasks.004]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Workspace/RokoLayout struct with boundary detection + path helpers.
+
+# ─── Wave 1: Parallel Fixes + New Batch (37 tasks, incl 081) ──────────
+
+[tasks.006]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# OutputSink trait + ProgressSink + StreamEvent enum wired into runner.
+
+[tasks.007]
+status = "implemented"
+agent = "codex/demo-running-B3"
+worktree = "wp-arch2"
+
+[tasks.008]
+status = "implemented"
+agent = "codex/demo-running-B4"
+worktree = "wp-arch2"
+
+[tasks.009]
+status = "implemented"
+agent = "codex/demo-running-B6"
+worktree = "wp-arch2"
+
+[tasks.010]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.012]
+status = "implemented"
+agent = "codex/demo-running-B7"
+worktree = "wp-arch2"
+
+[tasks.013]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.014]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Removed blanket clippy suppression, added targeted #[allow(clippy::large_enum_variant)] on Command enum.
+
+[tasks.015]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Wired RunLedger into Runner v2 event_loop. Records task starts, completions, gate outcomes to .roko/state/run-ledger.jsonl.
+
+[tasks.016]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Wired classify_gate_failure + render_failure_classification into retry context via build_gate_retry_context helper.
+
+[tasks.017]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.018]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.019]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# McpErrorAccumulator + McpErrorRecord in mcp/error_accumulator.rs. Wired through McpHandlerResolver + ToolLoop. Errors drain into ToolLoopOutput.mcp_errors.
+
+[tasks.020]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.023]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.024]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.025]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.026]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Added And(Vec), Or(Vec), Not(Box) variants to TopicFilter with matches() arms and 6 unit tests.
+
+[tasks.027]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Added balance: f64 field to Engram with serde default, touch() method, EngramBuilder support, 5 tests.
+
+[tasks.028]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.029]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Deleted crates/roko-calc/ (empty skeleton, not in workspace members, no dependents).
+
+[tasks.030]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Tagged 14 floating modules with //! STATUS: NOT WIRED comments (6 runtime, 8 learn).
+
+[tasks.043]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Audited: serve state already uses tokio::sync::Mutex, runtime_feedback locks are short sync sections. No changes needed.
+
+[tasks.044]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Added DEFAULT_MCP_STDIN_WRITE_TIMEOUT_SECS (5s) and DEFAULT_MCP_RESPONSE_TIMEOUT_SECS (30s). Wrapped roundtrip() in timeouts.
+
+[tasks.046]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Atomic promote via atomic_write_str. YAML frontmatter parser via serde_yaml_ng. All plan writes atomic. Tests added.
+
+[tasks.047]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Fixed TOCTOU patterns in 10 files: serve lib/state/bench/templates, routes/dashboard, cli dispatch/prompt_cache/repo_context/repl.
+
+[tasks.048]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.050]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Added tracing::warn! to silent error paths in 8 route files + openai_compat.rs. Classified all instances.
+
+[tasks.052]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Migrated PRD plan writes + cascade_router save to atomic_write_str. Left rollback/append/test writes unchanged.
+
+[tasks.054]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Added RetryPolicy::execute() async helper in roko-core/error/retry.rs with 3 tests. Existing loops left as specialized.
+
+[tasks.061]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.062]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.063]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.064]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.072]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# CLI boot sequence redesign: phased init, lazy loading, fast path for simple commands.
+
+[tasks.073]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# ACP startup resilience: graceful degradation, retry on init failure, health probes.
+
+[tasks.074]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Claude CLI provider: usage extraction, finish reason, reasoning, session_id. Merged from worktree.
+
+[tasks.075]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Provider translator parity: all backends produce consistent ChatResponse fields.
+
+[tasks.076]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Tool dispatch safety: path confinement, argument validation, permission checks.
+
+[tasks.077]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Model identity redesign: ModelId type, profile registry, capability detection.
+
+[tasks.078]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Learning loop completeness: feedback channels, signal propagation, loop closure.
+
+[tasks.079]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Added 15 DEFAULT_* constants to defaults.rs. Replaced literals in runner/event_loop, persist, state, types, agent_stream, serve/deployments.
+
+[tasks.080]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Replaced .unwrap()/.expect() in serve/lib, agent/provider/*, chain/marketplace, cli/prd with proper error handling.
+
+[tasks.081]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Error type hierarchy: RokoError enum, classify_error(), From impls for all crate errors.
+
+# ─── Wave 2: V2 Core + Wiring + CLI Redesign (24 + 13 = 33 tasks) ────
+
+[tasks.021]
+status = "implemented"
+agent = "taskrunner-agent-021"
+worktree = "wp-arch2"
+# Created CostComparisonPanel, MemoryTransferPanel, OracleFlowPanel. All SSE-driven. Sidebar routing wired. e2e updated.
+
+[tasks.031]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.032]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Wired DemurrageConsumer into roko serve start_background() as 5-minute interval + KnowledgeStore::apply_demurrage().
+
+[tasks.033]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Wired PostGateReflectionStore query into gate failure retry path. Loads lessons, appends to replan_context. 6 tests.
+
+[tasks.034]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Wired SectionOutcome recording: tracks prompt sections per attempt, records to .roko/learn/section-outcomes.jsonl on gate terminal.
+
+[tasks.035]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Cell execute() trait with CellContext, TypeSchema, default impl. Merged from worktree.
+
+[tasks.036]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.037]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.038]
+status = "implemented"
+agent = "claude-batch-1"
+worktree = "wp-arch2"
+# Propagated Engram→Signal rename to 73 files across roko-agent, roko-gate, roko-learn, roko-compose, roko-orchestrator.
+
+[tasks.039]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.040]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.041]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.042]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.045]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Bounded streaming channels: replaced unbounded with capacity-limited channels + backpressure.
+
+[tasks.049]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# roko dev command: starts serve + watcher + demo frontend in parallel.
+
+[tasks.051]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Integration test suite structure: test harness, fixtures, helper utilities.
+
+[tasks.053]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Workspace persistence: state serialization/deserialization + recovery.
+
+[tasks.055]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Docker multistage cleanup: optimized Dockerfile layers, reduced image size.
+
+[tasks.056]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.057]
+status = "implemented"
+agent = "taskrunner-agent-057"
+worktree = "wp-arch2"
+# Full pipeline: classify→route→execute. Simple/standard/complex paths. do_cmd.rs with 30 tests. Dead code removed from util.rs.
+
+[tasks.058]
+status = "implemented"
+agent = "codex/demo-running-C2"
+worktree = "wp-arch2"
+
+[tasks.059]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.082]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.083]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.084]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Concurrency sweep: Arc/Mutex audit, Send+Sync bounds, deadlock prevention.
+
+[tasks.085]
+status = "implemented"
+agent = "taskrunner-agent-085"
+worktree = "wp-arch2"
+# Fixed critical ArcSwap duplication bug in ConfigCache. All pieces verified: loader, validation, export, watcher. Regression test added.
+
+[tasks.086]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.087]
+status = "implemented"
+agent = "taskrunner-agent-087"
+worktree = "wp-arch2"
+# TIMEOUTS/RECONNECT_BACKOFF added. Polling→SSE in EventStreamContext+useServerHealth. Stale closures fixed. modelColor(). ErrorBoundary wrapped.
+
+[tasks.088]
+status = "implemented"
+agent = "taskrunner-agent-088"
+worktree = "wp-arch2"
+# configSources prefixes/ordering fixed. Live-reload notification wired. Implicit global watched. Effort docs added. 7 tests.
+
+[tasks.089]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Orchestration cleanup: dead code removal, module reorganization, pub visibility audit.
+
+[tasks.090]
+status = "implemented"
+agent = "claude-batch-2"
+worktree = "wp-arch2"
+# Provider UX redesign: unified provider config, health dashboard, connection testing.
+
+[tasks.091]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.093]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+# ─── Wave 3: Graph + Engine (6 + 4 = 10 tasks) ──────────────────────
+
+[tasks.066]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.067]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.068]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.069]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.070]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.071]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.092]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.094]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.095]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.096]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+# ─── Wave 4: Feeds + Graduation + Calibration (4 tasks) ──────────────
+
+[tasks.097]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+[tasks.098]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.099]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.100]
+status = "implemented"
+agent = "codex/demo-running"
+worktree = "wp-arch2"
+
+# ─── Wave 5: Migration + Hot Graphs (3 tasks) ────────────────────────
+
+[tasks.101]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.102]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.103]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+# ─── Wave 6: Architecture Batch Cleanup (2 tasks) ─────────────────────
+
+[tasks.104]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
+
+[tasks.105]
+status = "implemented"
+agent = "claude-batch-4"
+worktree = "wp-arch2"
