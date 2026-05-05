@@ -1108,6 +1108,57 @@ impl CascadeRouter {
         true
     }
 
+    /// Apply a calibration correction to adjust confidence stats for a model.
+    ///
+    /// When the `CalibrationPolicy` detects systematic bias (overconfidence or
+    /// underconfidence), it produces a `CalibrationCorrection`. This method
+    /// adjusts the model's empirical pass rate by injecting synthetic
+    /// observations that counteract the detected bias.
+    ///
+    /// For an overconfident model (positive `mean_bias`): inject virtual failures
+    /// to lower the empirical pass rate.
+    /// For an underconfident model (negative `mean_bias`): inject virtual successes
+    /// to raise the empirical pass rate.
+    ///
+    /// The number of synthetic observations is proportional to both the magnitude
+    /// of the correction and the existing sample count, capped to avoid
+    /// overwhelming real data.
+    pub fn apply_calibration_correction(
+        &self,
+        correction: &crate::calibration_policy::CalibrationCorrection,
+    ) {
+        let mut stats = self.confidence_stats.lock();
+        let entry = stats.entry(correction.model.clone()).or_default();
+
+        // Determine how many synthetic trials to inject. We use a fraction of
+        // the existing trial count scaled by the correction magnitude. Cap at
+        // 10% of existing trials to avoid overwhelming real observations.
+        let existing_trials = entry.trials.max(1) as f64;
+        let magnitude = correction.mean_bias.abs().clamp(0.0, 1.0);
+        let synthetic_count = (existing_trials * magnitude * 0.1).ceil() as u64;
+
+        if synthetic_count == 0 {
+            return;
+        }
+
+        if correction.mean_bias > 0.0 {
+            // Overconfident: inject synthetic failures (add trials but not successes).
+            entry.trials += synthetic_count;
+        } else {
+            // Underconfident: inject synthetic successes (add both trials and successes).
+            entry.trials += synthetic_count;
+            entry.successes += synthetic_count;
+        }
+
+        tracing::debug!(
+            model = %correction.model,
+            bias = correction.mean_bias,
+            synthetic_trials = synthetic_count,
+            new_pass_rate = entry.pass_rate(),
+            "calibration correction applied to confidence stats"
+        );
+    }
+
     /// Deprecated alias for callers that have not migrated to the
     /// confidence-only API name yet.
     ///

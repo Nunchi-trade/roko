@@ -1,4 +1,4 @@
-//! STATUS: NOT WIRED -- called internally by floating code but no runtime entrypoint.
+//! STATUS: WIRED -- corrections flow through event_subscriber into CascadeRouter.
 //!
 //! CalibrationPolicy — closes the predict-publish-correct loop (LEARN-09).
 //!

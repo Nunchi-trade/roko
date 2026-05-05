@@ -57,6 +57,7 @@ pub async fn run_learning_subscriber(
     anomaly: Arc<Mutex<AnomalyDetector>>,
     costs: Arc<CostsDb>,
     efficiency_path: PathBuf,
+    router_persist_path: Option<PathBuf>,
 ) {
     let cost_table = CostTable {
         models: HashMap::new(),
@@ -100,8 +101,23 @@ pub async fn run_learning_subscriber(
                         model = %correction.model,
                         category = %correction.category,
                         bias = correction.mean_bias,
-                        "calibration correction triggered"
+                        sample_count = correction.sample_count,
+                        "calibration correction triggered — applying to cascade router"
                     );
+
+                    // Apply the correction to the cascade router's confidence stats.
+                    router.apply_calibration_correction(&correction);
+
+                    // Persist the updated router state so corrections survive restarts.
+                    if let Some(ref persist_path) = router_persist_path {
+                        if let Err(err) = router.save(persist_path) {
+                            tracing::warn!(
+                                path = %persist_path.display(),
+                                error = %err,
+                                "failed to persist cascade router after calibration correction"
+                            );
+                        }
+                    }
                 }
 
                 let Some(turn_ctx) = active_turn.take() else {
@@ -292,6 +308,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(16);
         let tempdir = TempDir::new().expect("tempdir");
         let efficiency_path = tempdir.path().join("efficiency.jsonl");
+        let router_persist_path = tempdir.path().join("cascade-router.json");
 
         let health = Arc::new(ProviderHealthRegistry::new());
         let latency = Arc::new(LatencyRegistry::new());
@@ -307,6 +324,7 @@ mod tests {
             Arc::clone(&anomaly),
             Arc::clone(&costs),
             efficiency_path.clone(),
+            Some(router_persist_path),
         ));
 
         tx.send(AgentEvent::TurnStarted {
@@ -383,6 +401,7 @@ mod tests {
             anomaly,
             costs,
             efficiency_path,
+            None, // no persist path needed for this test
         ));
 
         tx.send(AgentEvent::TurnStarted {
@@ -426,5 +445,92 @@ mod tests {
         assert_eq!(stats.recent_latencies, vec![50.0]);
 
         assert!(!health.is_available("zai"));
+    }
+
+    #[tokio::test]
+    async fn calibration_correction_applies_to_router_and_persists() {
+        let (tx, rx) = broadcast::channel(64);
+        let tempdir = TempDir::new().expect("tempdir");
+        let efficiency_path = tempdir.path().join("efficiency.jsonl");
+        let router_persist_path = tempdir.path().join("cascade-router.json");
+
+        let health = Arc::new(ProviderHealthRegistry::new());
+        let latency = Arc::new(LatencyRegistry::new());
+        let router = Arc::new(CascadeRouter::new(vec!["overconfident-model".to_string()]));
+        let anomaly = Arc::new(Mutex::new(AnomalyDetector::new(1_700_000_000_000)));
+        let costs = Arc::new(CostsDb::new());
+
+        let handle = tokio::spawn(run_learning_subscriber(
+            rx,
+            Arc::clone(&health),
+            Arc::clone(&latency),
+            Arc::clone(&router),
+            Arc::clone(&anomaly),
+            Arc::clone(&costs),
+            efficiency_path,
+            Some(router_persist_path.clone()),
+        ));
+
+        // Send enough failing turns to trigger a calibration correction.
+        // The default CalibrationPolicy triggers at 10 samples with bias > 0.15.
+        // Model predicts 0.7 success probability but always fails → bias = 0.7.
+        for i in 0..12 {
+            tx.send(AgentEvent::TurnStarted {
+                task_id: format!("cal-task-{i}"),
+                model: "overconfident-model".into(),
+                provider: "test-provider".into(),
+                timestamp_ms: 1_700_000_000_000 + i,
+            })
+            .expect("send turn started");
+            tx.send(AgentEvent::TurnCompleted {
+                turn: 1,
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cache_read_tokens: 0,
+                    cache_create_tokens: 0,
+                    cost_usd: 0.01,
+                    wall_ms: 100,
+                },
+                tool_call_count: 0,
+                gate_passed: Some(false), // always fails
+                finish_reason: FinishReason::Stop,
+            })
+            .expect("send turn completed");
+        }
+
+        drop(tx);
+        handle.await.expect("subscriber task");
+
+        // Verify the router's confidence stats were adjusted.
+        // Without calibration correction: 12 trials, 0 successes.
+        // With calibration correction applied: extra synthetic trials injected.
+        let snapshot = router.confidence_snapshot();
+        let (trials, successes) = snapshot
+            .get("overconfident-model")
+            .expect("model should exist in snapshot");
+        // The model had 12 trials with 0 successes from real data.
+        // Calibration correction for overconfident model injects extra failures,
+        // so trials > 12 and successes should still be 0.
+        assert!(
+            *trials > 12,
+            "calibration correction should have injected synthetic trials (got {trials})"
+        );
+        assert_eq!(
+            *successes, 0,
+            "overconfident correction should not inject successes"
+        );
+
+        // Verify the router state was persisted to disk.
+        assert!(
+            router_persist_path.exists(),
+            "cascade-router.json should have been written after calibration correction"
+        );
+        let persisted_content =
+            std::fs::read_to_string(&router_persist_path).expect("read persisted router");
+        assert!(
+            persisted_content.contains("overconfident-model"),
+            "persisted state should contain the corrected model"
+        );
     }
 }
