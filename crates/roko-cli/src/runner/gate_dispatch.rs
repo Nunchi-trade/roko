@@ -67,6 +67,7 @@ pub fn spawn_gate(
             let inputs = RungExecutionInputs::default();
             let config = RungExecutionConfig {
                 source_roots: Some(vec![workdir_for_run]),
+                timeout_ms: Some(timeout_secs.saturating_mul(1000)),
                 ..Default::default()
             };
 

@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use roko_core::config::TimeoutConfig;
 use roko_core::config::schema::RokoConfig;
-use roko_core::defaults::{DEFAULT_MAX_AUTO_FIX_ITERATIONS, DEFAULT_PLAN_TIMEOUT_SECS};
+use roko_core::defaults::DEFAULT_MAX_AUTO_FIX_ITERATIONS;
 
 // ─── Agent Events ───────────────────────────────────────────────────────
 
@@ -1338,14 +1339,16 @@ impl RunConfig {
             Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
         let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
         let max_concurrent_tasks = roko_config.runner.max_concurrent_tasks.unwrap_or(4).max(1);
+        let timeout_secs = roko_config.timeouts.agent_dispatch().as_secs().max(1);
+        let plan_timeout_secs = roko_config.timeouts.plan_total().as_secs().max(1);
 
         Self {
             workdir,
             plan_dir,
             model,
             cli_model_override: None,
-            timeout_secs: roko_config.agent.timeout_ms.unwrap_or(600_000) / 1000,
-            plan_timeout_secs: roko_config.runner.plan_timeout_secs,
+            timeout_secs,
+            plan_timeout_secs,
             max_retries: 2,
             max_concurrent_tasks,
             gate_concurrency: max_concurrent_tasks,
@@ -1389,13 +1392,14 @@ impl RunConfig {
 
 impl Default for RunConfig {
     fn default() -> Self {
+        let timeouts = TimeoutConfig::default();
         Self {
             workdir: PathBuf::from("."),
             plan_dir: PathBuf::from("plans"),
             model: "claude-sonnet-4-6".to_string(),
             cli_model_override: None,
-            timeout_secs: 600,
-            plan_timeout_secs: DEFAULT_PLAN_TIMEOUT_SECS,
+            timeout_secs: timeouts.agent_dispatch().as_secs(),
+            plan_timeout_secs: timeouts.plan_total().as_secs(),
             max_retries: DEFAULT_MAX_AUTO_FIX_ITERATIONS,
             max_concurrent_tasks: 4,
             gate_concurrency: 4,
@@ -1591,5 +1595,26 @@ mod tests {
         let permanent = RunnerFailureKind::from_output("error[E0308]: mismatched types");
         assert_eq!(permanent, RunnerFailureKind::Permanent);
         assert!(!permanent.is_retryable());
+    }
+
+    #[test]
+    fn run_config_uses_timeout_config_from_roko_toml() {
+        let roko_config = RokoConfig::from_toml(
+            r#"
+            [timeouts]
+            agent_dispatch_secs = 30
+            plan_total_secs = 77
+            "#,
+        )
+        .expect("parse roko.toml");
+
+        let config = RunConfig::from_roko_config(
+            PathBuf::from("/tmp/work"),
+            PathBuf::from("/tmp/plan"),
+            roko_config,
+        );
+
+        assert_eq!(config.timeout_secs, 30);
+        assert_eq!(config.plan_timeout_secs, 77);
     }
 }

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
 use roko_core::agent::ModelSpec;
-use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use roko_core::{AgentRole, PhaseKind, PlanPhase};
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
@@ -82,6 +81,52 @@ impl RunReport {
     }
 }
 
+fn duration_secs(duration: Duration) -> u64 {
+    duration.as_secs().max(1)
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX).max(1)
+}
+
+fn agent_dispatch_timeout(config: &RunConfig) -> Duration {
+    config
+        .roko_config
+        .as_deref()
+        .map_or_else(|| Duration::from_secs(config.timeout_secs), |cfg| {
+            cfg.timeouts.agent_dispatch()
+        })
+}
+
+fn plan_total_timeout(config: &RunConfig) -> Duration {
+    config
+        .roko_config
+        .as_deref()
+        .map_or_else(|| Duration::from_secs(config.plan_timeout_secs), |cfg| {
+            cfg.timeouts.plan_total()
+        })
+}
+
+fn llm_call_timeout(config: &RunConfig) -> Duration {
+    config
+        .roko_config
+        .as_deref()
+        .map_or_else(|| roko_core::config::TimeoutConfig::default().llm_call(), |cfg| {
+            cfg.timeouts.llm_call()
+        })
+}
+
+fn gate_timeout(config: &RunConfig, rung: u32) -> Duration {
+    config
+        .roko_config
+        .as_deref()
+        .map_or_else(|| Duration::from_secs(config.timeout_secs), |cfg| match rung {
+            0 => cfg.timeouts.gate_compile(),
+            1 => cfg.timeouts.gate_clippy(),
+            _ => cfg.timeouts.gate_test(),
+        })
+}
+
 // ─── RunContext ──────────────────────────────────────────────────────────
 
 /// Shared context for the dispatch loop, replacing 11 loose parameters.
@@ -114,12 +159,13 @@ pub async fn run(
     cancel: CancellationToken,
 ) -> Result<RunReport> {
     let max_concurrent_tasks = config.max_concurrent_tasks.max(1);
+    let task_timeout_secs = duration_secs(agent_dispatch_timeout(config));
 
     let exec_config = ExecutorConfig {
         max_concurrent_plans: 4,
         max_concurrent_tasks,
         max_auto_fix_iterations: config.max_retries,
-        task_timeout_secs: config.timeout_secs,
+        task_timeout_secs,
         ..Default::default()
     };
 
@@ -393,7 +439,9 @@ pub async fn run(
 
     let mut tick_interval = interval(Duration::from_millis(100));
     let mut flush_interval = interval(Duration::from_secs(2));
-    let plan_deadline = tokio::time::Instant::now() + Duration::from_secs(config.plan_timeout_secs);
+    let plan_timeout_duration = plan_total_timeout(&config);
+    let agent_timeout_duration = agent_dispatch_timeout(&config);
+    let plan_deadline = tokio::time::Instant::now() + plan_timeout_duration;
     let plan_timeout = tokio::time::sleep_until(plan_deadline);
     tokio::pin!(plan_timeout);
 
@@ -406,8 +454,8 @@ pub async fn run(
         max_gate_rung = config.max_gate_rung,
         max_plan_usd = config.max_plan_usd,
         max_turn_usd = config.max_turn_usd,
-        timeout_secs = config.timeout_secs,
-        plan_timeout_secs = config.plan_timeout_secs,
+        timeout_secs = duration_secs(agent_timeout_duration),
+        plan_timeout_secs = duration_secs(plan_timeout_duration),
         clippy_enabled = config.clippy_enabled,
         skip_tests = config.skip_tests,
         stream_to_stderr = config.stream_to_stderr,
@@ -793,7 +841,7 @@ pub async fn run(
                         &merge_queue,
                         &gate_tx,
                         &config.workdir,
-                        Duration::from_secs(config.timeout_secs),
+                        gate_timeout(&config, 0),
                         &tui,
                         config,
                         &snapshot_writer,
@@ -2670,7 +2718,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         workdir: ctx.config.workdir.clone(),
                         agent_id: agent_id.clone(),
                         command: None,
-                        timeout_ms: Some(ctx.config.timeout_secs.saturating_mul(1000)),
+                        timeout_ms: Some(duration_millis(agent_dispatch_timeout(ctx.config))),
                         mcp_config: ctx.config.mcp_config.clone(),
                         env: vec![
                             ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
@@ -2835,7 +2883,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     *rung,
                     ctx.config.workdir.clone(),
                     verify_steps,
-                    ctx.config.timeout_secs,
+                    duration_secs(gate_timeout(ctx.config, *rung)),
                     ctx.gate_tx.clone(),
                     ctx.gate_sem.clone(),
                 );
@@ -2906,7 +2954,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 plan_id.clone(),
                 ctx.config.workdir.clone(),
                 verify_steps,
-                ctx.config.timeout_secs,
+                duration_secs(gate_timeout(ctx.config, 2)),
                 ctx.gate_tx.clone(),
                 ctx.gate_sem.clone(),
             );
@@ -2971,7 +3019,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.merge_queue.clone(),
                 PlanMergerConfig::new(
                     ctx.config.workdir.clone(),
-                    Duration::from_secs(ctx.config.timeout_secs),
+                    gate_timeout(ctx.config, 0),
                 ),
             );
             match merger.submit(request, ctx.gate_tx.clone()) {
@@ -3299,8 +3347,9 @@ async fn handle_plan_timeout(
     writer: &SnapshotWriter,
 ) -> Result<()> {
     let in_flight = collect_in_flight_attempts(state);
+    let timeout_secs = duration_secs(plan_total_timeout(config));
     error!(
-        timeout_secs = config.plan_timeout_secs,
+        timeout_secs,
         current_plan = %state.plan_id,
         current_task = %state.current_task,
         active_plans = ?executor.active_plans(),
@@ -3315,7 +3364,7 @@ async fn handle_plan_timeout(
     emit_runner_event(paths, state, tui, config, event);
     Err(anyhow::anyhow!(
         "plan execution exceeded wall-clock timeout after {} seconds",
-        config.plan_timeout_secs
+        timeout_secs
     ))
 }
 
@@ -3374,6 +3423,7 @@ async fn run_dream_consolidation_if_enabled(config: &RunConfig) {
 
 async fn run_dream_consolidation(config: &RunConfig) {
     let workdir = config.workdir.clone();
+    let timeout = llm_call_timeout(config);
     let dream_config = roko_dreams::DreamLoopConfig {
         auto_dream: true,
         idle_threshold_mins: 0,
@@ -3385,7 +3435,7 @@ async fn run_dream_consolidation(config: &RunConfig) {
             bare_mode: true,
             effort: "low".to_string(),
             fallback_model: None,
-            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            timeout_ms: duration_millis(timeout),
             env: Vec::new(),
         },
     };
@@ -3393,7 +3443,7 @@ async fn run_dream_consolidation(config: &RunConfig) {
         let mut dream_runner = roko_dreams::DreamRunner::new(workdir.clone(), dream_config);
         dream_runner.consolidate_now()
     });
-    match tokio::time::timeout(Duration::from_secs(120), join).await {
+    match tokio::time::timeout(timeout, join).await {
         Ok(Ok(Ok(report))) => info!(
             processed_episodes = report.processed_episodes,
             knowledge_entries = report.knowledge_entries_written,
@@ -3404,7 +3454,10 @@ async fn run_dream_consolidation(config: &RunConfig) {
             warn!(error = %err, "dream consolidation failed — plan results unaffected")
         }
         Ok(Err(join_err)) => warn!(error = %join_err, "dream consolidation worker aborted"),
-        Err(_) => warn!("dream consolidation timed out after 120s — skipping"),
+        Err(_) => warn!(
+            timeout_secs = duration_secs(timeout),
+            "dream consolidation timed out — skipping"
+        ),
     }
 }
 

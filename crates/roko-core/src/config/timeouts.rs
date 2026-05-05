@@ -56,13 +56,13 @@ const fn default_agent_dispatch_secs() -> u64 {
     600
 }
 const fn default_gate_compile_secs() -> u64 {
-    120
+    600
 }
 const fn default_gate_test_secs() -> u64 {
-    300
+    900
 }
 const fn default_gate_clippy_secs() -> u64 {
-    60
+    300
 }
 const fn default_llm_call_secs() -> u64 {
     120
@@ -153,9 +153,9 @@ mod tests {
     fn defaults_are_sensible() {
         let cfg = TimeoutConfig::default();
         assert_eq!(cfg.agent_dispatch_secs, 600);
-        assert_eq!(cfg.gate_compile_secs, 120);
-        assert_eq!(cfg.gate_test_secs, 300);
-        assert_eq!(cfg.gate_clippy_secs, 60);
+        assert_eq!(cfg.gate_compile_secs, 600);
+        assert_eq!(cfg.gate_test_secs, 900);
+        assert_eq!(cfg.gate_clippy_secs, 300);
         assert_eq!(cfg.llm_call_secs, 120);
         assert_eq!(cfg.http_request_secs, 30);
         assert_eq!(cfg.workspace_lock_secs, 5);
@@ -167,9 +167,9 @@ mod tests {
     fn duration_accessors_match_secs() {
         let cfg = TimeoutConfig::default();
         assert_eq!(cfg.agent_dispatch(), Duration::from_secs(600));
-        assert_eq!(cfg.gate_compile(), Duration::from_secs(120));
-        assert_eq!(cfg.gate_test(), Duration::from_secs(300));
-        assert_eq!(cfg.gate_clippy(), Duration::from_secs(60));
+        assert_eq!(cfg.gate_compile(), Duration::from_secs(600));
+        assert_eq!(cfg.gate_test(), Duration::from_secs(900));
+        assert_eq!(cfg.gate_clippy(), Duration::from_secs(300));
         assert_eq!(cfg.llm_call(), Duration::from_secs(120));
         assert_eq!(cfg.http_request(), Duration::from_secs(30));
         assert_eq!(cfg.workspace_lock(), Duration::from_secs(5));
@@ -201,7 +201,7 @@ mod tests {
         let parsed: TimeoutConfig = toml::from_str(toml_str).expect("deserialize partial");
         assert_eq!(parsed.agent_dispatch_secs, 1200);
         // Other fields should be defaults.
-        assert_eq!(parsed.gate_compile_secs, 120);
+        assert_eq!(parsed.gate_compile_secs, 600);
         assert_eq!(parsed.plan_total_secs, 3_600);
     }
 

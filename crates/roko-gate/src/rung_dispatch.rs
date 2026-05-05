@@ -64,6 +64,8 @@ pub struct RungExecutionConfig {
     pub integration_build_system: Option<BuildSystem>,
     /// Optional verdict publisher for broadcasting gate outcomes.
     pub verdict_publisher: Option<crate::verdict_publisher::VerdictPublisher>,
+    /// Optional timeout override for concrete gates in this rung.
+    pub timeout_ms: Option<u64>,
 }
 
 /// Execute a single canonical rung of the 7-rung runtime mapping.
@@ -101,6 +103,10 @@ pub async fn run_rung(
     run_canonical_rung(base_signal, ctx, rung, inputs, config).await
 }
 
+fn gate_timeout_ms(config: &RungExecutionConfig) -> Option<u64> {
+    config.timeout_ms.map(|timeout_ms| timeout_ms.max(1))
+}
+
 /// Execute one [`Rung`] using the canonical 7-rung runtime mapping.
 pub async fn run_canonical_rung(
     base_signal: &Engram,
@@ -110,16 +116,34 @@ pub async fn run_canonical_rung(
     config: &RungExecutionConfig,
 ) -> Vec<Verdict> {
     match rung {
-        Rung::Compile => vec![CompileGate::cargo().verify(base_signal, ctx).await],
-        Rung::Lint => vec![ClippyGate::cargo().verify(base_signal, ctx).await],
-        Rung::Test => vec![TestGate::cargo().verify(base_signal, ctx).await],
+        Rung::Compile => {
+            let mut gate = CompileGate::cargo();
+            if let Some(timeout_ms) = gate_timeout_ms(config) {
+                gate = gate.with_timeout_ms(timeout_ms);
+            }
+            vec![gate.verify(base_signal, ctx).await]
+        }
+        Rung::Lint => {
+            let mut gate = ClippyGate::cargo();
+            if let Some(timeout_ms) = gate_timeout_ms(config) {
+                gate = gate.with_timeout_ms(timeout_ms);
+            }
+            vec![gate.verify(base_signal, ctx).await]
+        }
+        Rung::Test => {
+            let mut gate = TestGate::cargo();
+            if let Some(timeout_ms) = gate_timeout_ms(config) {
+                gate = gate.with_timeout_ms(timeout_ms);
+            }
+            vec![gate.verify(base_signal, ctx).await]
+        }
         Rung::Symbol => vec![run_symbol_gate(ctx, inputs, config).await],
         Rung::GeneratedTest => vec![
             run_generated_test_gate(base_signal, ctx, config).await,
             run_verify_chain_gate(base_signal, ctx, config).await,
         ],
         Rung::PropertyTest => vec![
-            PropertyTestGate::cargo().verify(base_signal, ctx).await,
+            run_property_test_gate(base_signal, ctx, config).await,
             run_fact_check_gate(ctx, inputs, config).await,
         ],
         Rung::Integration => vec![
@@ -172,7 +196,11 @@ async fn run_generated_test_gate(
     let Some(artifacts) = config.generated_test_artifacts.clone() else {
         return stub_verdict("generated_test:cargo", "generated test artifacts not wired");
     };
-    GeneratedTestGate::new(artifacts)
+    let mut gate = GeneratedTestGate::new(artifacts);
+    if let Some(timeout_ms) = gate_timeout_ms(config) {
+        gate = gate.with_timeout_ms(timeout_ms);
+    }
+    gate
         .verify(base_signal, ctx)
         .await
 }
@@ -189,6 +217,11 @@ async fn run_verify_chain_gate(
         .verify_chain_fallback
         .clone()
         .map_or_else(VerifyChainGate::strict, VerifyChainGate::with_fallback);
+    let gate = if let Some(timeout_ms) = gate_timeout_ms(config) {
+        gate.with_timeout_ms(timeout_ms)
+    } else {
+        gate
+    };
     gate.verify(base_signal, ctx).await
 }
 
@@ -209,6 +242,18 @@ async fn run_fact_check_gate(
     FactCheckGate::new(oracle, min_confidence)
         .verify(signal, ctx)
         .await
+}
+
+async fn run_property_test_gate(
+    base_signal: &Engram,
+    ctx: &Context,
+    config: &RungExecutionConfig,
+) -> Verdict {
+    let mut gate = PropertyTestGate::cargo();
+    if let Some(timeout_ms) = gate_timeout_ms(config) {
+        gate = gate.with_timeout_ms(timeout_ms);
+    }
+    gate.verify(base_signal, ctx).await
 }
 
 async fn run_llm_judge_gate(
@@ -242,7 +287,11 @@ async fn run_integration_gate(
     let build_system = config
         .integration_build_system
         .unwrap_or(BuildSystem::Cargo);
-    IntegrationGate::build_test(build_system, pattern)
+    let mut gate = IntegrationGate::build_test(build_system, pattern);
+    if let Some(timeout_ms) = gate_timeout_ms(config) {
+        gate = gate.with_timeout_ms(timeout_ms);
+    }
+    gate
         .verify(base_signal, ctx)
         .await
 }

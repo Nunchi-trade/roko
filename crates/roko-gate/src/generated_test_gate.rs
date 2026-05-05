@@ -52,7 +52,15 @@ pub const PLAN_TAG_KEY_ALT: &str = "plan_id";
 /// Default file-name prefix the `TestGenerator` role uses.
 pub const DEFAULT_TEST_PREFIX: &str = "gen_";
 /// Default timeout (matches [`crate::test_gate::TestGate`]).
-const DEFAULT_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+fn default_timeout_ms() -> u64 {
+    u64::try_from(
+        roko_core::config::TimeoutConfig::default()
+            .gate_test()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+    .max(1)
+}
 /// Staging subdirectory name, nested under `<worktree>/tests/`.
 ///
 /// The leading/trailing underscores make accidental name collisions with
@@ -200,7 +208,7 @@ impl GeneratedTestGate {
             artifacts,
             test_prefix: DEFAULT_TEST_PREFIX.into(),
             artifact_prefix: "generated-tests/".into(),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            timeout_ms: default_timeout_ms(),
             name: format!("generated_test:{}", build_system.program()),
         }
     }
@@ -813,7 +821,7 @@ mod tests {
         let g = GeneratedTestGate::new(store());
         assert_eq!(g.test_prefix, DEFAULT_TEST_PREFIX);
         assert_eq!(g.artifact_prefix, "generated-tests/");
-        assert_eq!(g.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(g.timeout_ms, default_timeout_ms());
         assert_eq!(g.name(), "generated_test:cargo");
     }
 

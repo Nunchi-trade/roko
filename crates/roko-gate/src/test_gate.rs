@@ -29,6 +29,14 @@ pub struct TestGate {
     name: String,
 }
 
+fn timeout_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX).max(1)
+}
+
+fn default_timeout_ms() -> u64 {
+    timeout_ms(roko_core::config::TimeoutConfig::default().gate_test())
+}
+
 impl TestGate {
     /// Construct a test gate for `build_system` running every test.
     #[must_use]
@@ -37,7 +45,7 @@ impl TestGate {
             build_system,
             selector: TestSelector::All,
             extra_args: Vec::new(),
-            timeout_ms: 15 * 60 * 1000, // 15 minutes, matching Mori
+            timeout_ms: default_timeout_ms(),
             name: format!("test:{}", build_system.program()),
         }
     }
