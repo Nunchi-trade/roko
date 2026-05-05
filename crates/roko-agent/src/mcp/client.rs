@@ -6,9 +6,11 @@
 //! mock transport via the [`Transport`] trait.
 
 use async_trait::async_trait;
+use roko_core::defaults::{DEFAULT_MCP_RESPONSE_TIMEOUT_SECS, DEFAULT_MCP_STDIN_WRITE_TIMEOUT_SECS};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
@@ -213,26 +215,47 @@ impl Transport for StdioTransport {
         let mut line = serde_json::to_string(request)?;
         line.push('\n');
 
-        // Write to child stdin
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| McpError::Transport(format!("write to stdin: {e}")))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|e| McpError::Transport(format!("flush stdin: {e}")))?;
-        drop(stdin);
+        // Write to child stdin (with timeout)
+        let write_result = tokio::time::timeout(
+            Duration::from_secs(DEFAULT_MCP_STDIN_WRITE_TIMEOUT_SECS),
+            async {
+                let mut stdin = self.stdin.lock().await;
+                stdin.write_all(line.as_bytes()).await?;
+                stdin.flush().await?;
+                Ok::<(), std::io::Error>(())
+            },
+        )
+        .await;
+        match write_result {
+            Err(_) => {
+                return Err(McpError::Transport(
+                    "MCP server stdin write timed out after 5s".into(),
+                ))
+            }
+            Ok(Err(e)) => return Err(McpError::Transport(format!("write to stdin: {e}"))),
+            Ok(Ok(())) => {}
+        }
 
-        // Read one line from child stdout
-        let mut response_line = String::new();
-        self.stdout
-            .lock()
-            .await
-            .read_line(&mut response_line)
-            .await
-            .map_err(|e| McpError::Transport(format!("read from stdout: {e}")))?;
+        // Read one line from child stdout (with timeout)
+        let read_result = tokio::time::timeout(
+            Duration::from_secs(DEFAULT_MCP_RESPONSE_TIMEOUT_SECS),
+            async {
+                let mut stdout = self.stdout.lock().await;
+                let mut line = String::new();
+                stdout.read_line(&mut line).await?;
+                Ok::<String, std::io::Error>(line)
+            },
+        )
+        .await;
+        let response_line = match read_result {
+            Err(_) => {
+                return Err(McpError::Transport(
+                    "MCP server response timed out after 30s".into(),
+                ))
+            }
+            Ok(Err(e)) => return Err(McpError::Transport(format!("read from stdout: {e}"))),
+            Ok(Ok(line)) => line,
+        };
 
         if response_line.is_empty() {
             return Err(McpError::Transport(

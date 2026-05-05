@@ -240,6 +240,12 @@ pub const DEFAULT_MUX_CHANNEL_BUFFER: usize = 512;
 /// MCP discovery timeout (seconds).
 pub const DEFAULT_MCP_DISCOVERY_TIMEOUT_SECS: u64 = 5;
 
+/// Timeout for writing a JSON-RPC request to an MCP server's stdin.
+pub const DEFAULT_MCP_STDIN_WRITE_TIMEOUT_SECS: u64 = 5;
+
+/// Timeout for reading a JSON-RPC response from an MCP server's stdout.
+pub const DEFAULT_MCP_RESPONSE_TIMEOUT_SECS: u64 = 30;
+
 // ── Output tail limits ──────────────────────────────────────────────────
 
 /// Default tail lines for log endpoints.
