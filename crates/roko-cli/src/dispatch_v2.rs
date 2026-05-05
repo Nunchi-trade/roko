@@ -114,7 +114,10 @@ pub async fn dispatch_via_model_call_service(prompt: &str) -> AnyhowResult<Dispa
     };
     let mut service = ModelCallService::new(model.clone())
         .with_config(model_config.clone())
-        .with_feedback_sink(feedback_sink);
+        .with_feedback_sink(feedback_sink)
+        .with_inference_observer(Arc::new(
+            crate::inference_observer::RuntimeEventInferenceObserver::new(),
+        ));
     if let Some(ref mcp_path) = config.agent.mcp_config {
         service = service.with_mcp_config(mcp_path.clone());
     }

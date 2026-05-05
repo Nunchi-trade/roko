@@ -75,6 +75,7 @@ pub mod explain;
 pub(crate) mod gate_runner;
 mod heartbeat;
 pub mod index;
+pub mod inference_observer;
 #[path = "commands/init.rs"]
 pub mod init;
 pub mod inject;

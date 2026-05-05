@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use roko_agent::{GatewayEventWriter, ModelCallService};
+use roko_agent::{GatewayEventWriter, InferenceObserver, ModelCallService};
 use roko_compose::prompt_assembly_service::PromptAssemblyService;
 use roko_core::agent::resolve_model;
 use roko_core::config::schema::{RokoConfig, ToolsConfig};
@@ -42,6 +42,8 @@ pub struct ServiceConfig {
     pub affect_enabled: bool,
     /// Stable run id used by service-level event and feedback records.
     pub run_id: Option<String>,
+    /// Optional inference observer for RuntimeEvent emission around model calls.
+    pub inference_observer: Option<Arc<dyn InferenceObserver>>,
 }
 
 impl ServiceConfig {
@@ -58,6 +60,7 @@ impl ServiceConfig {
             feedback_enabled: true,
             affect_enabled: true,
             run_id: None,
+            inference_observer: None,
         }
     }
 }
@@ -171,6 +174,9 @@ impl ServiceFactory {
                     .selected_model
             })
             .with_run_id(config.run_id.unwrap_or_else(default_run_id));
+        if let Some(observer) = config.inference_observer {
+            model_call_service = model_call_service.with_inference_observer(observer);
+        }
         if let Some(mcp_config) = config.mcp_config {
             model_call_service = model_call_service.with_mcp_config(mcp_config);
         }

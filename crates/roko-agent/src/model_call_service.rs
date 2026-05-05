@@ -4,6 +4,7 @@
 //! resolution, cost tracking, event emission, and feedback recording.
 
 use crate::gateway_events::{GatewayEvent, GatewayEventWriter};
+use crate::observer::InferenceObserver;
 use crate::provider::{AgentOptions, create_agent_for_model};
 use crate::task_runner::CostTable;
 use async_trait::async_trait;
@@ -63,6 +64,8 @@ pub struct ModelCallService {
     cost_table: CostTable,
     /// Optional event consumers for runtime observability.
     event_consumers: Vec<Arc<dyn EventConsumer>>,
+    /// Optional observer for backend inference lifecycle events.
+    inference_observer: Option<Arc<dyn InferenceObserver>>,
     /// Optional sink for model-call feedback.
     feedback_sink: Option<Arc<dyn FeedbackSink>>,
     /// Optional durable gateway event writer.
@@ -112,6 +115,7 @@ impl ModelCallService {
             config: RokoConfig::default(),
             cost_table: CostTable::default(),
             event_consumers: Vec::new(),
+            inference_observer: None,
             feedback_sink: None,
             gateway_event_writer: None,
             knowledge_store: None,
@@ -148,6 +152,13 @@ impl ModelCallService {
     #[must_use]
     pub fn with_event_consumer(mut self, consumer: Arc<dyn EventConsumer>) -> Self {
         self.event_consumers.push(consumer);
+        self
+    }
+
+    /// Attach an inference observer for backend call lifecycle events.
+    #[must_use]
+    pub fn with_inference_observer(mut self, observer: Arc<dyn InferenceObserver>) -> Self {
+        self.inference_observer = Some(observer);
         self
     }
 
@@ -347,6 +358,45 @@ impl ModelCallService {
     fn emit(&self, event: RuntimeEvent) {
         for consumer in &self.event_consumers {
             consumer.consume(&event);
+        }
+    }
+
+    fn inference_started(
+        &self,
+        request_id: &str,
+        model: &str,
+        agent_id: &str,
+        auto_routed: bool,
+    ) {
+        if let Some(observer) = &self.inference_observer {
+            observer.on_start(request_id, model, agent_id, auto_routed);
+        }
+    }
+
+    fn inference_completed(
+        &self,
+        request_id: &str,
+        model: &str,
+        agent_id: &str,
+        usage: &TokenUsage,
+        duration_ms: u64,
+    ) {
+        if let Some(observer) = &self.inference_observer {
+            observer.on_complete(
+                request_id,
+                model,
+                agent_id,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cost_usd,
+                duration_ms,
+            );
+        }
+    }
+
+    fn inference_failed(&self, request_id: &str, model: &str, agent_id: &str, error: &str) {
+        if let Some(observer) = &self.inference_observer {
+            observer.on_error(request_id, model, agent_id, error);
         }
     }
 
@@ -1326,6 +1376,7 @@ impl ModelCaller for ModelCallService {
         let model = self.resolve_model(&req);
         let start = Instant::now();
         let agent_id = format!("model-call:{model}");
+        let auto_routed = req.model.trim().is_empty() || req.model != model;
         let cache_key = CacheCell::cache_key(
             &model,
             req.system.as_deref(),
@@ -1432,6 +1483,8 @@ impl ModelCaller for ModelCallService {
 
         let fallback_models = self.fallback_models_for_request(&model);
         let cell = ProviderCallCell::new(config, self.cost_table.clone());
+        self.inference_started(&request_id, &model, &agent_id, auto_routed);
+        let inference_start = Instant::now();
         let output = match cell
             .execute(
                 &model,
@@ -1447,6 +1500,7 @@ impl ModelCaller for ModelCallService {
                 let latency_ms = start.elapsed().as_millis() as u64;
                 let usage = token_usage(&Usage::zero(), 0.0);
                 let message = error.message().to_string();
+                self.inference_failed(&request_id, &model, &agent_id, &message);
                 self.emit(RuntimeEvent::AgentFailed {
                     run_id: self.run_id.clone(),
                     agent_id,
@@ -1480,6 +1534,13 @@ impl ModelCaller for ModelCallService {
         };
 
         let usage = token_usage(&output.usage, output.cost_usd);
+        self.inference_completed(
+            &request_id,
+            &output.model_used,
+            &agent_id,
+            &usage,
+            inference_start.elapsed().as_millis() as u64,
+        );
         let role = req.role.as_deref().unwrap_or("default");
         let convergence_key = format!("{}:{role}", self.run_id);
         if let Err(error) = self.convergence.check(&convergence_key, &output.content) {
