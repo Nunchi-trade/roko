@@ -338,6 +338,7 @@ impl ServerBuilder {
         let _workspace_gc = start_workspace_gc(Arc::clone(&state));
         let _handle_gc = start_handle_gc(Arc::clone(&state));
         let _demurrage = start_demurrage_timer(Arc::clone(&state));
+        let _isfr_keeper = start_isfr_keeper(Arc::clone(&state));
 
         // Load persisted deployments from disk.
         routes::load_persisted_deployments(&state).await;
@@ -1893,6 +1894,191 @@ async fn run_cold_archival_tick(
     let cold = roko_fs::ArchiveColdSubstrate::open(&cold_dir).await?;
     let archived = cold.archive_batch(candidates).await?;
     Ok(archived)
+}
+
+/// Start the ISFR keeper as a background task if `config.isfr.enabled` is true.
+///
+/// The keeper is constructed from `[isfr.sources]` in `roko.toml`.  When no
+/// sources are configured a 4-source mock keeper is used so the rate history
+/// is populated in dev environments without any DeFi connectivity.
+///
+/// The keeper's `PublishFn` callback fires after every successful tick and:
+///   - Writes the new composite rate to `state.isfr.current_rate`.
+///   - Pushes the rate to `state.isfr.rate_history` (Vec, newest at end, max 256).
+///   - Updates `state.isfr.sources` with per-source health snapshots.
+///   - Emits `ServerEvent::IsfrRateComputed` to the event bus.
+///
+/// `state.isfr.keeper_running` is set to `true` before `keeper.run()` and
+/// reset to `false` when the task exits (on shutdown or panic-recovery).
+fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
+    use roko_chain::isfr_keeper::{
+        ISFRKeeper, ISFRKeeperConfig, SourceConfig as KeeperSourceConfig,
+    };
+    use roko_chain::isfr_sources::SourceStatus;
+    use state::ISFRSourceSnapshot;
+    use std::sync::atomic::Ordering;
+
+    let roko_config = state.load_roko_config();
+    let isfr_section = roko_config.isfr.clone();
+
+    if !isfr_section.enabled {
+        // Return a no-op task so the caller always gets a JoinHandle.
+        return tokio::spawn(async {});
+    }
+
+    let keeper_config = ISFRKeeperConfig {
+        poll_interval_secs: isfr_section.poll_interval_secs,
+        epoch_duration_secs: isfr_section.epoch_duration_secs,
+        min_submissions: isfr_section.min_submissions,
+        outlier_sigma: isfr_section.outlier_sigma,
+        relay_url: None,
+        chain_id: "31337".to_string(),
+    };
+
+    // Build source list from config, or fall back to the standard 4-source mock.
+    let keeper = if isfr_section.sources.is_empty() {
+        ISFRKeeper::mock_keeper("roko-serve", keeper_config)
+    } else {
+        let source_configs: Vec<KeeperSourceConfig> = isfr_section
+            .sources
+            .iter()
+            .map(|sc| KeeperSourceConfig {
+                name: sc.name.clone(),
+                kind: sc.kind.clone(),
+                weight: sc.weight,
+                class: sc.class.clone(),
+                rate_bps: sc.rate_bps,
+                jitter_bps: sc.jitter_bps,
+                rpc_url: sc.rpc_url.clone(),
+                pool_address: sc.pool_address.clone(),
+            })
+            .collect();
+        ISFRKeeper::from_config("roko-serve", keeper_config, &source_configs)
+    };
+
+    let keeper = std::sync::Arc::new(keeper);
+
+    // Wire the publish callback: captures Arc<AppState> and Arc<ISFRKeeper>.
+    {
+        let state_cb = Arc::clone(&state);
+        let keeper_cb = Arc::clone(&keeper);
+        keeper.set_publish_fn(std::sync::Arc::new(
+            move |_topic: &str, _msg_type: &str, _payload: serde_json::Value| {
+                // Grab the freshly computed composite from the keeper.
+                let Some(rate) = keeper_cb.current_rate() else {
+                    return;
+                };
+
+                const MAX_HISTORY: usize = 256;
+
+                // The PublishFn signature is `Fn(...) + Send + Sync` (not async),
+                // so we spawn a short-lived task to drive the async RwLock writes
+                // without blocking the keeper's poll loop.
+                let rate_clone = rate.clone();
+                let state_async = Arc::clone(&state_cb);
+                let metas = keeper_cb.source_metas();
+
+                // Build source snapshots synchronously from metas (no async needed).
+                let source_snapshots: Vec<ISFRSourceSnapshot> = metas
+                    .iter()
+                    .map(|m| ISFRSourceSnapshot {
+                        id: m.name.clone(),
+                        name: m.name.clone(),
+                        class: m.class.as_str().to_string(),
+                        weight: m.weight,
+                        last_rate_bps: m
+                            .last_reading
+                            .as_ref()
+                            .map(|r| r.rate_bps),
+                        health: match m.status {
+                            SourceStatus::Live => "live".to_string(),
+                            SourceStatus::Stale => "stale".to_string(),
+                            SourceStatus::Offline => "offline".to_string(),
+                        },
+                        last_poll_ms: m
+                            .last_reading
+                            .as_ref()
+                            .map(|r| r.timestamp_ms as i64),
+                    })
+                    .collect();
+
+                let composite_bps = rate_clone.composite_bps;
+                let lending_bps = rate_clone.lending_bps;
+                let structured_bps = rate_clone.structured_bps;
+                let funding_bps = rate_clone.funding_bps;
+                let staking_bps = rate_clone.staking_bps;
+                let confidence_bps = rate_clone.confidence_bps;
+                let source_count = rate_clone.readings.len();
+                let timestamp_ms = rate_clone.timestamp_ms as i64;
+
+                // Spawn async to update the tokio RwLock fields without blocking.
+                tokio::spawn(async move {
+                    // 1. Write current_rate.
+                    *state_async.isfr.current_rate.write().await = Some(rate_clone.clone());
+
+                    // 2. Push to rate_history (bounded at MAX_HISTORY, newest at end).
+                    {
+                        let mut history = state_async.isfr.rate_history.write().await;
+                        history.push(rate_clone);
+                        if history.len() > MAX_HISTORY {
+                            let excess = history.len() - MAX_HISTORY;
+                            history.drain(0..excess);
+                        }
+                    }
+
+                    // 3. Replace source snapshots.
+                    *state_async.isfr.sources.write().await = source_snapshots;
+
+                    // 4. Emit the rate event to the bus.
+                    state_async.event_bus.publish(ServerEvent::IsfrRateComputed {
+                        composite_bps,
+                        lending_bps,
+                        structured_bps,
+                        funding_bps,
+                        staking_bps,
+                        confidence_bps,
+                        source_count,
+                        timestamp_ms,
+                    });
+                });
+            },
+        ));
+    }
+
+    // Mark keeper as running.
+    state
+        .isfr
+        .keeper_running
+        .store(true, Ordering::Relaxed);
+    state
+        .event_bus
+        .publish(ServerEvent::IsfrKeeperStateChanged { running: true });
+
+    // Clone the Arc for the cancel-bridge task; the main `state` remains available
+    // for the post-run cleanup.
+    let state_bridge = Arc::clone(&state);
+
+    tokio::spawn(async move {
+        // Bridge roko's CancelToken into a tokio-util CancellationToken so
+        // ISFRKeeper::run() can use it.
+        let keeper_cancel = tokio_util::sync::CancellationToken::new();
+        let bridge_cancel = keeper_cancel.clone();
+        tokio::spawn(async move {
+            state_bridge.cancel.cancelled().await;
+            bridge_cancel.cancel();
+        });
+
+        keeper.run(keeper_cancel).await;
+
+        // Keeper loop exited (shutdown or cancelled).
+        state
+            .isfr
+            .keeper_running
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        state
+            .event_bus
+            .publish(ServerEvent::IsfrKeeperStateChanged { running: false });
+    })
 }
 
 fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
