@@ -17,6 +17,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "tower-http",
  "tracing",
  "tracing-subscriber 0.3.23",
@@ -5952,6 +5953,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "alloy-primitives",
+ "anyhow",
  "async-trait",
  "blake3",
  "parking_lot",
@@ -5961,6 +5963,8 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

@@ -108,8 +108,6 @@ use roko_learn::conductor::{
 };
 use roko_learn::costs_db::{CostRecord, CostsDb};
 use roko_learn::costs_log::CostsLog;
-use roko_learn::event_subscriber::run_learning_subscriber;
-use roko_learn::provider_health::ProviderHealthRegistry;
 use roko_learn::curriculum::{CurriculumMode, CurriculumScheduler};
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
@@ -118,6 +116,7 @@ use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
 use roko_learn::error_pattern_store::{
     ErrorPatternStore, FailurePatternQuery, GateFailureObservation, GateFailureSource,
 };
+use roko_learn::event_subscriber::run_learning_subscriber;
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::hdc_fingerprint::{encode as encode_hdc_fingerprint, fingerprint_episode};
 use roko_learn::latency::LatencyRegistry;
@@ -125,6 +124,7 @@ use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::PlaybookStore;
 use roko_learn::prediction::CalibrationTracker;
 use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
+use roko_learn::provider_health::ProviderHealthRegistry;
 use roko_learn::routing_log::{
     RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
 };

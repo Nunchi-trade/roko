@@ -672,7 +672,6 @@ pub struct ConfigOption {
     pub options: Option<Vec<ConfigOptionValue>>,
 }
 
-
 /// Config option control type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

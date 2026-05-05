@@ -24,7 +24,10 @@ blake3 = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
 parking_lot = { workspace = true }
 alloy-primitives = { workspace = true, optional = true }
 alloy = { version = "1", features = ["full"], optional = true }

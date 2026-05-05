@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use crate::state_hub::StateHub;
 use anyhow::{Context, Result};
+use roko_core::RuntimeEvent;
 use roko_core::agent::ModelSpec;
 use roko_core::config::GatesConfig;
 use roko_core::defaults::{DEFAULT_AGENT_TURN_LIMIT, DEFAULT_RUNNER_MAX_CONCURRENT_PLANS};
-use roko_core::RuntimeEvent;
 // TimeoutConfig-derived helpers: agent_dispatch_timeout, plan_total_timeout,
 // llm_call_timeout, gate_timeout — see below.
 use roko_core::runtime_event::WorkflowOutcome as RuntimeWorkflowOutcome;
@@ -22,7 +22,7 @@ use roko_daimon::{
     TaskStrategyObservation,
 };
 use roko_fs::RokoLayout;
-use roko_gate::{classify_gate_failure, render_failure_classification, PlanComplexity};
+use roko_gate::{PlanComplexity, classify_gate_failure, render_failure_classification};
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
@@ -45,7 +45,7 @@ use crate::task_parser::TaskDef;
 use roko_learn::playbook::PlaybookStore;
 use roko_learn::post_gate_reflection::{PostGateReflectionStore, ReflectionGateOutcome};
 use roko_learn::section_outcome::{
-    SectionOutcomeRecord, SectionOutcomeStatus, SectionOutcomeStore, SECTION_OUTCOME_SCHEMA_VERSION,
+    SECTION_OUTCOME_SCHEMA_VERSION, SectionOutcomeRecord, SectionOutcomeStatus, SectionOutcomeStore,
 };
 use roko_neuro::KnowledgeStore;
 
