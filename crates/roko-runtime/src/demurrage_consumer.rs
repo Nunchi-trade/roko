@@ -1,4 +1,4 @@
-//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//! STATUS: WIRED -- called from `roko-serve::start_demurrage_timer()`.
 //!
 //! Demurrage heartbeat consumer (LIFE-10).
 //!

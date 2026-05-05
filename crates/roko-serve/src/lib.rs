@@ -1695,17 +1695,23 @@ fn start_handle_gc(state: Arc<AppState>) -> JoinHandle<()> {
 /// Periodic knowledge demurrage: applies confidence/balance decay to knowledge
 /// entries that have not been re-validated since the last pass.
 ///
-/// Runs every 5 minutes. Each tick opens the `KnowledgeStore` for the
-/// workspace and calls `apply_demurrage()`, which reduces balances on stale
-/// entries so that unused knowledge naturally fades.
+/// The `DemurrageConsumer` drives the loop. Each heartbeat tick (40s) advances
+/// the consumer's iteration counter. When `validation_interval` iterations
+/// elapse (default 250 = ~2.9 hours), the consumer applies domain-specific
+/// decay via its configured `domain_multipliers`. Entries below the archive
+/// threshold are flagged for cold storage.
 ///
 /// Failures are logged at debug level but never crash the server.
 fn start_demurrage_timer(state: Arc<AppState>) -> JoinHandle<()> {
-    use roko_runtime::demurrage_consumer::{DemurrageConsumer, DemurrageConsumerConfig};
+    use roko_runtime::demurrage_consumer::{
+        DemurrageConsumer, DemurrageConsumerConfig, DemurrageEntry,
+    };
 
     tokio::spawn(async move {
-        let _consumer = DemurrageConsumer::new(DemurrageConsumerConfig::default());
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        let mut consumer = DemurrageConsumer::new(DemurrageConsumerConfig::default());
+        // The consumer expects one tick per heartbeat iteration (~40s each).
+        // validation_interval=250 means demurrage fires every ~2.9 hours.
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(40));
 
         // Skip the first immediate tick — let the server warm up.
         interval.tick().await;
@@ -1717,16 +1723,78 @@ fn start_demurrage_timer(state: Arc<AppState>) -> JoinHandle<()> {
             }
 
             let store = roko_neuro::knowledge_store::KnowledgeStore::for_workdir(&state.workdir);
-            match store.apply_demurrage() {
-                Ok(0) => {
-                    debug!("demurrage pass: no entries taxed");
+
+            // Read entries and convert to DemurrageEntry for the consumer.
+            let entries = match store.read_all() {
+                Ok(e) => e,
+                Err(e) => {
+                    debug!(error = %e, "demurrage: failed to read knowledge store");
+                    continue;
                 }
+            };
+
+            let demurrage_entries: Vec<DemurrageEntry> = entries
+                .iter()
+                .map(|e| {
+                    // Use the first tag as the domain key for multiplier lookup;
+                    // fall back to the knowledge kind name.
+                    let domain = e
+                        .tags
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{:?}", e.kind).to_lowercase());
+                    DemurrageEntry {
+                        id: e.id.clone(),
+                        confidence: e.confidence,
+                        domain,
+                        last_validated_at: 0,
+                        validated_since_last: false,
+                    }
+                })
+                .collect();
+
+            // Tick the consumer — it only fires demurrage when validation_interval elapses.
+            let Some((updated_entries, event)) = consumer.tick(&demurrage_entries) else {
+                continue;
+            };
+
+            debug!(
+                iteration = event.iteration,
+                entries_decayed = event.entries_decayed,
+                entries_archived = event.entries_archived,
+                total_confidence_lost = %format!("{:.4}", event.total_confidence_lost),
+                "demurrage pass completed via consumer"
+            );
+
+            // Build a lookup of updated confidences by entry ID.
+            let confidence_updates: std::collections::HashMap<&str, f64> = updated_entries
+                .iter()
+                .map(|e| (e.id.as_str(), e.confidence))
+                .collect();
+
+            // Persist confidence decay back to the store atomically.
+            match store.update_entries(|entry| {
+                if let Some(&new_conf) = confidence_updates.get(entry.id.as_str()) {
+                    if (entry.confidence - new_conf).abs() > f64::EPSILON {
+                        entry.confidence = new_conf;
+                        return true;
+                    }
+                }
+                false
+            }) {
                 Ok(n) => {
-                    debug!(entries_taxed = n, "demurrage pass completed");
+                    debug!(entries_updated = n, "demurrage: confidence decay persisted");
                 }
                 Err(e) => {
-                    debug!(error = %e, "demurrage pass failed");
+                    debug!(error = %e, "demurrage: failed to persist confidence decay");
                 }
+            }
+
+            // Also run the balance-based demurrage (apply_demurrage uses elapsed time).
+            // This ensures both confidence decay (consumer) and balance decay (store)
+            // are applied together.
+            if let Err(e) = store.apply_demurrage() {
+                debug!(error = %e, "demurrage: balance decay failed");
             }
         }
     })
