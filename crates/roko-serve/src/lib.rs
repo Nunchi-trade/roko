@@ -358,6 +358,11 @@ impl ServerBuilder {
         let listener = TcpListener::bind(&addr)
             .await
             .with_context(|| format!("bind to {addr}"))?;
+        if let Ok(local_addr) = listener.local_addr() {
+            state
+                .terminal_sessions
+                .configure_server_env_from_addr(local_addr, roko_config.as_ref());
+        }
 
         info!("roko server listening on http://{addr}");
         info!("workdir: {}", self.config.workdir.display());
@@ -722,6 +727,11 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind to {addr}"))?;
+    if let Ok(local_addr) = listener.local_addr() {
+        state
+            .terminal_sessions
+            .configure_server_env_from_addr(local_addr, &roko_config);
+    }
 
     info!("roko server listening on http://{addr}");
     info!("workdir: {}", state.workdir.display());

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -26,6 +27,7 @@ use uuid::Uuid;
 
 use crate::command_events::{CommandEvent, CommandOutputStream};
 use crate::state::AppState;
+use roko_core::config::schema::RokoConfig;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,6 +82,77 @@ pub struct SendInputRequest {
 
 const TERMINAL_DISABLED_ERROR: &str = "Terminal disabled";
 const TERMINAL_DISABLED_HINT: &str = "Set serve.terminal_enabled=true or use --enable-terminal";
+
+#[derive(Clone, Debug, Default)]
+struct PtyServerEnv {
+    serve_url: Option<String>,
+    auth_token: Option<String>,
+}
+
+impl PtyServerEnv {
+    fn apply_to(&self, cmd: &mut CommandBuilder, session_id: &str) {
+        cmd.env("ROKO_SESSION_ID", session_id);
+
+        if let Some(serve_url) = &self.serve_url {
+            cmd.env("ROKO_SERVE_URL", serve_url.as_str());
+        }
+
+        if let Some(auth_token) = &self.auth_token {
+            cmd.env("ROKO_SERVER_AUTH_TOKEN", auth_token.as_str());
+        }
+    }
+}
+
+fn non_empty_env_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn configured_auth_token(config: &RokoConfig) -> Option<String> {
+    std::env::var("ROKO_SERVER_AUTH_TOKEN")
+        .ok()
+        .and_then(|value| non_empty_env_value(&value))
+        .or_else(|| {
+            config
+                .server
+                .auth_token
+                .as_deref()
+                .and_then(non_empty_env_value)
+        })
+}
+
+fn effective_config_port(config: &RokoConfig) -> u16 {
+    if config.server.port == roko_core::defaults::DEFAULT_SERVE_PORT {
+        config.serve.port.unwrap_or(config.server.port)
+    } else {
+        config.server.port
+    }
+}
+
+fn serve_url_from_bind_and_port(bind: &str, port: u16) -> String {
+    let bind = bind.trim();
+    let host = match bind {
+        "" | "0.0.0.0" => "127.0.0.1".to_string(),
+        "::" => "[::1]".to_string(),
+        host if host.contains(':') && !host.starts_with('[') => format!("[{host}]"),
+        host => host.to_string(),
+    };
+    format!("http://{host}:{port}")
+}
+
+fn serve_url_from_socket_addr(addr: SocketAddr) -> String {
+    let host = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    format!("http://{host}:{}", addr.port())
+}
 
 #[derive(Clone)]
 struct TerminalCommandEventEmitter {
@@ -180,6 +253,7 @@ pub struct SessionManager {
     workdir: std::path::PathBuf,
     sess_generation: AtomicU64,
     command_event_emitter: TerminalCommandEventEmitter,
+    server_env: Mutex<PtyServerEnv>,
 }
 
 impl SessionManager {
@@ -190,7 +264,25 @@ impl SessionManager {
             workdir,
             sess_generation: AtomicU64::new(0),
             command_event_emitter: TerminalCommandEventEmitter::new(),
+            server_env: Mutex::new(PtyServerEnv::default()),
         }
+    }
+
+    pub(crate) fn configure_server_env_from_config(&self, config: &RokoConfig) {
+        let serve_url =
+            serve_url_from_bind_and_port(&config.server.bind, effective_config_port(config));
+        self.configure_server_env(serve_url, configured_auth_token(config));
+    }
+
+    pub(crate) fn configure_server_env_from_addr(&self, addr: SocketAddr, config: &RokoConfig) {
+        self.configure_server_env(serve_url_from_socket_addr(addr), configured_auth_token(config));
+    }
+
+    fn configure_server_env(&self, serve_url: String, auth_token: Option<String>) {
+        *self.server_env.lock() = PtyServerEnv {
+            serve_url: non_empty_env_value(serve_url.trim_end_matches('/')),
+            auth_token,
+        };
     }
 
     /// Create a new PTY session. Returns (id, reader, generation).
@@ -272,6 +364,7 @@ impl SessionManager {
         cmd.cwd(&wd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        self.server_env.lock().apply_to(&mut cmd, &id);
 
         // Set ZDOTDIR to a temp dir with a minimal .zshrc so user's shell config
         // doesn't override the prompt — makes prompt detection deterministic.

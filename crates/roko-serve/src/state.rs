@@ -592,6 +592,8 @@ impl AppState {
         .map_err(|e| anyhow::anyhow!("build shared service bundle: {e}"))?;
         let model_call_service = service_bundle.model_call_service;
         let terminal_workdir = workdir.clone();
+        let terminal_sessions = crate::terminal::SessionManager::new(terminal_workdir);
+        terminal_sessions.configure_server_env_from_config(&roko_config);
 
         Ok(Self {
             workdir,
@@ -635,7 +637,7 @@ impl AppState {
             cascade_router: RwLock::new(None),
             gateway_model_counters: RwLock::new(HashMap::new()),
             batch_progress: RwLock::new(HashMap::new()),
-            terminal_sessions: crate::terminal::SessionManager::new(terminal_workdir),
+            terminal_sessions,
             active_bench_runs: RwLock::new(HashMap::new()),
             active_matrix_runs: RwLock::new(HashMap::new()),
             ephemeral_workspaces: RwLock::new(HashMap::new()),
