@@ -171,6 +171,8 @@ impl RelayState {
         for pending in pending {
             let _ = pending.tx.send(Err("agent disconnected".to_string()));
         }
+        // Clean up all topic subscriptions for this agent.
+        self.bus.unsubscribe_all(agent_id);
         let _ = self.events_tx.send(RelayEvent::AgentDisconnected {
             agent_id: agent_id.to_string(),
         });

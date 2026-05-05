@@ -24,6 +24,8 @@ pub mod chain_watcher;
 pub mod protocol;
 pub mod state;
 
+pub use bus::{TopicBus, TopicBusConfig};
+
 use protocol::{
     AgentInboundFrame, RelayEvent, RelayMessageRequest, RelayOutboundFrame, TopicEnvelope,
 };
