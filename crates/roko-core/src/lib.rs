@@ -56,6 +56,8 @@ pub mod build;
 /// Additional Bus backend implementations: BroadcastBus, MemoryBus, MultiBus.
 pub mod bus_backends;
 pub mod catalyst;
+/// The Cell trait — universal computation unit for all protocol implementations.
+pub mod cell;
 pub mod cfactor;
 /// Canonical provider-agnostic chat message types.
 pub mod chat_types;
@@ -126,6 +128,7 @@ pub use bus_backends::{
     BroadcastBus, BroadcastBusReceiver, BusErased, MemoryBus, MemoryBusReceiver, MultiBus,
 };
 pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
+pub use cell::*;
 pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use chat_types::{
     ChatMessage, ChatRequest, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
