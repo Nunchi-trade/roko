@@ -131,6 +131,8 @@ pub struct RokoConfig {
     #[serde(default)]
     pub isfr: ISFRSection,
     #[serde(default)]
+    pub isfr: ISFRSection,
+    #[serde(default)]
     pub runner: CoreRunnerConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentDefinition>,

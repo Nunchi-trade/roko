@@ -83,6 +83,7 @@ const fn default_relay_heartbeat() -> u64 {
     30
 }
 
+<<<<<<< HEAD
 fn default_chain_profile() -> String {
     "mirage".to_string()
 }
@@ -103,21 +104,56 @@ pub struct ISFRSection {
     pub outlier_sigma: f64,
     /// Rate source definitions.
     pub sources: Vec<ISFRSourceConfig>,
+=======
+// ---------------------------------------------------------------------------
+// ISFRSection (E1)
+// ---------------------------------------------------------------------------
+
+/// ISFR (Intersubjective Fact Rate) keeper configuration.
+///
+/// Controls the DeFi rate aggregation background task that computes
+/// composite lending/funding/staking rates from multiple on-chain sources.
+///
+/// ```toml
+/// [isfr]
+/// enabled = true
+/// poll_interval_secs = 60
+/// epoch_duration_secs = 28800
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ISFRSection {
+    /// Whether the ISFR keeper is enabled. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// How often (in seconds) the keeper polls all sources. Default: 60.
+    #[serde(default = "default_isfr_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Epoch duration in seconds for rate aggregation. Default: 28800 (8 h).
+    #[serde(default = "default_isfr_epoch_duration")]
+    pub epoch_duration_secs: u64,
+>>>>>>> worktree-agent-adbd1807
 }
 
 impl Default for ISFRSection {
     fn default() -> Self {
         Self {
             enabled: false,
+<<<<<<< HEAD
             epoch_duration_secs: 28_800,
             poll_interval_secs: 10,
             min_submissions: 2,
             outlier_sigma: 3.0,
             sources: Vec::new(),
+=======
+            poll_interval_secs: default_isfr_poll_interval(),
+            epoch_duration_secs: default_isfr_epoch_duration(),
+>>>>>>> worktree-agent-adbd1807
         }
     }
 }
 
+<<<<<<< HEAD
 /// `[[isfr.sources]]` entry in roko.toml.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ISFRSourceConfig {
@@ -146,6 +182,14 @@ pub struct ISFRSourceConfig {
 
 fn default_isfr_weight() -> f64 {
     0.25
+=======
+const fn default_isfr_poll_interval() -> u64 {
+    60
+}
+
+const fn default_isfr_epoch_duration() -> u64 {
+    28_800 // 8 hours
+>>>>>>> worktree-agent-adbd1807
 }
 
 #[cfg(test)]
@@ -153,6 +197,7 @@ mod tests {
     use super::*;
 
     #[test]
+<<<<<<< HEAD
     fn parse_isfr_section() {
         let toml_str = r#"
 enabled = true
@@ -184,5 +229,25 @@ rate_bps = 500
     fn chain_config_profile_default() {
         let config: ChainConfig = toml::from_str("").unwrap();
         assert_eq!(config.profile, "mirage");
+=======
+    fn isfr_section_deserializes_with_defaults() {
+        let section: ISFRSection = toml::from_str("").unwrap();
+        assert!(!section.enabled);
+        assert_eq!(section.poll_interval_secs, 60);
+        assert_eq!(section.epoch_duration_secs, 28_800);
+    }
+
+    #[test]
+    fn isfr_section_deserializes_explicit_values() {
+        let toml_str = r#"
+            enabled = true
+            poll_interval_secs = 30
+            epoch_duration_secs = 14400
+        "#;
+        let section: ISFRSection = toml::from_str(toml_str).unwrap();
+        assert!(section.enabled);
+        assert_eq!(section.poll_interval_secs, 30);
+        assert_eq!(section.epoch_duration_secs, 14400);
+>>>>>>> worktree-agent-adbd1807
     }
 }
