@@ -28,6 +28,7 @@ const IntegrityView = lazy(() => import('./pages/dashboard/IntegrityView'));
 const CascadeRouter = lazy(() => import('./pages/dashboard/CascadeRouter'));
 const KnowledgeEntries = lazy(() => import('./pages/dashboard/KnowledgeEntries'));
 const DreamsView = lazy(() => import('./pages/dashboard/DreamsView'));
+const IsfrPage = lazy(() => import('./pages/dashboard/IsfrPage'));
 const Terminal = lazy(() => import('./pages/Terminal'));
 const Builder = lazy(() => import('./pages/Builder'));
 const Explorer = lazy(() => import('./pages/Explorer/index'));
@@ -101,6 +102,7 @@ createRoot(document.getElementById('root')!).render(
                 <Route path="entries" element={<KnowledgeEntries />} />
                 <Route path="routing" element={<CascadeRouter />} />
                 <Route path="dreams" element={<DreamsView />} />
+                <Route path="isfr" element={<IsfrPage />} />
               </Route>
               <Route path="demo" element={null} />
               <Route path="terminal" element={<Terminal />} />

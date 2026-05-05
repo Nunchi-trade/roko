@@ -12,6 +12,7 @@ const VIEWS = [
   { to: '/dashboard/routing', label: 'Routing', icon: 'route', end: false },
   { to: '/dashboard/integrity', label: 'Integrity', icon: 'hash', end: false },
   { to: '/dashboard/dreams', label: 'Dreams', icon: 'spark', end: false },
+  { to: '/dashboard/isfr', label: 'ISFR', icon: 'activity', end: false },
 ] satisfies Array<{ to: string; label: string; icon: FlatIconName; end: boolean }>;
 
 const shellStyle: CSSProperties = {
