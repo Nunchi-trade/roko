@@ -42,6 +42,7 @@ use crate::dispatch::{
 use crate::inline::DiffEntry;
 use crate::knowledge_helpers::{build_knowledge_routing_advice, neuro_prompt_task_category};
 use crate::task_parser::TaskDef;
+use roko_learn::playbook::PlaybookStore;
 use roko_learn::post_gate_reflection::{PostGateReflectionStore, ReflectionGateOutcome};
 use roko_learn::section_outcome::{
     SECTION_OUTCOME_SCHEMA_VERSION, SectionOutcomeRecord, SectionOutcomeStatus, SectionOutcomeStore,
@@ -62,7 +63,7 @@ use super::types::{
     AgentCompletionSummary, AgentDispatchOutcome, AgentEvent, GateCompletion, GateCompletionKind,
     GateVerdictSummary, PlanOutcome, PlanRunSummary, PromptAssemblyDiagnostics, ResumeMarker,
     ResumeOutcome, RetryAction, RunConfig, RunOutcome, RunTotals, RunnerEvent, RunnerFailureKind,
-    TaskAttemptOutcome, TaskAttemptRef, TaskAttemptStatus,
+    TaskAttemptOutcome, TaskAttemptRef, TaskAttemptStatus, TaskCostReport,
 };
 
 // ─── RunReport ──────────────────────────────────────────────────────────
@@ -81,6 +82,8 @@ pub struct RunReport {
     pub duration: Duration,
     /// Per-task failure reasons keyed by "plan_id:task_id".
     pub failure_reasons: HashMap<String, String>,
+    /// Per-task cost breakdown for completed and failed tasks.
+    pub task_costs: Vec<TaskCostReport>,
 }
 
 /// Per-plan report.
@@ -196,6 +199,11 @@ struct RunContext<'a> {
     /// Prompt section diagnostics per attempt key — populated at dispatch,
     /// consumed on gate completion to build SectionOutcomeRecords.
     section_diagnostics: &'a mut HashMap<String, PromptDiagnostics>,
+    /// Model slug captured at dispatch time, keyed by attempt key.
+    /// Used for SectionOutcome recording so the model field reflects the
+    /// actual model dispatched (not whatever `state.agent_model` holds at
+    /// gate-completion time, which may be stale after retries).
+    dispatch_models: &'a mut HashMap<String, String>,
 }
 
 // ─── Main Entry Point ───────────────────────────────────────────────────
@@ -505,6 +513,15 @@ pub async fn run(
     // Track prompt section diagnostics per attempt so gate completions can
     // build SectionOutcomeRecords joining section presence to pass/fail.
     let mut section_diagnostics: HashMap<String, PromptDiagnostics> = HashMap::new();
+    // Model slug captured at dispatch time, keyed by attempt key. Used so
+    // SectionOutcome records reflect the actual dispatched model, not the
+    // potentially-stale `state.agent_model` at gate-completion time.
+    let mut dispatch_models: HashMap<String, String> = HashMap::new();
+
+    // PlaybookStore for recording gate outcomes back to playbook success/failure
+    // counters. This closes the feedback loop so adaptive playbook selection can
+    // learn which playbooks correlate with task success.
+    let playbook_store = PlaybookStore::new(config.layout.playbooks_dir());
 
     let skip_enrichment: HashMap<String, bool> = plans
         .iter()
@@ -990,10 +1007,17 @@ pub async fn run(
                         } else {
                             SectionOutcomeStatus::Failed
                         };
+                        // Use the model captured at dispatch time (not the
+                        // potentially-stale state.agent_model which may have
+                        // been overwritten by a concurrent or retried dispatch).
+                        let dispatch_model = dispatch_models
+                            .remove(&attempt_key)
+                            .unwrap_or_else(|| state.agent_model.clone());
+                        let run_id = state.run_id().to_string();
                         let records = build_section_outcome_records(
-                            &completion.plan_id,
-                            &completion.task_id,
-                            &state.agent_model,
+                            &run_id,
+                            &attempt_key,
+                            &dispatch_model,
                             &state.agent_provider,
                             status,
                             &diag,
@@ -1005,6 +1029,45 @@ pub async fn run(
                             outcomes_path,
                             records,
                         ));
+                    }
+                }
+
+                // ── Playbook outcome recording ───────────────────────────
+                // Record gate pass/fail against every playbook that was
+                // injected into this task's prompt. This closes the feedback
+                // loop so PlaybookStore can learn which playbooks correlate
+                // with task success and adaptive selection improves over time.
+                {
+                    let attempt_key = completion_attempt.key();
+                    if let Some(pb_ids) = state.task_playbook_ids.remove(&attempt_key) {
+                        let store = playbook_store.clone();
+                        let gate_passed = completion.passed;
+                        feedback_tasks.spawn(async move {
+                            for pb_id in &pb_ids {
+                                match store.record_outcome(pb_id, gate_passed).await {
+                                    Ok(true) => {
+                                        debug!(
+                                            playbook_id = %pb_id,
+                                            passed = gate_passed,
+                                            "playbook outcome recorded"
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        debug!(
+                                            playbook_id = %pb_id,
+                                            "playbook not found for outcome recording"
+                                        );
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            playbook_id = %pb_id,
+                                            error = %err,
+                                            "failed to record playbook outcome"
+                                        );
+                                    }
+                                }
+                            }
+                        });
                     }
                 }
 
@@ -1024,13 +1087,40 @@ pub async fn run(
                         &completion.task_id,
                         output_files,
                     );
+                    // Capture per-task cost report BEFORE task_completed()
+                    // rolls stats into totals.
+                    state.task_costs.push(TaskCostReport {
+                        plan_id: completion.plan_id.clone(),
+                        task_id: completion.task_id.clone(),
+                        model: state.agent_model.clone(),
+                        provider: state.agent_provider.clone(),
+                        tokens_in: state.tokens_in,
+                        tokens_out: state.tokens_out,
+                        cost_usd: state.cost_usd,
+                        agent_calls: state.task_agent_calls,
+                        outcome: "pass".to_string(),
+                    });
                     state.task_completed();
-                    // Record task completion in the run ledger.
+                    // Record agent completion + task completion in the run ledger.
                     if let Some(ref mut ledger) = run_ledger {
                         let now_ms = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as u64;
+                        ledger.record_agent_completed(
+                            "implementer",
+                            "",
+                            0,
+                            &state.agent_model,
+                            &state.agent_model,
+                            Some(state.agent_provider.clone()),
+                            roko_core::foundation::TokenUsage {
+                                input_tokens: state.tokens_in,
+                                output_tokens: state.tokens_out,
+                                total_tokens: state.tokens_in + state.tokens_out,
+                                cost_usd: state.cost_usd,
+                            },
+                        );
                         ledger.record_phase_transition(
                             roko_runtime::Phase::Implementing,
                             roko_runtime::Phase::Complete,
@@ -1043,6 +1133,12 @@ pub async fn run(
                                 "plan_id": completion.plan_id,
                                 "task_id": completion.task_id,
                                 "passed": true,
+                                "model": state.agent_model,
+                                "provider": state.agent_provider,
+                                "tokens_in": state.tokens_in,
+                                "tokens_out": state.tokens_out,
+                                "cost_usd": state.cost_usd,
+                                "agent_calls": state.task_agent_calls,
                                 "duration_ms": completion.duration_ms,
                                 "timestamp_ms": now_ms,
                             }),
@@ -1258,6 +1354,19 @@ pub async fn run(
                             }
                         }
                     } else {
+                        // Capture per-task cost report BEFORE task_failed()
+                        // rolls stats into totals.
+                        state.task_costs.push(TaskCostReport {
+                            plan_id: completion.plan_id.clone(),
+                            task_id: completion.task_id.clone(),
+                            model: state.agent_model.clone(),
+                            provider: state.agent_provider.clone(),
+                            tokens_in: state.tokens_in,
+                            tokens_out: state.tokens_out,
+                            cost_usd: state.cost_usd,
+                            agent_calls: state.task_agent_calls,
+                            outcome: "fail".to_string(),
+                        });
                         state.task_failed();
                         tui.task_completed(&completion.plan_id, &completion.task_id, "failed");
                         let reason = if failure_kind.is_retryable() {
@@ -1288,6 +1397,12 @@ pub async fn run(
                                     "task_id": completion.task_id,
                                     "passed": false,
                                     "reason": reason,
+                                    "model": state.agent_model,
+                                    "provider": state.agent_provider,
+                                    "tokens_in": state.tokens_in,
+                                    "tokens_out": state.tokens_out,
+                                    "cost_usd": state.cost_usd,
+                                    "agent_calls": state.task_agent_calls,
                                     "duration_ms": completion.duration_ms,
                                     "timestamp_ms": now_ms,
                                 }),
@@ -1397,6 +1512,7 @@ pub async fn run(
                         factory: &factory,
                         gate_sem: gate_sem.clone(),
                         section_diagnostics: &mut section_diagnostics,
+                        dispatch_models: &mut dispatch_models,
                     };
                     dispatch_action(&action, &mut ctx).await;
                     let dispatch_ms = t_dispatch.elapsed().as_millis() as u64;
@@ -1532,8 +1648,6 @@ pub async fn run(
                     "plan summary"
                 );
             }
-            // Persist the run ledger at run completion.
-            persist_run_ledger(&run_ledger, &paths.run_ledger_jsonl);
             break;
         }
     }
@@ -3146,7 +3260,18 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             {
                 let attempt_key = format!("{plan_id}:{task_id}:{attempt_num}");
                 ctx.section_diagnostics
-                    .insert(attempt_key, prompt_diagnostics.clone());
+                    .insert(attempt_key.clone(), prompt_diagnostics.clone());
+                // Capture the model slug at dispatch time so the SectionOutcome
+                // record uses the actual model, not a potentially-stale value
+                // from state.agent_model at gate-completion time.
+                ctx.dispatch_models
+                    .insert(attempt_key.clone(), requested_model.clone());
+                // Store playbook IDs so gate terminal can call record_outcome.
+                if !prompt_diagnostics.playbook_ids.is_empty() {
+                    ctx.state
+                        .task_playbook_ids
+                        .insert(attempt_key, prompt_diagnostics.playbook_ids.clone());
+                }
             }
             ctx.tui
                 .model_selected(plan_id, &task_id, &requested_model, &selected_source);
@@ -3758,9 +3883,16 @@ fn emit_gate_thresholds_event(thresholds: &GateThresholds, tui: &TuiBridge) {
 /// and a terminal gate result. Each included/dropped section becomes one
 /// record so the downstream bandit can attribute section presence to
 /// pass/fail.
+///
+/// # ID format contract (required by contextual bandit):
+/// - `section_id`: `"prompt:<normalized-name>"` where underscores become dashes
+///   and the name is lowercased (e.g. `"prompt:workspace-map"`).
+/// - `invocation_id`: `"<run_id>:<attempt_key>"` — unique per retry attempt so
+///   the bandit never conflates separate observations for the same task.
+/// - `model`: captured at dispatch time (passed in) to avoid staleness.
 fn build_section_outcome_records(
-    plan_id: &str,
-    task_id: &str,
+    run_id: &str,
+    attempt_key: &str,
     model: &str,
     provider: &str,
     status: SectionOutcomeStatus,
@@ -3768,6 +3900,7 @@ fn build_section_outcome_records(
     verdicts: &[GateVerdictSummary],
 ) -> Vec<SectionOutcomeRecord> {
     let timestamp = chrono::Utc::now().to_rfc3339();
+    let invocation_id = format!("{run_id}:{attempt_key}");
     let gate_outcomes = verdicts
         .iter()
         .map(|v| roko_learn::section_outcome::SectionGateOutcome {
@@ -3785,19 +3918,20 @@ fn build_section_outcome_records(
         Vec::with_capacity(diag.included_sections.len() + diag.dropped_sections.len());
 
     for section_name in &diag.included_sections {
+        let normalized = normalize_section_name(section_name);
         records.push(SectionOutcomeRecord {
             schema_version: SECTION_OUTCOME_SCHEMA_VERSION,
             timestamp: timestamp.clone(),
             workspace_id: String::new(),
-            invocation_id: format!("{plan_id}:{task_id}"),
-            task_id: task_id.to_string(),
+            invocation_id: invocation_id.clone(),
+            task_id: attempt_key.to_string(),
             task_type: "plan_task".to_string(),
             role_id: String::new(),
             provider: provider.to_string(),
             model: model.to_string(),
-            section_id: section_name.clone(),
+            section_id: format!("prompt:{normalized}"),
             section_name: section_name.clone(),
-            action_id: format!("prompt_section:{section_name}"),
+            action_id: format!("prompt_section:{normalized}"),
             section_kind: roko_learn::section_outcome::SectionKind::Prompt,
             included: true,
             estimated_tokens: 0,
@@ -3813,19 +3947,20 @@ fn build_section_outcome_records(
     }
 
     for section_name in &diag.dropped_sections {
+        let normalized = normalize_section_name(section_name);
         records.push(SectionOutcomeRecord {
             schema_version: SECTION_OUTCOME_SCHEMA_VERSION,
             timestamp: timestamp.clone(),
             workspace_id: String::new(),
-            invocation_id: format!("{plan_id}:{task_id}"),
-            task_id: task_id.to_string(),
+            invocation_id: invocation_id.clone(),
+            task_id: attempt_key.to_string(),
             task_type: "plan_task".to_string(),
             role_id: String::new(),
             provider: provider.to_string(),
             model: model.to_string(),
-            section_id: section_name.clone(),
+            section_id: format!("prompt:{normalized}"),
             section_name: section_name.clone(),
-            action_id: format!("prompt_section:{section_name}"),
+            action_id: format!("prompt_section:{normalized}"),
             section_kind: roko_learn::section_outcome::SectionKind::Prompt,
             included: false,
             estimated_tokens: 0,
@@ -3841,6 +3976,14 @@ fn build_section_outcome_records(
     }
 
     records
+}
+
+/// Normalize a raw section name into the canonical ID form expected by the
+/// contextual bandit: lowercase, underscores replaced with dashes.
+///
+/// Example: `"Workspace_Map"` -> `"workspace-map"`.
+fn normalize_section_name(name: &str) -> String {
+    name.to_ascii_lowercase().replace('_', "-")
 }
 
 /// Append section outcome records to the JSONL store. Failures are logged
@@ -4772,6 +4915,7 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
         total_agent_calls: state.total_agent_calls,
         duration: state.elapsed(),
         failure_reasons: state.failure_reasons.clone(),
+        task_costs: state.task_costs.clone(),
     }
 }
 
