@@ -475,6 +475,17 @@ pub struct WorkspaceInfo {
 }
 
 impl AppState {
+    /// Build the shared hub used by AppState and in-process CLI runtimes.
+    #[must_use]
+    pub fn state_hub_for_workdir(workdir: &Path) -> roko_core::SharedStateHub {
+        let layout = RokoLayout::for_project(workdir);
+        let event_log_path = layout.root().join("events.jsonl");
+        roko_core::SharedStateHub::new(roko_core::StateHub::with_event_log(
+            1024,
+            &event_log_path,
+        ))
+    }
+
     /// Construct a new `AppState` from the working directory and loaded configs.
     ///
     /// # Errors
@@ -496,6 +507,29 @@ impl AppState {
         )
     }
 
+    /// Construct a new `AppState` with a prebuilt shared hub.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the shared service bundle cannot be constructed (e.g.
+    /// because the model configuration is missing or invalid).
+    pub fn new_with_state_hub(
+        workdir: PathBuf,
+        runtime: Arc<dyn CliRuntime>,
+        roko_config: RokoConfig,
+        deploy_backend: Arc<dyn DeployBackend>,
+        state_hub: roko_core::SharedStateHub,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_daimon_strategy_and_state_hub(
+            workdir,
+            runtime,
+            roko_config,
+            deploy_backend,
+            StrategySpaceDefinition::default(),
+            Some(state_hub),
+        )
+    }
+
     /// Construct a new `AppState` with an explicit Daimon strategy-space definition.
     ///
     /// # Errors
@@ -508,6 +542,30 @@ impl AppState {
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
         strategy_space: StrategySpaceDefinition,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_daimon_strategy_and_state_hub(
+            workdir,
+            runtime,
+            roko_config,
+            deploy_backend,
+            strategy_space,
+            None,
+        )
+    }
+
+    /// Construct a new `AppState` with an explicit Daimon strategy and optional shared hub.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the shared service bundle cannot be constructed (e.g.
+    /// because the model configuration is missing or invalid).
+    pub fn new_with_daimon_strategy_and_state_hub(
+        workdir: PathBuf,
+        runtime: Arc<dyn CliRuntime>,
+        roko_config: RokoConfig,
+        deploy_backend: Arc<dyn DeployBackend>,
+        strategy_space: StrategySpaceDefinition,
+        state_hub: Option<roko_core::SharedStateHub>,
     ) -> anyhow::Result<Self> {
         let layout = RokoLayout::for_project(&workdir);
         let layout_root = layout.root().to_path_buf();
@@ -522,13 +580,7 @@ impl AppState {
         let mut template_registry = TemplateRegistry::new(workdir.clone());
         template_registry.scan();
 
-        // Create StateHub with on-disk event log so all published events
-        // persist to `.roko/events.jsonl` for replay by standalone consumers.
-        let event_log_path = layout_root.join("events.jsonl");
-        let state_hub = roko_core::SharedStateHub::new(roko_core::StateHub::with_event_log(
-            1024,
-            &event_log_path,
-        ));
+        let state_hub = state_hub.unwrap_or_else(|| Self::state_hub_for_workdir(&workdir));
 
         // Initialize chain client + wallet from [chain] config section.
         let (chain_client, chain_wallet) = Self::init_chain(&roko_config);

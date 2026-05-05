@@ -251,10 +251,20 @@ pub(crate) async fn cmd_run(
         tokio::task::JoinHandle<anyhow::Result<()>>,
     )> = if serve || share {
         let repo_registry = RepoRegistry::load(&config, &workdir).unwrap_or_default();
-        let runtime =
-            roko_cli::serve_runtime::RokoCliRuntime::new(config.clone(), repo_registry).into_arc();
+        let state_hub = roko_serve::state::AppState::state_hub_for_workdir(&workdir);
+        let runtime = roko_cli::serve_runtime::RokoCliRuntime::new_with_state_hub(
+            config.clone(),
+            repo_registry,
+            state_hub.clone(),
+        )
+        .into_arc();
+        let roko_config = roko_core::config::loader::load_config_unified(&workdir)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let server_config =
+            roko_serve::ServerBuildConfig::new(workdir.clone(), runtime, roko_config, None, None)
+                .with_state_hub(state_hub);
         let (state, handle) =
-            roko_serve::start_server_background(workdir.clone(), runtime, None, None).await?;
+            roko_serve::ServerBuilder::new(server_config).start_background().await?;
         if !cli.quiet {
             eprintln!("▸ HTTP server started on :6677");
         }

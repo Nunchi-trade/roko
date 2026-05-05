@@ -143,6 +143,8 @@ pub struct ServerBuildConfig {
     pub workdir: PathBuf,
     /// Runtime bridge to CLI operations (run_once, status, dashboard).
     pub runtime: Arc<dyn CliRuntime>,
+    /// Shared state hub to use for AppState and in-process runtimes.
+    pub state_hub: Option<crate::SharedStateHub>,
     /// Full `roko.toml` schema configuration.
     pub roko_config: RokoConfig,
     /// Optional bind address override.
@@ -163,10 +165,18 @@ impl ServerBuildConfig {
         Self {
             workdir,
             runtime,
+            state_hub: None,
             roko_config,
             bind,
             port,
         }
+    }
+
+    /// Use a caller-provided state hub instead of constructing one inside AppState.
+    #[must_use]
+    pub fn with_state_hub(mut self, state_hub: crate::SharedStateHub) -> Self {
+        self.state_hub = Some(state_hub);
+        self
     }
 
     fn effective_bind(&self) -> &str {
@@ -288,8 +298,11 @@ impl ServerBuilder {
         let workdir = self.config.workdir.clone();
         let runtime = Arc::clone(&self.config.runtime);
         let roko_config = self.config.roko_config.clone();
+        let state_hub = self.config.state_hub.clone();
         if self.state.is_none() {
-            self.state = Some(Arc::new(build_app_state(workdir, runtime, roko_config)?));
+            self.state = Some(Arc::new(build_app_state(
+                workdir, runtime, roko_config, state_hub,
+            )?));
         }
         let state = Arc::clone(self.state.as_ref().expect("state just set"));
         let roko_config = state.load_roko_config();
@@ -801,6 +814,7 @@ fn build_app_state(
     workdir: PathBuf,
     runtime: Arc<dyn CliRuntime>,
     mut roko_config: RokoConfig,
+    state_hub: Option<crate::SharedStateHub>,
 ) -> anyhow::Result<AppState> {
     // Auto-configure Privy JWT auth: always set the app ID (it's a project
     // constant) and auto-enable auth when a stored Privy credential exists.
@@ -824,7 +838,12 @@ fn build_app_state(
     }
     log_provider_credential_status(&roko_config);
     let deploy_backend = create_deploy_backend(&roko_config);
-    let state = AppState::new(workdir, runtime, roko_config, deploy_backend)?;
+    let state = match state_hub {
+        Some(state_hub) => {
+            AppState::new_with_state_hub(workdir, runtime, roko_config, deploy_backend, state_hub)?
+        }
+        None => AppState::new(workdir, runtime, roko_config, deploy_backend)?,
+    };
 
     // Warm the cached cascade router once so gateway selection reuses the
     // persisted bandit state instead of rebuilding it on the first request.
@@ -1892,6 +1911,7 @@ mod tests {
             persisted_workdir.clone(),
             Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
+            None,
         )
         .expect("build_app_state");
 
@@ -1912,6 +1932,7 @@ mod tests {
             fresh_dir.path().to_path_buf(),
             Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
+            None,
         )
         .expect("build_app_state");
 
@@ -1928,6 +1949,7 @@ mod tests {
             workdir.clone(),
             Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
+            None,
         )
         .expect("build_app_state");
 
