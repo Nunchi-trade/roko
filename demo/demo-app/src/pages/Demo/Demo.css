@@ -779,6 +779,12 @@
   max-height: 40%;
 }
 
+.demo-clickable-context--pipeline {
+  flex: 2 1 0;
+  min-height: 0;
+  max-height: none;
+}
+
 @media (max-width: 900px) {
   .demo-clickable-layout {
     flex-direction: column;

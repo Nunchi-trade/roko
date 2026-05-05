@@ -12,6 +12,7 @@ import { isClickableScenario } from '../../lib/scenarios';
 import { CommandList } from '../../components/CommandList';
 import { ContextPanel } from '../../components/ContextPanel';
 import type { ContextPanelStage } from '../../components/ContextPanel';
+import PipelineStagesPanel from '../../components/PipelineStagesPanel';
 import { useCommandList } from '../../hooks/useCommandList';
 import { PRD_IDEA } from '../../lib/scenario-runners/prd-pipeline';
 import { PlaybackController, TimelineStepper, type TimelineStepState } from '../../lib/playback-controller';
@@ -1054,6 +1055,11 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                   onRetry={handleClickableRun}
                 />
               </div>
+              {scenario.id === 'pipeline' && (
+                <div className="demo-clickable-context demo-clickable-context--pipeline">
+                  <PipelineStagesPanel isRunning={isRunning} />
+                </div>
+              )}
               {scenario.id === 'prd-pipeline' && (
                 <div className="demo-clickable-context">
                   <ContextPanel
