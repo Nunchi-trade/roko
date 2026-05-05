@@ -1,8 +1,17 @@
+<<<<<<< HEAD
 //! `CellRegistry` -- maps cell type names to factory functions that produce `Cell` instances.
 
 use std::collections::HashMap;
 
 use crate::cell::Cell;
+=======
+//! `CellRegistry` — maps cell type names to factory functions that produce `Cell` instances.
+
+use std::collections::HashMap;
+
+use roko_core::Cell;
+
+>>>>>>> worktree-agent-aa5b2a60
 use crate::types::GraphError;
 
 /// A factory function that takes a TOML config and produces a boxed Cell.
@@ -41,11 +50,15 @@ impl CellRegistry {
     ///
     /// # Errors
     /// Returns `GraphError::UnknownCellType` if no factory is registered for the name.
+<<<<<<< HEAD
     pub fn create(
         &self,
         cell_type: &str,
         config: toml::Value,
     ) -> Result<Box<dyn Cell>, GraphError> {
+=======
+    pub fn create(&self, cell_type: &str, config: toml::Value) -> Result<Box<dyn Cell>, GraphError> {
+>>>>>>> worktree-agent-aa5b2a60
         let factory = self
             .factories
             .get(cell_type)
@@ -86,10 +99,14 @@ impl Default for CellRegistry {
 impl std::fmt::Debug for CellRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CellRegistry")
+<<<<<<< HEAD
             .field(
                 "registered_types",
                 &self.factories.keys().collect::<Vec<_>>(),
             )
+=======
+            .field("registered_types", &self.factories.keys().collect::<Vec<_>>())
+>>>>>>> worktree-agent-aa5b2a60
             .finish()
     }
 }
@@ -98,9 +115,13 @@ impl std::fmt::Debug for CellRegistry {
 mod tests {
     use std::time::Duration;
 
+<<<<<<< HEAD
     use roko_core::Engram;
 
     use crate::cell::{CellContext, CellVersion};
+=======
+    use roko_core::cell::CellVersion;
+>>>>>>> worktree-agent-aa5b2a60
 
     use super::*;
 
@@ -109,7 +130,10 @@ mod tests {
         id: String,
     }
 
+<<<<<<< HEAD
     #[async_trait::async_trait]
+=======
+>>>>>>> worktree-agent-aa5b2a60
     impl Cell for NoopCell {
         fn cell_id(&self) -> &str {
             &self.id
@@ -129,6 +153,7 @@ mod tests {
         fn estimated_duration(&self) -> Option<Duration> {
             None
         }
+<<<<<<< HEAD
         async fn execute(
             &self,
             input: Vec<Engram>,
@@ -136,6 +161,8 @@ mod tests {
         ) -> roko_core::error::Result<Vec<Engram>> {
             Ok(input)
         }
+=======
+>>>>>>> worktree-agent-aa5b2a60
     }
 
     #[test]

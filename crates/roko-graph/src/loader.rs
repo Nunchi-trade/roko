@@ -67,10 +67,19 @@ enum RawEdgeCondition {
 impl From<RawEdgeCondition> for EdgeCondition {
     fn from(raw: RawEdgeCondition) -> Self {
         match raw {
+<<<<<<< HEAD
             RawEdgeCondition::Success => Self::Success,
             RawEdgeCondition::Failure => Self::Failure,
             RawEdgeCondition::Always => Self::Always,
             RawEdgeCondition::OutputEquals { key, value } => Self::OutputEquals { key, value },
+=======
+            RawEdgeCondition::Success => EdgeCondition::Success,
+            RawEdgeCondition::Failure => EdgeCondition::Failure,
+            RawEdgeCondition::Always => EdgeCondition::Always,
+            RawEdgeCondition::OutputEquals { key, value } => {
+                EdgeCondition::OutputEquals { key, value }
+            }
+>>>>>>> worktree-agent-aa5b2a60
         }
     }
 }
@@ -98,9 +107,13 @@ pub fn load_from_str(toml_str: &str) -> Result<Graph, GraphError> {
         let node = Node {
             id: raw_node.id,
             cell_type: raw_node.cell_type,
+<<<<<<< HEAD
             config: raw_node
                 .config
                 .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new())),
+=======
+            config: raw_node.config.unwrap_or(toml::Value::Table(toml::map::Map::new())),
+>>>>>>> worktree-agent-aa5b2a60
             inputs: raw_node.inputs,
             outputs: raw_node.outputs,
         };
@@ -167,10 +180,14 @@ type = "success"
     fn load_basic_graph_from_str() {
         let graph = load_from_str(SAMPLE_GRAPH).unwrap();
         assert_eq!(graph.metadata.name, "ci-pipeline");
+<<<<<<< HEAD
         assert_eq!(
             graph.metadata.description.as_deref(),
             Some("Compile then test")
         );
+=======
+        assert_eq!(graph.metadata.description.as_deref(), Some("Compile then test"));
+>>>>>>> worktree-agent-aa5b2a60
         assert_eq!(graph.metadata.version.as_deref(), Some("1.0.0"));
         assert_eq!(graph.node_count(), 2);
         assert_eq!(graph.edge_count(), 1);
@@ -214,10 +231,14 @@ from = "a"
 to = "b"
 "#;
         let result = load_from_str(toml_str);
+<<<<<<< HEAD
         assert!(matches!(
             result,
             Err(GraphError::NodeNotFound(ref id)) if id == "b"
         ));
+=======
+        assert!(matches!(result, Err(GraphError::NodeNotFound(ref id)) if id == "b"));
+>>>>>>> worktree-agent-aa5b2a60
     }
 
     #[test]

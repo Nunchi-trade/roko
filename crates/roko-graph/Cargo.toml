@@ -15,6 +15,7 @@ roko-core = { path = "../roko-core" }
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 indexmap = { workspace = true }
+<<<<<<< HEAD
 petgraph = { workspace = true }
 thiserror = { workspace = true }
 async-trait = "0.1"
@@ -27,6 +28,15 @@ features = ["process", "time", "rt", "macros"]
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
+=======
+petgraph = "0.7"
+thiserror = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+>>>>>>> worktree-agent-aa5b2a60
 
 [package.metadata.roko]
 layer = 2
