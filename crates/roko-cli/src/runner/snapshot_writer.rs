@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 
+use roko_core::defaults::DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT;
 use tracing::{error, warn};
 
 /// Pre-serialized snapshot data ready for disk writes.
@@ -164,7 +165,7 @@ fn drain_writes(rx: &std::sync::mpsc::Receiver<WriterMsg>) -> DrainResult {
 fn write_payload(payload: &SnapshotPayload, fail_streak: &mut u32) {
     if let Err(e) = write_all_files(payload) {
         *fail_streak += 1;
-        if *fail_streak >= 3 {
+        if *fail_streak >= DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT {
             error!(
                 error = %e,
                 streak = *fail_streak,

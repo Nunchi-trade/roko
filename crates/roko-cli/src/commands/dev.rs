@@ -3,77 +3,59 @@
 //! Replaces the `roko-dev-full` shell alias with a proper CLI command that
 //! manages serve + optional frontend with PID file coordination, graceful
 //! shutdown, and port conflict detection.
+//!
+//! Signal handling: listens for both SIGINT (Ctrl+C) and SIGTERM (systemd,
+//! docker stop, kill) to ensure clean PID file removal on any shutdown path.
 
-#![allow(unsafe_code, unused_imports)]
+#![allow(unsafe_code, dead_code)]
 
 use std::io;
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use roko_core::Workspace;
 use tokio::process::Command as TokioCommand;
+use tokio::signal::unix::{SignalKind, signal};
 
-use crate::*;
+use crate::{Cli, EXIT_SUCCESS, resolve_workdir};
 
 /// Main entry point for `roko dev`.
 pub(crate) async fn cmd_dev(cli: &Cli, no_frontend: bool) -> Result<i32> {
     let wd = resolve_workdir(cli);
 
-    prepare_runtime_hooks(&wd, cli.quiet);
-
     // Ensure .roko/ exists.
-    let _ = bootstrap_observability_dirs(&wd);
+    let roko_dir = wd.join(".roko");
+    std::fs::create_dir_all(&roko_dir).with_context(|| format!("create {}", roko_dir.display()))?;
 
-    // 1. Resolve workdir/config exactly like Command::Serve.
-    let _lock = roko_cli::workspace_lock::acquire_workspace_lock(&wd.join(".roko"))?;
-    let config = resolve_config_for_workdir(cli, &wd)?;
-    let repo_registry = RepoRegistry::load(&config, &wd).unwrap_or_default();
-    let state_hub = roko_serve::state::AppState::state_hub_for_workdir(&wd);
-    let runtime =
-        RokoCliRuntime::new_with_state_hub(config, repo_registry, state_hub.clone()).into_arc();
-
-    let boot = roko_cli::bootstrap::RokoBootstrap::new(
-        &wd,
-        roko_cli::bootstrap::BootOpts {
-            require_workspace: false,
-            require_provider: false,
-            acquire_lock: false,
-        },
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let roko_config = boot.config;
-
-    let server_config =
-        roko_serve::ServerBuildConfig::new(wd.clone(), runtime, roko_config, None, None)
-            .with_state_hub(state_hub);
-
-    let bind = server_config.effective_bind().to_string();
-    let port = server_config.effective_port();
-
-    // 2. Check existing PID file and handle stale processes.
+    // 1. Check existing PID file and handle stale processes.
     handle_existing_pid_file(&wd)?;
 
-    // 3. Probe the resolved listen address for availability.
-    probe_addr_available(&bind, port)?;
+    // 2. Probe the default serve port for availability.
+    let bind = "127.0.0.1";
+    let port: u16 = 6677;
+    probe_addr_available(bind, port)?;
 
-    // 4. Write PID file (after port probe succeeds).
+    // 3. Write PID file (after port probe succeeds).
     write_pid_file(&wd)?;
 
-    // 5. Start `roko serve` in background.
-    let (serve_state, serve_handle) = roko_serve::ServerBuilder::new(server_config)
-        .start_background()
-        .await
+    // 4. Start `roko serve` in background.
+    let mut serve_child = TokioCommand::new(std::env::current_exe()?)
+        .args(["serve"])
+        .current_dir(&wd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .inspect_err(|_| {
-            // Clean up PID file on serve start failure.
             let _ = remove_pid_file(&wd);
-        })?;
+        })
+        .with_context(|| "failed to start roko serve subprocess")?;
 
     println!("  roko dev       http://{}:{}  started", bind, port);
 
-    // 6. Optionally start the frontend dev server.
+    // 5. Optionally start the frontend dev server.
     let frontend_handle = if !no_frontend {
         match start_frontend(&wd).await {
             Ok(child) => {
@@ -93,8 +75,21 @@ pub(crate) async fn cmd_dev(cli: &Cli, no_frontend: bool) -> Result<i32> {
     println!("  Press Ctrl+C to stop all.");
     println!();
 
-    // 7. Signal handling: wait for SIGINT/SIGTERM.
-    tokio::signal::ctrl_c().await.context("listen for ctrl+c")?;
+    // 6. Signal handling: wait for SIGINT or SIGTERM.
+    let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            // SIGINT received (Ctrl+C)
+        }
+        _ = sigterm.recv() => {
+            // SIGTERM received (e.g. from systemd, docker stop, kill)
+        }
+        status = serve_child.wait() => {
+            // Serve exited unexpectedly.
+            eprintln!("warning: roko serve exited unexpectedly: {:?}", status);
+        }
+    }
 
     println!("\nShutting down...");
 
@@ -103,14 +98,8 @@ pub(crate) async fn cmd_dev(cli: &Cli, no_frontend: bool) -> Result<i32> {
         terminate_child(&mut child).await;
     }
 
-    // Cancel serve.
-    serve_state.cancel.cancel();
-    match tokio::time::timeout(Duration::from_secs(5), serve_handle).await {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(e))) => eprintln!("warning: roko-serve shutdown error: {e}"),
-        Ok(Err(e)) => eprintln!("warning: roko-serve task panicked: {e}"),
-        Err(_) => eprintln!("warning: roko-serve did not shut down within 5 seconds"),
-    }
+    // Stop serve process.
+    terminate_child(&mut serve_child).await;
 
     // Remove PID file.
     remove_pid_file(&wd)?;
@@ -119,13 +108,16 @@ pub(crate) async fn cmd_dev(cli: &Cli, no_frontend: bool) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-// ─── PID file helpers ──────────────��────────────────────────────────────────
+// ─── PID file helpers ───────────────────────────────────────────────────────
+
+fn pid_file_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko/serve.pid")
+}
 
 /// Read the PID from `.roko/serve.pid`. Returns `Ok(None)` if the file is
 /// missing or contains a malformed value.
 pub fn read_pid_file(workdir: &Path) -> Result<Option<u32>> {
-    let ws = Workspace::open_or_create(workdir)?;
-    let pid_path = ws.serve_pid_file();
+    let pid_path = pid_file_path(workdir);
     match std::fs::read_to_string(&pid_path) {
         Ok(s) => Ok(s.trim().parse().ok()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -135,17 +127,15 @@ pub fn read_pid_file(workdir: &Path) -> Result<Option<u32>> {
 
 /// Atomically write the current process PID to `.roko/serve.pid`.
 pub fn write_pid_file(workdir: &Path) -> Result<()> {
-    let ws = Workspace::open_or_create(workdir)?;
-    let pid_path = ws.serve_pid_file();
-    roko_core::io::atomic_write(&pid_path, std::process::id().to_string().as_bytes())
+    let pid_path = pid_file_path(workdir);
+    std::fs::write(&pid_path, std::process::id().to_string())
         .with_context(|| format!("write {}", pid_path.display()))?;
     Ok(())
 }
 
 /// Remove `.roko/serve.pid`, ignoring if already absent.
 pub fn remove_pid_file(workdir: &Path) -> Result<()> {
-    let ws = Workspace::open_or_create(workdir)?;
-    let pid_path = ws.serve_pid_file();
+    let pid_path = pid_file_path(workdir);
     match std::fs::remove_file(&pid_path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -170,8 +160,7 @@ pub fn process_is_alive(pid: u32) -> bool {
 }
 
 /// Send SIGTERM to a process, wait up to `timeout` for it to exit, then
-/// send SIGKILL if still alive. Only acts on a PID that was read from the
-/// PID file (never kills unknown processes).
+/// send SIGKILL if still alive.
 pub fn terminate_pid(pid: u32, timeout: Duration) -> Result<()> {
     #[cfg(unix)]
     {
@@ -194,7 +183,6 @@ pub fn terminate_pid(pid: u32, timeout: Duration) -> Result<()> {
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
-            // Brief wait for SIGKILL to take effect.
             std::thread::sleep(Duration::from_millis(200));
         }
 
@@ -208,9 +196,6 @@ pub fn terminate_pid(pid: u32, timeout: Duration) -> Result<()> {
 }
 
 /// Check the PID file and handle any stale or live prior process.
-///
-/// - If PID file points to a live process, send SIGTERM and wait.
-/// - If PID file is stale (dead process or malformed), remove it.
 fn handle_existing_pid_file(workdir: &Path) -> Result<()> {
     match read_pid_file(workdir)? {
         Some(pid) if process_is_alive(pid) => {
@@ -220,32 +205,22 @@ fn handle_existing_pid_file(workdir: &Path) -> Result<()> {
             );
             terminate_pid(pid, Duration::from_secs(5))?;
             remove_pid_file(workdir)?;
-            // Brief pause for port to be released.
             std::thread::sleep(Duration::from_millis(500));
         }
         Some(_pid) => {
             // PID file exists but process is dead — clean up stale file.
             remove_pid_file(workdir)?;
         }
-        None => {
-            // No PID file — nothing to do.
-        }
+        None => {}
     }
     Ok(())
 }
 
 /// Attempt to bind the resolved address to verify the port is free.
-///
-/// If the port is in use and there was no live PID file owner, returns
-/// a clear error naming the address and indicating it is owned by an
-/// unknown process.
 pub fn probe_addr_available(bind: &str, port: u16) -> Result<()> {
     let addr = format!("{bind}:{port}");
     match TcpListener::bind(&addr) {
-        Ok(_listener) => {
-            // Port is free; the listener is dropped immediately.
-            Ok(())
-        }
+        Ok(_listener) => Ok(()),
         Err(_) => {
             anyhow::bail!(
                 "Address {addr} is already in use by an unknown process.\n  \
@@ -255,11 +230,9 @@ pub fn probe_addr_available(bind: &str, port: u16) -> Result<()> {
     }
 }
 
-// ─── Frontend management ─────────────────��───────────────────���──────────────
+// ─── Frontend management ────────────────────────────────────────────────────
 
 /// Start the frontend dev server (`npm run dev` in `demo/demo-app/`).
-///
-/// Returns the child process handle if the directory and `package.json` exist.
 async fn start_frontend(workdir: &Path) -> Result<tokio::process::Child> {
     let demo_dir = workdir.join("demo/demo-app");
     let package_json = demo_dir.join("package.json");
@@ -282,7 +255,6 @@ async fn start_frontend(workdir: &Path) -> Result<tokio::process::Child> {
 
 /// Gracefully terminate a child process (SIGTERM then wait, SIGKILL on timeout).
 async fn terminate_child(child: &mut tokio::process::Child) {
-    // Try to get the PID for a graceful SIGTERM on Unix.
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         unsafe {
@@ -290,17 +262,15 @@ async fn terminate_child(child: &mut tokio::process::Child) {
         }
     }
 
-    // Wait up to 5 seconds for graceful exit.
     match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
         Ok(_) => {}
         Err(_) => {
-            // Force kill if still running.
             let _ = child.kill().await;
         }
     }
 }
 
-// ─── Tests ────────────────────────────────────────────��─────────────────────
+// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -310,20 +280,15 @@ mod tests {
     fn pid_write_read_remove_roundtrip() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let workdir = tmp.path();
-        // Create .roko/ so Workspace::open_or_create succeeds.
         std::fs::create_dir_all(workdir.join(".roko")).expect("mkdir");
 
-        // Initially no PID file.
         assert_eq!(read_pid_file(workdir).unwrap(), None);
 
-        // Write PID file.
         write_pid_file(workdir).unwrap();
 
-        // Read it back — should be our PID.
         let pid = read_pid_file(workdir).unwrap();
         assert_eq!(pid, Some(std::process::id()));
 
-        // Remove it.
         remove_pid_file(workdir).unwrap();
         assert_eq!(read_pid_file(workdir).unwrap(), None);
     }
@@ -343,17 +308,13 @@ mod tests {
         let workdir = tmp.path();
         std::fs::create_dir_all(workdir.join(".roko")).expect("mkdir");
 
-        // Write garbage to the PID file.
         std::fs::write(workdir.join(".roko/serve.pid"), "not-a-number\n").expect("write");
 
-        // Should return None (malformed).
         assert_eq!(read_pid_file(workdir).unwrap(), None);
     }
 
     #[test]
     fn dead_pid_is_not_alive() {
-        // PID 0 is never a user process on Unix; use a very large PID that
-        // almost certainly does not exist.
         assert!(!process_is_alive(4_000_000));
     }
 
@@ -364,11 +325,9 @@ mod tests {
 
     #[test]
     fn probe_addr_fails_when_port_in_use() {
-        // Bind a port to hold it.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("local_addr").port();
 
-        // Probing the same port should fail.
         let result = probe_addr_available("127.0.0.1", port);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already in use"));
@@ -378,12 +337,10 @@ mod tests {
 
     #[test]
     fn probe_addr_succeeds_when_free() {
-        // Find a free port by binding and then immediately dropping.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("local_addr").port();
         drop(listener);
 
-        // Probing should succeed now.
         assert!(probe_addr_available("127.0.0.1", port).is_ok());
     }
 
@@ -393,10 +350,8 @@ mod tests {
         let workdir = tmp.path();
         std::fs::create_dir_all(workdir.join(".roko")).expect("mkdir");
 
-        // Remove when no file exists — should not error.
         assert!(remove_pid_file(workdir).is_ok());
 
-        // Write and remove twice.
         write_pid_file(workdir).unwrap();
         remove_pid_file(workdir).unwrap();
         assert!(remove_pid_file(workdir).is_ok());

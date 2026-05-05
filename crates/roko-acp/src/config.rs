@@ -131,9 +131,10 @@ impl AcpConfig {
                     check_opts.merge_global = false;
                     match roko_core::config::loader::load_config_file(path, &check_opts) {
                         Ok(_) => None,
-                        Err(e) => {
-                            Some(format!("roko.toml parse error ({}): {e:#}", path.display()))
-                        }
+                        Err(e) => Some(format!(
+                            "roko.toml parse error ({}): {e:#}",
+                            path.display()
+                        )),
                     }
                 } else {
                     None

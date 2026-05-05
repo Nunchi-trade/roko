@@ -545,6 +545,13 @@ Examples:
         cmd: IndexCmd,
     },
 
+    // ── Graph execution ──────────────────────────────────────────────
+    /// Execute, validate, and inspect graph definitions (DAGs of cells).
+    Graph {
+        #[command(subcommand)]
+        cmd: commands::graph::GraphCmd,
+    },
+
     // ── Server & deployment ─────────────────────────────────────────
     /// Start the dev environment (serve + optional demo frontend).
     #[command(after_help = "\
@@ -2352,6 +2359,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Command::Index { cmd } => commands::util::cmd_index(cli, cmd),
+        Command::Graph { cmd } => commands::graph::cmd_graph(cmd).await,
         Command::Dev { no_frontend } => commands::dev::cmd_dev(cli, no_frontend).await,
         Command::Up { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));

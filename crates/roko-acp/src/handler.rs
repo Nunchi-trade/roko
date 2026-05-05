@@ -100,7 +100,10 @@ where
             None => {
                 let implicit = roko_core::config::loader::global_config_path();
                 if implicit.is_file() {
-                    format!("using implicit global config from {}", implicit.display())
+                    format!(
+                        "using implicit global config from {}",
+                        implicit.display()
+                    )
                 } else {
                     "no global config found either; using built-in defaults only. \
                      Run `roko init` in this directory or pass --global-config ~/.roko/config.toml"
@@ -189,9 +192,11 @@ where
                     sessions.config_sources = new_sources;
 
                     if sources_changed {
-                        if let Err(e) =
-                            send_config_sources_notification(transport, &sessions.config_sources)
-                                .await
+                        if let Err(e) = send_config_sources_notification(
+                            transport,
+                            &sessions.config_sources,
+                        )
+                        .await
                         {
                             warn!(
                                 error = %e,

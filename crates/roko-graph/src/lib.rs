@@ -1,52 +1,52 @@
-//! Graph execution engine for Roko.
+//! `roko-graph` -- Graph execution engine for the Roko toolkit.
 //!
-//! Provides a DAG-based execution engine that orchestrates [`Cell`](roko_core::cell::Cell)
-//! instances with support for:
+//! This crate provides the foundation for defining and executing directed acyclic
+//! graphs (DAGs) of Cells. It includes:
 //!
-//! - **Fan-out/fan-in**: parallel execution of independent nodes
-//! - **Conditional edges**: traverse edges only when conditions are met
-//! - **Budget enforcement**: token, cost, and deadline limits
-//! - **Agent and Compose cells**: concrete cell implementations for LLM dispatch
-//!   and prompt assembly
+//! - **Cell** trait (universal computation unit for graph nodes)
+//! - **Types** (`Graph`, `Node`, `Edge`, `NodeId`, `EdgeCondition`, `GraphMetadata`)
+//! - **Loader** (TOML parsing into `Graph` struct)
+//! - **Registry** (`CellRegistry` for mapping cell type names to factory functions)
+//! - **Topo** (topological sort, cycle detection, dependency resolution)
+//!
+//! # Example
+//!
+//! ```rust
+//! use roko_graph::{loader, topo};
+//!
+//! let toml_str = r#"
+//! [graph]
+//! name = "example"
+//!
+//! [[nodes]]
+//! id = "step1"
+//! cell_type = "noop"
+//!
+//! [[nodes]]
+//! id = "step2"
+//! cell_type = "noop"
+//!
+//! [[edges]]
+//! from = "step1"
+//! to = "step2"
+//! "#;
+//!
+//! let graph = loader::load_from_str(toml_str).unwrap();
+//! let order = topo::topological_order(&graph).unwrap();
+//! assert_eq!(order, vec!["step1", "step2"]);
+//! ```
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::derivable_impls,
-    clippy::derive_partial_eq_without_eq,
-    clippy::doc_markdown,
-    clippy::expect_used,
-    clippy::if_not_else,
-    clippy::iter_with_drain,
-    clippy::map_unwrap_or,
-    clippy::missing_const_for_fn,
-    clippy::missing_panics_doc,
-    clippy::missing_errors_doc,
-    clippy::module_name_repetitions,
-    clippy::option_if_let_else,
-    clippy::option_option,
-    clippy::redundant_closure_for_method_calls,
-    clippy::suboptimal_flops,
-    clippy::suspicious_operation_groupings,
-    clippy::too_many_arguments,
-    clippy::unnecessary_wraps,
-    clippy::unused_self,
-    clippy::unwrap_in_result,
-    clippy::unwrap_used,
-    clippy::ref_option,
-    missing_docs
-)]
-
-pub mod budget;
-pub mod cells;
-pub mod condition;
+pub mod cell;
 pub mod engine;
-pub mod error;
+pub mod loader;
+pub mod registry;
+pub mod topo;
 pub mod types;
 
-pub use budget::BudgetTracker;
-pub use condition::EdgeCondition;
-pub use engine::GraphEngine;
-pub use error::GraphError;
-pub use types::{Edge, GraphConfig, GraphDef, GraphResult, Node, NodeOutput, NodeStatus};
+// Re-export primary types at crate root for convenience.
+pub use cell::{Cell, CellContext, CellVersion};
+pub use engine::{GraphEngine, GraphOutput, NodeResult, NodeStatus, default_registry};
+pub use registry::{CellFactory, CellRegistry};
+pub use types::{
+    Edge, EdgeCondition, Graph, GraphError, GraphMetadata, GraphNodeIdx, Node, NodeId,
+};

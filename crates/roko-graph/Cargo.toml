@@ -5,26 +5,28 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Graph execution engine for Roko: DAG-based cell orchestration with fan-out/fan-in, conditional edges, budget enforcement, and agent/compose cells."
+description = "Graph execution engine: DAG types, TOML loader, CellRegistry, and topological sort."
 
 [lints]
 workspace = true
 
 [dependencies]
 roko-core = { path = "../roko-core" }
-async-trait = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
+indexmap = { workspace = true }
+petgraph = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
-tokio-util = { workspace = true }
-futures = { workspace = true }
+async-trait = "0.1"
 tracing = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
-parking_lot = { workspace = true }
+
+[dependencies.tokio]
+workspace = true
+features = ["process", "time", "rt", "macros"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
+
+[package.metadata.roko]
+layer = 2

@@ -4,8 +4,6 @@
 //! to work as a coding agent from any ACP-compatible editor (JetBrains,
 //! Zed, Neovim, VS Code, etc.).
 
-#![allow(clippy::collapsible_if)]
-
 pub mod acp_adapter;
 pub mod bridge_events;
 pub mod config;

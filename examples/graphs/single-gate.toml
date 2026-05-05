@@ -1,0 +1,18 @@
+# Single gate: just compile
+#
+# The simplest possible graph -- a single node that runs `cargo check`.
+# Useful for quick sanity checks or as a template for custom graphs.
+#
+# Usage:
+#   roko graph run examples/graphs/single-gate.toml
+
+[graph]
+name = "single-gate"
+description = "Minimal graph: single compile gate"
+
+[[nodes]]
+id = "compile"
+cell_type = "gate.compile"
+outputs = ["artifact"]
+[nodes.config]
+workspace = "."

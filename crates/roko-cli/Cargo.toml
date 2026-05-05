@@ -45,6 +45,7 @@ roko-plugin = { path = "../roko-plugin" }
 roko-runtime = { path = "../roko-runtime" }
 roko-serve = { path = "../roko-serve" }
 roko-index = { path = "../roko-index" }
+roko-graph = { path = "../roko-graph" }
 roko-chain = { path = "../roko-chain", features = ["alloy-backend"] }
 roko-acp = { path = "../roko-acp" }
 

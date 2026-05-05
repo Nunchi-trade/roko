@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use roko_core::defaults::{
     DEFAULT_RUNNER_RETRY_BACKOFF_MAX_SECS, DEFAULT_RUNNER_RETRY_BACKOFF_MULTIPLIER_FALLBACK,
-    DEFAULT_RUNNER_RETRY_BACKOFF_SHIFT_CAP,
+    DEFAULT_RUNNER_RETRY_BACKOFF_SHIFT_CAP, DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT,
 };
 use roko_learn::model_router::RoutingContext;
 
@@ -140,14 +140,6 @@ pub struct RunState {
     /// Per-task failure reasons (plan_id:task_id → reason string).
     /// Populated when a task fails so the final summary can show why.
     pub failure_reasons: HashMap<String, String>,
-
-    /// Playbook IDs injected per task attempt (keyed by attempt key
-    /// `"{plan_id}:{task_id}:{attempt}"`). Populated at dispatch time from
-    /// prompt diagnostics so gate terminal can call `PlaybookStore::record_outcome`.
-    pub task_playbook_ids: HashMap<String, Vec<String>>,
-
-    /// Per-task cost reports collected as tasks complete or fail.
-    pub task_costs: Vec<super::types::TaskCostReport>,
 }
 
 impl RunState {
@@ -201,8 +193,6 @@ impl RunState {
             task_fingerprints: Vec::new(),
             routing_context: None,
             failure_reasons: HashMap::new(),
-            task_playbook_ids: HashMap::new(),
-            task_costs: Vec::new(),
         }
     }
 
@@ -567,10 +557,13 @@ impl RunState {
         self.snapshot_fail_streak = 0;
     }
 
-    /// Record a failed snapshot save. After 3 consecutive failures, sets degraded flag.
+    /// Record a failed snapshot save. After consecutive failures past the pivot
+    /// threshold, sets degraded flag.
     pub fn snapshot_failed(&mut self) {
         self.snapshot_fail_streak += 1;
-        if self.snapshot_fail_streak >= 3 && !self.snapshot_degraded {
+        if self.snapshot_fail_streak >= DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT
+            && !self.snapshot_degraded
+        {
             self.snapshot_degraded = true;
             tracing::warn!(
                 streak = self.snapshot_fail_streak,

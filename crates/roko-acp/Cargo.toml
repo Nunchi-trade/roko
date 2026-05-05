@@ -18,7 +18,7 @@ thiserror = "2"
 anyhow = "1"
 async-trait = { workspace = true }
 reqwest = { workspace = true }
-notify = { workspace = true }
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 roko-core = { path = "../roko-core" }
 roko-runtime = { path = "../roko-runtime" }
 roko-agent = { path = "../roko-agent" }
@@ -28,10 +28,9 @@ roko-orchestrator = { path = "../roko-orchestrator" }
 roko-learn = { path = "../roko-learn" }
 roko-dreams = { path = "../roko-dreams" }
 roko-neuro = { path = "../roko-neuro" }
-tempfile = "3"
 
 [dev-dependencies]
-indexmap = { workspace = true }
+tempfile = "3"
 
 [package.metadata.roko]
 layer = 4

@@ -1457,7 +1457,6 @@ where
 
 /// Dispatches a prompt via the Anthropic adapter through the shared model stream contract.
 /// Used for explicitly AnthropicApi-configured models in ACP.
-#[allow(clippy::too_many_arguments)]
 async fn run_anthropic_cognitive_task(
     session_id: &str,
     messages: &[serde_json::Value],
@@ -1774,27 +1773,7 @@ async fn run_openai_compat_cognitive_task(
         return Ok(());
     }
 
-    let mut caller = ModelCallService::new(model_key.to_string()).with_config(roko_config.clone());
-
-    // For providers that don't support the OpenAI-compat tool loop (e.g.
-    // ClaudeCli), write session MCP servers to a temp config file so the
-    // subprocess can discover them natively via --mcp-config.
-    let _mcp_tempfile =
-        if !mcp_servers.is_empty() && !openai_compat_tool_loop_supported(resolved.provider_kind) {
-            match write_mcp_servers_to_tempfile(mcp_servers) {
-                Ok(tmpfile) => {
-                    caller = caller.with_mcp_config(tmpfile.path());
-                    Some(tmpfile)
-                }
-                Err(err) => {
-                    warn!(error = %err, "failed to write MCP config tempfile");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
+    let caller = ModelCallService::new(model_key.to_string()).with_config(roko_config.clone());
     let request = model_call_request_from_acp_messages(model_key, messages);
     stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)
         .await
@@ -1839,46 +1818,6 @@ fn openai_compat_tool_loop_supported(provider_kind: ProviderKind) -> bool {
         provider_kind,
         ProviderKind::OpenAiCompat | ProviderKind::PerplexityApi | ProviderKind::CerebrasApi
     )
-}
-
-/// Write ACP session MCP servers to a temporary config file in the format
-/// expected by the agent-side MCP loader (`.mcp.json` schema).
-///
-/// The tempfile lives as long as the returned `NamedTempFile` handle; dropping
-/// it removes the file. Callers must hold it until the model call completes.
-fn write_mcp_servers_to_tempfile(
-    servers: &[crate::types::McpServerConfig],
-) -> std::io::Result<tempfile::NamedTempFile> {
-    use crate::types::McpTransport;
-    use std::io::Write;
-
-    let entries: Vec<serde_json::Value> = servers
-        .iter()
-        .map(|server| {
-            let mut entry = serde_json::json!({ "name": server.name });
-            match &server.transport {
-                McpTransport::Stdio { command, args } => {
-                    entry["transport"] = serde_json::json!("stdio");
-                    entry["command"] = serde_json::json!(command);
-                    entry["args"] = serde_json::json!(args);
-                }
-                McpTransport::Http { url } => {
-                    entry["transport"] = serde_json::json!("http");
-                    entry["endpoint"] = serde_json::json!(url);
-                }
-            }
-            entry
-        })
-        .collect();
-
-    let config = serde_json::json!({ "servers": entries });
-    let mut tmpfile = tempfile::Builder::new()
-        .prefix("roko-acp-mcp-")
-        .suffix(".json")
-        .tempfile()?;
-    tmpfile.write_all(config.to_string().as_bytes())?;
-    tmpfile.flush()?;
-    Ok(tmpfile)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1962,7 +1901,7 @@ async fn run_openai_compat_mcp_tool_loop(
         .with_max_iterations(DEFAULT_MAX_TOOL_ITERATIONS)
         .with_context_token_limit(context_limit);
 
-    let (chunk_sender, chunk_receiver) = mpsc::channel(256);
+    let (chunk_sender, chunk_receiver) = mpsc::unbounded_channel();
     let forwarder = tokio::spawn(forward_tool_loop_stream_chunks(
         chunk_receiver,
         event_sender.clone(),
@@ -2051,7 +1990,7 @@ async fn run_openai_compat_mcp_tool_loop(
 }
 
 async fn forward_tool_loop_stream_chunks(
-    mut receiver: mpsc::Receiver<StreamChunk>,
+    mut receiver: mpsc::UnboundedReceiver<StreamChunk>,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) {
     while let Some(chunk) = receiver.recv().await {

@@ -672,9 +672,6 @@ pub struct ConfigOption {
     pub options: Option<Vec<ConfigOptionValue>>,
 }
 
-const fn default_true() -> bool {
-    true
-}
 
 /// Config option control type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -698,7 +695,7 @@ pub struct ConfigOptionValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Whether this option can be used right now.
-    #[serde(default = "default_true")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ready: bool,
 }
 

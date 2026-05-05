@@ -319,6 +319,15 @@ fn classify_expectation(
     mismatches: &mut Vec<String>,
 ) {
     let wanted_path = normalize_path(&exp.module_path);
+
+    // When module_path is empty, treat as "find anywhere by name" — skip the
+    // path-qualified lookup and go directly to by_name. This supports inferred
+    // symbols where we don't know the module path.
+    if wanted_path.is_empty() {
+        classify_expectation_by_name(exp, by_name, mismatches);
+        return;
+    }
+
     let key = (exp.name.clone(), wanted_path.clone());
 
     if let Some(symbols) = index.get(&key) {
@@ -398,6 +407,69 @@ fn classify_expectation(
         exp.name,
         wanted_path
     ));
+}
+
+/// Classify an expectation using only the name index (no path constraint).
+/// Used when `module_path` is empty, meaning "find this symbol anywhere".
+fn classify_expectation_by_name(
+    exp: &SymbolExpectation,
+    by_name: &HashMap<String, Vec<DiscoveredSymbol>>,
+    mismatches: &mut Vec<String>,
+) {
+    let Some(candidates) = by_name.get(&exp.name) else {
+        mismatches.push(format!("MISSING: {} {}", exp.kind.as_str(), exp.name));
+        return;
+    };
+    if candidates.is_empty() {
+        mismatches.push(format!("MISSING: {} {}", exp.kind.as_str(), exp.name));
+        return;
+    }
+    // Find a candidate that matches kind and visibility.
+    let best_match = candidates
+        .iter()
+        .find(|sym| sym.kind == exp.kind && sym.visibility == exp.visibility);
+    // Fall back to any match by kind alone.
+    let kind_match = best_match.or_else(|| candidates.iter().find(|sym| sym.kind == exp.kind));
+    // Fall back to any match by name alone (symbol exists but with different kind).
+    let found = kind_match.or_else(|| candidates.first());
+    let Some(found) = found else {
+        mismatches.push(format!("MISSING: {} {}", exp.kind.as_str(), exp.name));
+        return;
+    };
+    // Check kind mismatch (only report if no kind match exists).
+    if kind_match.is_none() {
+        mismatches.push(format!(
+            "WRONG_KIND: {} (found: {}, expected: {})",
+            exp.name,
+            found.kind.as_str(),
+            exp.kind.as_str()
+        ));
+        return;
+    }
+    // Check visibility mismatch (only if kind matched).
+    if best_match.is_none() && found.visibility != exp.visibility {
+        mismatches.push(format!(
+            "WRONG_VIS: {} {} (found: {}, expected: {})",
+            exp.kind.as_str(),
+            exp.name,
+            found.visibility.as_str(),
+            exp.visibility.as_str()
+        ));
+        return;
+    }
+    // Check signature if specified.
+    if let Some(sig) = exp.signature.as_deref() {
+        if let Some(matched) = best_match {
+            if !matched.signature_line.contains(sig) {
+                mismatches.push(format!(
+                    "WRONG_SIG: {} {} (missing substring: {})",
+                    exp.kind.as_str(),
+                    exp.name,
+                    sig
+                ));
+            }
+        }
+    }
 }
 
 /// Walk a directory collecting all `.rs` files.
@@ -1010,5 +1082,89 @@ mod tests {
             assert_eq!(k.as_str(), kw);
         }
         assert!(SymbolKind::from_keyword("impl").is_none());
+    }
+
+    // ── Empty module_path (find-anywhere) tests ─────────────────────────
+
+    #[tokio::test]
+    async fn empty_module_path_finds_symbol_anywhere() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_file(
+            tmp.path(),
+            "deep/nested/module.rs",
+            "pub struct Target {}\n",
+        );
+        let gate = SymbolGate::new(vec![tmp.path().to_path_buf()]);
+        // Empty module_path means "find it anywhere in the source tree"
+        let manifest = SymbolManifest::new("plan-wildcard").with_expectation(exp(
+            "Target",
+            SymbolKind::Struct,
+            Visibility::Pub,
+            "", // wildcard: find anywhere
+        ));
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
+        assert!(v.passed, "expected pass (find-anywhere), got: {v:?}");
+    }
+
+    #[tokio::test]
+    async fn empty_module_path_reports_missing() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_file(tmp.path(), "lib.rs", "pub struct Other {}\n");
+        let gate = SymbolGate::new(vec![tmp.path().to_path_buf()]);
+        let manifest = SymbolManifest::new("plan-wildcard-miss").with_expectation(exp(
+            "NonExistent",
+            SymbolKind::Struct,
+            Visibility::Pub,
+            "",
+        ));
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
+        assert!(!v.passed);
+        let digest = v.error_digest.expect("digest");
+        assert!(digest.contains("MISSING:"), "digest: {digest}");
+        assert!(digest.contains("NonExistent"));
+    }
+
+    #[tokio::test]
+    async fn empty_module_path_reports_wrong_kind() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_file(tmp.path(), "foo.rs", "pub struct Foo {}\n");
+        let gate = SymbolGate::new(vec![tmp.path().to_path_buf()]);
+        // Expect a trait named Foo, but it's actually a struct
+        let manifest = SymbolManifest::new("plan-kind-mismatch").with_expectation(exp(
+            "Foo",
+            SymbolKind::Trait,
+            Visibility::Pub,
+            "",
+        ));
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
+        assert!(!v.passed);
+        let digest = v.error_digest.expect("digest");
+        assert!(digest.contains("WRONG_KIND:"), "digest: {digest}");
+    }
+
+    #[tokio::test]
+    async fn empty_module_path_reports_wrong_visibility() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_file(tmp.path(), "bar.rs", "struct Bar {}\n"); // private
+        let gate = SymbolGate::new(vec![tmp.path().to_path_buf()]);
+        // Expect pub, got private
+        let manifest = SymbolManifest::new("plan-vis-mismatch").with_expectation(exp(
+            "Bar",
+            SymbolKind::Struct,
+            Visibility::Pub,
+            "",
+        ));
+        let v = gate
+            .verify(&manifest_signal(&manifest), &Context::at(0))
+            .await;
+        assert!(!v.passed);
+        let digest = v.error_digest.expect("digest");
+        assert!(digest.contains("WRONG_VIS:"), "digest: {digest}");
     }
 }

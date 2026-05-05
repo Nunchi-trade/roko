@@ -832,7 +832,10 @@ fn apply_session_new_overrides(
 /// as an absolute path. Pushes a warning for each server that will fail to
 /// spawn so the IDE can surface the issue immediately rather than silently
 /// dropping tools later.
-fn validate_mcp_servers(servers: &[crate::types::McpServerConfig], warnings: &mut Vec<String>) {
+fn validate_mcp_servers(
+    servers: &[crate::types::McpServerConfig],
+    warnings: &mut Vec<String>,
+) {
     use crate::types::McpTransport;
     for server in servers {
         match &server.transport {
@@ -951,7 +954,9 @@ impl SessionManager {
     /// Returns `(session_id, config_options)` pairs. Used by the handler to
     /// push `config_option_update` notifications after a live config reload.
     #[must_use]
-    pub fn active_session_config_options(&self) -> Vec<(String, Vec<crate::types::ConfigOption>)> {
+    pub fn active_session_config_options(
+        &self,
+    ) -> Vec<(String, Vec<crate::types::ConfigOption>)> {
         self.sessions
             .iter()
             .map(|(id, session)| (id.clone(), session.config_options()))
@@ -1356,11 +1361,13 @@ fn slash_command(
     }
 }
 
-fn bare_mode_allows_category(category: &str) -> bool {
-    matches!(
-        category,
-        "system" | "research" | "implementation" | "verification" | "workflow" | "help"
-    )
+const BARE_MODE_COMMANDS: &[&str] = &[
+    "status", "doctor", "config", "help",
+    "research", "search", "enhance-prd", "analyze",
+];
+
+fn bare_mode_allows_command(name: &str) -> bool {
+    BARE_MODE_COMMANDS.contains(&name)
 }
 
 /// Build the list of available slash commands.
@@ -1638,12 +1645,7 @@ pub fn build_slash_commands(bare_mode: bool) -> Vec<SlashCommand> {
     if bare_mode {
         commands
             .into_iter()
-            .filter(|command| {
-                command
-                    .category
-                    .as_deref()
-                    .is_some_and(bare_mode_allows_category)
-            })
+            .filter(|command| bare_mode_allows_command(&command.name))
             .collect()
     } else {
         commands

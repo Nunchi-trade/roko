@@ -96,27 +96,6 @@ pub const DEFAULT_PLAN_RETRY_MAX_SECS: u64 = 30;
 /// Maximum exponent shift used while computing runner plan backoff.
 pub const DEFAULT_PLAN_RETRY_BACKOFF_SHIFT_CAP: u32 = 16;
 
-/// Default maximum vision-loop iterations.
-pub const DEFAULT_VISION_LOOP_MAX_ITERATIONS: u32 = 10;
-
-/// Default vision-loop target quality score.
-pub const DEFAULT_VISION_LOOP_TARGET_SCORE: f64 = 9.0;
-
-/// Consecutive target-score hits required before stopping the vision loop.
-pub const DEFAULT_VISION_LOOP_CONSECUTIVE_TARGET: u32 = 2;
-
-/// Score drop from peak that triggers vision-loop rollback.
-pub const DEFAULT_VISION_LOOP_REGRESSION_THRESHOLD: f64 = 3.0;
-
-/// Default browser viewport width for vision-loop screenshots.
-pub const DEFAULT_VISION_LOOP_VIEWPORT_WIDTH: u32 = 1_280;
-
-/// Default browser viewport height for vision-loop screenshots.
-pub const DEFAULT_VISION_LOOP_VIEWPORT_HEIGHT: u32 = 720;
-
-/// Default wait time after file writes before screenshot capture (milliseconds).
-pub const DEFAULT_VISION_LOOP_WAIT_MS: u64 = 2_000;
-
 // ── Resource limits ─────────────────────────────────────────────────────
 
 /// Maximum bytes a tool result may return before truncation.
@@ -131,8 +110,7 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024;
 /// Maximum file read size (10 MB).
 pub const DEFAULT_MAX_FILE_READ_BYTES: usize = 10 * 1024 * 1024;
 
-/// Maximum file write size (5 MB). Prevents agents from writing unbounded
-/// content that could exhaust disk or hit OS limits.
+/// Maximum file write size (5 MB).
 pub const DEFAULT_MAX_FILE_WRITE_BYTES: usize = 5 * 1024 * 1024;
 
 /// Maximum glob results before truncation.
@@ -198,12 +176,6 @@ pub const DEFAULT_TOOL_RESULT_PREVIEW_CHARS: usize = 200;
 /// Default HTTP serve port.
 pub const DEFAULT_SERVE_PORT: u16 = 6677;
 
-/// Default heartbeat interval (seconds).
-pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
-
-/// Heartbeat ring buffer capacity.
-pub const DEFAULT_HEARTBEAT_RING_CAPACITY: usize = 500;
-
 /// Default staleness threshold for relay-sourced data (seconds).
 pub const DEFAULT_RELAY_STALE_THRESHOLD_SECS: u64 = 30;
 
@@ -230,8 +202,6 @@ pub const DEFAULT_ALERT_MIN_CALLS: u64 = 50;
 pub const DEFAULT_EVENT_BUS_CAPACITY: usize = 32;
 
 /// Default bounded channel buffer for per-subscriber and streaming channels.
-/// Large enough to absorb burst traffic without backpressure under normal load;
-/// small enough to bound memory when a receiver stalls.
 pub const DEFAULT_CHANNEL_BUFFER: usize = 256;
 
 /// Default bounded channel buffer for per-agent streaming multiplexers.
@@ -283,27 +253,6 @@ pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.7;
 /// Stale lock timeout (seconds) for worktree operations.
 pub const DEFAULT_STALE_LOCK_SECS: u64 = 60;
 
-// ── Verdicts / TUI ──────────────────────────────────────────────────────
-
-/// Default bucket duration for verdict histograms (seconds).
-pub const DEFAULT_VERDICT_BUCKET_SECS: u64 = 3_600;
-
-/// Default number of buckets in verdict histogram.
-pub const DEFAULT_VERDICT_BUCKET_COUNT: usize = 24;
-
-// ── Deep research (Perplexity) ──────────────────────────────────────────
-
-/// Poll interval for Perplexity deep research (milliseconds).
-pub const DEFAULT_DEEP_RESEARCH_POLL_INTERVAL_MS: u64 = 5_000;
-
-/// Maximum poll attempts for deep research.
-pub const DEFAULT_DEEP_RESEARCH_MAX_POLL_ATTEMPTS: u32 = 120;
-
-// ── Provider RPM ────────────────────────────────────────────────────────
-
-/// Default provider requests-per-minute limit.
-pub const DEFAULT_PROVIDER_RPM: u32 = 60;
-
 // ── Runner workflow ────────────────────────────────────────────────────
 
 /// Maximum agent turns before the runner gives up on a single task.
@@ -345,12 +294,6 @@ pub const DEFAULT_RUNNER_RETRY_BACKOFF_MULTIPLIER_FALLBACK: u64 = 32;
 /// Maximum seconds for retry backoff delay.
 pub const DEFAULT_RUNNER_RETRY_BACKOFF_MAX_SECS: u64 = 45;
 
-/// Initial poll interval for deployment status checks (ms).
-pub const DEFAULT_DEPLOYMENT_STATUS_POLL_INITIAL_MS: u64 = 5_000;
-
-/// Maximum poll interval for deployment status checks (ms).
-pub const DEFAULT_DEPLOYMENT_STATUS_POLL_MAX_MS: u64 = 60_000;
-
 // ── Model slugs ────────────────────────────────────────────────────────
 
 /// Default model for the "deep" / architectural tier.
@@ -362,7 +305,7 @@ pub const MODEL_FOCUSED: &str = "claude-sonnet-4-6";
 /// Default model for the "mechanical" / fast tier.
 pub const MODEL_FAST: &str = "claude-haiku-4-5";
 
-/// Escalation ladder (mechanical → focused → deep).
+/// Escalation ladder (mechanical -> focused -> deep).
 pub const MODEL_ESCALATION_LADDER: [&str; 3] = [MODEL_FAST, MODEL_FOCUSED, MODEL_DEEP];
 
 #[cfg(test)]
@@ -405,9 +348,6 @@ mod tests {
         assert!(DEFAULT_PLAN_RETRY_BASE_SECS < DEFAULT_PLAN_RETRY_MAX_SECS);
         assert!(DEFAULT_PLAN_TIMEOUT_SECS > DEFAULT_PLAN_RETRY_MAX_SECS);
         assert!(DEFAULT_PLAN_RETRY_BACKOFF_SHIFT_CAP < u64::BITS);
-        assert!(DEFAULT_VISION_LOOP_MAX_ITERATIONS > 0);
-        assert!(DEFAULT_VISION_LOOP_CONSECUTIVE_TARGET <= DEFAULT_VISION_LOOP_MAX_ITERATIONS);
-        assert!(DEFAULT_VISION_LOOP_TARGET_SCORE > DEFAULT_VISION_LOOP_REGRESSION_THRESHOLD);
     }
 
     #[test]

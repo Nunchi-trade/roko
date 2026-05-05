@@ -8,6 +8,7 @@ pub mod dashboard;
 pub mod dev;
 pub mod do_cmd;
 pub mod experiment;
+pub mod graph;
 pub mod init;
 pub mod job;
 pub mod knowledge;

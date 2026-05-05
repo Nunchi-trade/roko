@@ -1,854 +1,620 @@
-//! Graph execution engine with fan-out/fan-in parallelism.
+//! Graph execution engine: sequential topological execution of cell DAGs.
 //!
-//! The engine performs a topological sort of the graph, groups nodes by depth
-//! (nodes at the same depth have no dependencies between them), and executes
-//! each depth level in parallel using a [`tokio::task::JoinSet`].
-//!
-//! Fan-out: one node feeds multiple downstream nodes (multiple edges from one source).
-//! Fan-in: multiple nodes must complete before a downstream node starts (multiple edges to one target).
-//! Conditional edges are evaluated after a node completes; edges whose conditions
-//! are not met are pruned, potentially skipping downstream nodes.
+//! The `GraphEngine` takes a `Graph` and a `CellRegistry`, topologically sorts
+//! the nodes, and executes each cell sequentially. Outputs from upstream nodes
+//! are passed as inputs to downstream nodes via an internal context map.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use std::time::Instant;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
-use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use crate::budget::BudgetTracker;
-use crate::condition;
-use crate::error::{GraphError, Result};
-use crate::types::{Edge, GraphDef, GraphResult, GraphStatus, Node, NodeOutput, NodeStatus};
+use crate::cell::{Cell, CellContext};
+use crate::registry::CellRegistry;
+use crate::topo::topological_order;
+use crate::types::{Graph, GraphError, NodeId};
 
-/// A cell executor function: given a node and its inputs, produce an output.
-/// This is the pluggable execution strategy — callers provide their own
-/// cell resolution logic.
-pub type CellExecutor = Arc<
-    dyn Fn(Node, Vec<NodeOutput>) -> futures::future::BoxFuture<'static, NodeOutput> + Send + Sync,
->;
+/// Status of a node during graph execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeStatus {
+    /// Not yet started.
+    Pending,
+    /// Currently executing.
+    Running,
+    /// Completed successfully.
+    Complete,
+    /// Failed during execution.
+    Failed,
+    /// Skipped because an upstream node failed.
+    Skipped,
+}
 
-/// The graph execution engine.
+impl std::fmt::Display for NodeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Running => write!(f, "running"),
+            Self::Complete => write!(f, "complete"),
+            Self::Failed => write!(f, "FAILED"),
+            Self::Skipped => write!(f, "skipped"),
+        }
+    }
+}
+
+/// Execution result for a single node.
+#[derive(Debug, Clone)]
+pub struct NodeResult {
+    /// Node identifier.
+    pub node_id: NodeId,
+    /// Cell type that was executed.
+    pub cell_type: String,
+    /// Final status after execution.
+    pub status: NodeStatus,
+    /// Wall-clock duration of execution (zero for skipped nodes).
+    pub duration: Duration,
+    /// Error message if status is Failed.
+    pub error: Option<String>,
+    /// Number of output engrams produced.
+    pub output_count: usize,
+}
+
+/// Output of a full graph execution.
+#[derive(Debug, Clone)]
+pub struct GraphOutput {
+    /// Name of the graph that was executed.
+    pub graph_name: String,
+    /// Whether the entire graph completed successfully (all nodes Complete).
+    pub success: bool,
+    /// Per-node execution results in topological order.
+    pub node_results: Vec<NodeResult>,
+    /// Total wall-clock duration for the full graph execution.
+    pub total_duration: Duration,
+}
+
+impl GraphOutput {
+    /// Return a human-readable summary of the graph execution.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        use std::fmt::Write;
+
+        let mut s = String::new();
+        let _ = writeln!(s, "Graph: {}", self.graph_name);
+        let _ = writeln!(
+            s,
+            "Status: {}",
+            if self.success { "SUCCESS" } else { "FAILED" }
+        );
+        let _ = writeln!(s, "Duration: {:?}", self.total_duration);
+        let _ = writeln!(s, "Nodes: {}", self.node_results.len());
+        s.push('\n');
+        for result in &self.node_results {
+            let dur = if result.duration > Duration::ZERO {
+                format!(" ({:?})", result.duration)
+            } else {
+                String::new()
+            };
+            let _ = writeln!(
+                s,
+                "  [{:>8}] {} ({}){}",
+                result.status, result.node_id, result.cell_type, dur
+            );
+            if let Some(err) = &result.error {
+                let _ = writeln!(s, "             error: {err}");
+            }
+        }
+        s
+    }
+}
+
+/// The graph execution engine. Holds a graph and registry, executes nodes
+/// sequentially in topological order.
 pub struct GraphEngine {
-    /// The graph definition to execute.
-    graph: GraphDef,
-    /// Budget tracker for resource limits.
-    budget: Arc<BudgetTracker>,
-    /// Cell executor function.
-    executor: CellExecutor,
+    graph: Graph,
+    registry: CellRegistry,
 }
 
 impl GraphEngine {
-    /// Create a new engine for the given graph definition.
-    pub fn new(graph: GraphDef, executor: CellExecutor) -> Self {
-        let budget = Arc::new(BudgetTracker::from_config(&graph.config));
-        Self {
-            graph,
-            budget,
-            executor,
-        }
+    /// Create a new engine for the given graph and cell registry.
+    #[must_use]
+    pub const fn new(graph: Graph, registry: CellRegistry) -> Self {
+        Self { graph, registry }
     }
 
-    /// Create with explicit budget limits (useful for testing).
-    pub fn with_budget(graph: GraphDef, executor: CellExecutor, budget: BudgetTracker) -> Self {
-        Self {
-            graph,
-            budget: Arc::new(budget),
-            executor,
-        }
-    }
-
-    /// Execute the graph, returning results for all nodes.
+    /// Execute the graph sequentially in topological order.
     ///
-    /// Nodes at the same topological depth are executed in parallel (fan-out).
-    /// A node only starts once all its upstream dependencies have completed (fan-in).
-    /// Conditional edges are evaluated after each node completes.
-    pub async fn execute(&self) -> Result<GraphResult> {
+    /// Each node is instantiated from the registry, executed with inputs from
+    /// upstream nodes, and its outputs are stored for downstream consumption.
+    /// If a node fails, all its transitive dependents are marked as Skipped.
+    ///
+    /// # Errors
+    /// Returns `GraphError::CycleDetected` if the graph contains a cycle, or
+    /// `GraphError::UnknownCellType` if a node references an unregistered cell type.
+    pub async fn execute(&self, ctx: &CellContext) -> Result<GraphOutput, GraphError> {
         let start = Instant::now();
 
-        // Validate the graph structure.
-        self.validate()?;
+        // 1. Topological sort
+        let order = topological_order(&self.graph)?;
 
-        // Compute topological levels (groups of nodes that can run in parallel).
-        let levels = self.topological_levels()?;
-        let max_par = self.graph.config.max_parallelism;
+        // 2. Track outputs per node and failed-set for skip propagation
+        let mut outputs: HashMap<NodeId, Vec<roko_core::Engram>> = HashMap::new();
+        let mut failed_nodes: HashSet<NodeId> = HashSet::new();
+        let mut results: Vec<NodeResult> = Vec::with_capacity(order.len());
 
-        // Track outputs per node for condition evaluation and input passing.
-        let mut outputs: HashMap<String, NodeOutput> = HashMap::new();
-        let mut all_outputs: Vec<NodeOutput> = Vec::new();
+        // 3. Execute each node in order
+        for node_id in &order {
+            // SAFETY: topological_order only returns IDs that are in the graph.
+            let Some(node) = self.graph.get_node(node_id) else {
+                continue;
+            };
 
-        // Track which nodes are "reachable" (not pruned by conditions).
-        let mut reachable: HashSet<String> =
-            self.graph.nodes.iter().map(|n| n.id.clone()).collect();
+            // Check if any upstream dependency failed -> skip
+            if self.has_failed_ancestor(node_id, &failed_nodes) {
+                results.push(NodeResult {
+                    node_id: node_id.clone(),
+                    cell_type: node.cell_type.clone(),
+                    status: NodeStatus::Skipped,
+                    duration: Duration::ZERO,
+                    error: Some("upstream dependency failed".to_string()),
+                    output_count: 0,
+                });
+                failed_nodes.insert(node_id.clone());
+                continue;
+            }
 
-        for level in &levels {
-            // Before executing this level, check budget.
-            if let Err(e) = self.budget.check() {
-                // Skip all remaining nodes with BudgetExceeded.
-                let reason = e.to_string();
-                for node_id in level {
-                    if reachable.contains(node_id) {
-                        let out = NodeOutput::skipped(node_id, &reason);
-                        outputs.insert(node_id.clone(), out.clone());
-                        all_outputs.push(out);
-                    }
+            // Instantiate cell from registry
+            let cell: Box<dyn Cell> = self.registry.create(&node.cell_type, node.config.clone())?;
+
+            // Gather inputs from upstream nodes
+            let input = self.gather_inputs(node_id, &outputs);
+
+            info!(node_id = %node_id, cell_type = %node.cell_type, "executing node");
+            let node_start = Instant::now();
+
+            // Execute the cell
+            match cell.execute(input, ctx).await {
+                Ok(output_engrams) => {
+                    let duration = node_start.elapsed();
+                    let count = output_engrams.len();
+                    info!(
+                        node_id = %node_id,
+                        outputs = count,
+                        duration_ms = duration.as_millis(),
+                        "node complete"
+                    );
+                    outputs.insert(node_id.clone(), output_engrams);
+                    results.push(NodeResult {
+                        node_id: node_id.clone(),
+                        cell_type: node.cell_type.clone(),
+                        status: NodeStatus::Complete,
+                        duration,
+                        error: None,
+                        output_count: count,
+                    });
                 }
-                continue;
-            }
-
-            // Determine which nodes in this level are actually runnable.
-            let runnable: Vec<&str> = level
-                .iter()
-                .filter(|id| reachable.contains(id.as_str()))
-                .map(String::as_str)
-                .collect();
-
-            if runnable.is_empty() {
-                continue;
-            }
-
-            // Execute nodes in parallel, respecting max_parallelism.
-            let chunk_results = self.execute_level(&runnable, &outputs, max_par).await;
-
-            // Process results: record budget, evaluate outgoing conditions.
-            for output in chunk_results {
-                self.budget.record(
-                    &output.node_id,
-                    output.tokens_used,
-                    output.cost_usd,
-                    output.duration,
-                );
-
-                // Evaluate outgoing edges for condition pruning.
-                self.evaluate_outgoing_edges(&output, &mut reachable);
-
-                outputs.insert(output.node_id.clone(), output.clone());
-                all_outputs.push(output);
+                Err(e) => {
+                    let duration = node_start.elapsed();
+                    let msg = e.to_string();
+                    warn!(
+                        node_id = %node_id,
+                        error = %msg,
+                        duration_ms = duration.as_millis(),
+                        "node failed"
+                    );
+                    failed_nodes.insert(node_id.clone());
+                    results.push(NodeResult {
+                        node_id: node_id.clone(),
+                        cell_type: node.cell_type.clone(),
+                        status: NodeStatus::Failed,
+                        duration,
+                        error: Some(msg),
+                        output_count: 0,
+                    });
+                }
             }
         }
 
-        // Determine overall status.
-        let status = self.determine_status(&all_outputs);
         let total_duration = start.elapsed();
+        let success = results.iter().all(|r| r.status == NodeStatus::Complete);
 
-        Ok(GraphResult {
-            graph_name: self.graph.name.clone(),
-            node_outputs: all_outputs,
-            status,
-            total_tokens: self.budget.tokens_used(),
-            total_cost_usd: self.budget.cost_usd(),
+        Ok(GraphOutput {
+            graph_name: self.graph.metadata.name.clone(),
+            success,
+            node_results: results,
             total_duration,
         })
     }
 
-    /// Execute a single level of nodes in parallel, respecting max_parallelism.
-    async fn execute_level(
-        &self,
-        node_ids: &[&str],
-        prior_outputs: &HashMap<String, NodeOutput>,
-        max_parallelism: usize,
-    ) -> Vec<NodeOutput> {
-        let mut results = Vec::with_capacity(node_ids.len());
+    /// Validate the graph without executing: check for cycles, unknown cell types,
+    /// and unresolved edge references.
+    ///
+    /// # Errors
+    /// Returns a list of validation issues.
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
 
-        // Process in chunks of max_parallelism.
-        for chunk in node_ids.chunks(max_parallelism) {
-            let mut join_set: JoinSet<NodeOutput> = JoinSet::new();
+        // Check for cycles
+        if topological_order(&self.graph).is_err() {
+            issues.push("graph contains a cycle".to_string());
+        }
 
-            for &node_id in chunk {
-                let node = self
-                    .graph
-                    .nodes
-                    .iter()
-                    .find(|n| n.id == node_id)
-                    .cloned()
-                    .expect("node validated to exist");
-
-                // Gather inputs from upstream nodes (fan-in).
-                let inputs = self.gather_inputs(node_id, prior_outputs);
-                let executor = self.executor.clone();
-
-                join_set.spawn(async move { (executor)(node, inputs).await });
-            }
-
-            // Collect all results from this chunk.
-            while let Some(result) = join_set.join_next().await {
-                match result {
-                    Ok(output) => results.push(output),
-                    Err(join_err) => {
-                        // JoinError means the task panicked or was cancelled.
-                        warn!("node task failed: {join_err}");
-                        results.push(NodeOutput::failed("unknown", join_err.to_string()));
-                    }
-                }
+        // Check all node cell types are registered
+        for (node_id, idx) in &self.graph.node_map {
+            let node = &self.graph.inner[*idx];
+            if !self.registry.contains(&node.cell_type) {
+                issues.push(format!(
+                    "node '{}' references unknown cell type '{}'",
+                    node_id, node.cell_type
+                ));
             }
         }
 
-        results
+        issues
     }
 
-    /// Gather input outputs from upstream nodes (fan-in support).
+    /// Check if a node has any failed ancestor in the DAG.
+    fn has_failed_ancestor(&self, node_id: &str, failed: &HashSet<NodeId>) -> bool {
+        use petgraph::Direction;
+
+        let Some(&idx) = self.graph.node_map.get(node_id) else {
+            return false;
+        };
+
+        // Check all incoming neighbors (direct parents)
+        for pred_idx in self
+            .graph
+            .inner
+            .neighbors_directed(idx, Direction::Incoming)
+        {
+            let pred_id = &self.graph.inner[pred_idx].id;
+            if failed.contains(pred_id) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Gather output engrams from all upstream (predecessor) nodes as input.
     fn gather_inputs(
         &self,
         node_id: &str,
-        prior_outputs: &HashMap<String, NodeOutput>,
-    ) -> Vec<NodeOutput> {
-        self.graph
-            .edges
-            .iter()
-            .filter(|e| e.to == node_id)
-            .filter_map(|e| prior_outputs.get(&e.from))
-            .cloned()
-            .collect()
-    }
+        outputs: &HashMap<NodeId, Vec<roko_core::Engram>>,
+    ) -> Vec<roko_core::Engram> {
+        use petgraph::Direction;
 
-    /// After a node completes, evaluate outgoing conditional edges.
-    /// If a condition is not met, remove the target from the reachable set
-    /// (unless another edge still reaches it).
-    fn evaluate_outgoing_edges(&self, output: &NodeOutput, reachable: &mut HashSet<String>) {
-        // Find all outgoing edges from this node.
-        let outgoing: Vec<&Edge> = self
+        let Some(&idx) = self.graph.node_map.get(node_id) else {
+            return vec![];
+        };
+
+        let mut input = Vec::new();
+        for pred_idx in self
             .graph
-            .edges
-            .iter()
-            .filter(|e| e.from == output.node_id)
-            .collect();
-
-        for edge in &outgoing {
-            if !condition::evaluate(&edge.condition, output) {
-                debug!(
-                    from = %output.node_id,
-                    to = %edge.to,
-                    "conditional edge not satisfied, checking if target has other sources"
-                );
-
-                // Only prune target if ALL incoming edges to it are unsatisfied.
-                let target_still_reachable = self
-                    .graph
-                    .edges
-                    .iter()
-                    .filter(|e| e.to == edge.to && e.from != output.node_id)
-                    .any(|_other| {
-                        // Another edge still reaches this target.
-                        true
-                    });
-
-                // For edges from THIS node that failed: check if this is the only
-                // path to the target. If the target has no other satisfied incoming
-                // edges, it becomes unreachable.
-                if !target_still_reachable {
-                    info!(node = %edge.to, "node pruned: no satisfied incoming edges");
-                    reachable.remove(&edge.to);
-                }
+            .inner
+            .neighbors_directed(idx, Direction::Incoming)
+        {
+            let pred_id = &self.graph.inner[pred_idx].id;
+            if let Some(engrams) = outputs.get(pred_id) {
+                input.extend(engrams.iter().cloned());
             }
         }
-    }
-
-    /// Validate graph structure: all edges reference valid nodes, no cycles.
-    fn validate(&self) -> Result<()> {
-        if self.graph.nodes.is_empty() {
-            return Err(GraphError::InvalidGraph {
-                reason: "graph has no nodes".into(),
-            });
-        }
-
-        let node_ids: HashSet<&str> = self.graph.nodes.iter().map(|n| n.id.as_str()).collect();
-
-        // Check all edges reference valid nodes.
-        for edge in &self.graph.edges {
-            if !node_ids.contains(edge.from.as_str()) {
-                return Err(GraphError::InvalidEdge {
-                    node_id: edge.from.clone(),
-                });
-            }
-            if !node_ids.contains(edge.to.as_str()) {
-                return Err(GraphError::InvalidEdge {
-                    node_id: edge.to.clone(),
-                });
-            }
-        }
-
-        // Check for cycles via topological sort (Kahn's algorithm).
-        let _ = self.topological_levels()?;
-
-        Ok(())
-    }
-
-    /// Compute topological levels using Kahn's algorithm.
-    /// Returns groups of node IDs; nodes within the same group can execute in parallel.
-    fn topological_levels(&self) -> Result<Vec<Vec<String>>> {
-        let node_ids: Vec<&str> = self.graph.nodes.iter().map(|n| n.id.as_str()).collect();
-
-        // Build adjacency and in-degree.
-        let mut in_degree: HashMap<&str, usize> = HashMap::new();
-        let mut successors: HashMap<&str, Vec<&str>> = HashMap::new();
-
-        for id in &node_ids {
-            in_degree.insert(id, 0);
-            successors.insert(id, Vec::new());
-        }
-
-        for edge in &self.graph.edges {
-            *in_degree.get_mut(edge.to.as_str()).unwrap() += 1;
-            successors
-                .get_mut(edge.from.as_str())
-                .unwrap()
-                .push(&edge.to);
-        }
-
-        let mut levels: Vec<Vec<String>> = Vec::new();
-        let mut queue: VecDeque<&str> = VecDeque::new();
-
-        // Start with nodes that have no incoming edges.
-        for (&id, &deg) in &in_degree {
-            if deg == 0 {
-                queue.push_back(id);
-            }
-        }
-
-        let mut processed = 0usize;
-
-        while !queue.is_empty() {
-            // All nodes currently in the queue form one parallel level.
-            let level: Vec<String> = queue.drain(..).map(|s| s.to_string()).collect();
-            processed += level.len();
-
-            // Decrement in-degree for successors.
-            let mut next_queue: VecDeque<&str> = VecDeque::new();
-            for node_id in &level {
-                if let Some(succs) = successors.get(node_id.as_str()) {
-                    for &succ in succs {
-                        let deg = in_degree.get_mut(succ).unwrap();
-                        *deg -= 1;
-                        if *deg == 0 {
-                            next_queue.push_back(succ);
-                        }
-                    }
-                }
-            }
-
-            levels.push(level);
-            queue = next_queue;
-        }
-
-        if processed != node_ids.len() {
-            // Some nodes were not processed => cycle exists.
-            let unprocessed: Vec<String> = node_ids
-                .iter()
-                .filter(|id| in_degree.get(*id).copied().unwrap_or(0) > 0)
-                .map(|s| s.to_string())
-                .collect();
-            return Err(GraphError::CycleDetected {
-                node_id: unprocessed.first().cloned().unwrap_or_default(),
-            });
-        }
-
-        Ok(levels)
-    }
-
-    /// Determine overall graph status from node outputs.
-    fn determine_status(&self, outputs: &[NodeOutput]) -> GraphStatus {
-        let has_budget_skip = outputs.iter().any(
-            |o| matches!(&o.status, NodeStatus::Skipped { reason } if reason.contains("budget")),
-        );
-
-        if has_budget_skip {
-            return GraphStatus::BudgetExceeded {
-                reason: "one or more nodes skipped due to budget limits".into(),
-            };
-        }
-
-        let has_failure = outputs.iter().any(|o| o.status.is_failed());
-        if has_failure {
-            return GraphStatus::PartialFailure;
-        }
-
-        GraphStatus::Success
-    }
-
-    /// Get a reference to the budget tracker.
-    #[must_use]
-    pub fn budget(&self) -> &BudgetTracker {
-        &self.budget
-    }
-
-    /// Get the graph definition.
-    #[must_use]
-    pub fn graph_def(&self) -> &GraphDef {
-        &self.graph
+        input
     }
 }
 
-/// Parse a graph definition from TOML.
-pub fn parse_graph_toml(toml_str: &str) -> Result<GraphDef> {
-    let graph: GraphDef = toml::from_str(toml_str)?;
-    Ok(graph)
+/// Build the default cell registry with standard gate and utility cells.
+///
+/// Registered cell types:
+/// - `gate.compile` -- `CompileGate` (cargo check)
+/// - `gate.test` -- `TestGate` (cargo test)
+/// - `gate.clippy` -- `ClippyGate` (cargo clippy)
+/// - `noop` -- `NoopCell` (passes input through unchanged, useful for testing)
+#[must_use]
+pub fn default_registry() -> CellRegistry {
+    let mut registry = CellRegistry::new();
+
+    registry.register("gate.compile", |_config| {
+        Box::new(ShellCell::new(
+            "gate.compile",
+            "CompileGate",
+            "cargo",
+            &["check", "--workspace"],
+        ))
+    });
+
+    registry.register("gate.test", |_config| {
+        Box::new(ShellCell::new(
+            "gate.test",
+            "TestGate",
+            "cargo",
+            &["test", "--workspace"],
+        ))
+    });
+
+    registry.register("gate.clippy", |_config| {
+        Box::new(ShellCell::new(
+            "gate.clippy",
+            "ClippyGate",
+            "cargo",
+            &["clippy", "--workspace", "--no-deps", "--", "-D", "warnings"],
+        ))
+    });
+
+    registry.register("noop", |_config| Box::new(NoopCell::default()));
+
+    registry.register("score", |_config| {
+        Box::new(NoopCell::with_id_and_name("score", "ScoreCell"))
+    });
+
+    registry.register("compose", |_config| {
+        Box::new(NoopCell::with_id_and_name("compose", "ComposeCell"))
+    });
+
+    registry.register("act", |_config| {
+        Box::new(NoopCell::with_id_and_name("act", "ActCell"))
+    });
+
+    registry
+}
+
+// ─── Built-in cell implementations ──────────────────────────────────────────
+
+/// A no-op cell that passes its input through unchanged. Useful for testing
+/// and as a placeholder in graph definitions.
+struct NoopCell {
+    id: &'static str,
+    name: &'static str,
+}
+
+impl NoopCell {
+    const fn with_id_and_name(id: &'static str, name: &'static str) -> Self {
+        Self { id, name }
+    }
+}
+
+impl Default for NoopCell {
+    fn default() -> Self {
+        Self {
+            id: "noop",
+            name: "NoopCell",
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Cell for NoopCell {
+    fn cell_id(&self) -> &str {
+        self.id
+    }
+    fn cell_name(&self) -> &str {
+        self.name
+    }
+    fn cell_version(&self) -> crate::cell::CellVersion {
+        (0, 1, 0)
+    }
+    fn protocols(&self) -> &[&str] {
+        &[]
+    }
+    fn estimated_cost(&self) -> Option<f64> {
+        None
+    }
+    fn estimated_duration(&self) -> Option<Duration> {
+        Some(Duration::from_millis(1))
+    }
+    async fn execute(
+        &self,
+        input: Vec<roko_core::Engram>,
+        _ctx: &CellContext,
+    ) -> roko_core::error::Result<Vec<roko_core::Engram>> {
+        Ok(input)
+    }
+}
+
+/// A cell that runs a shell command. Used for gate implementations (compile, test, clippy).
+/// Succeeds if the command exits with status 0, fails otherwise.
+struct ShellCell {
+    id: &'static str,
+    name: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+impl ShellCell {
+    const fn new(
+        id: &'static str,
+        name: &'static str,
+        program: &'static str,
+        args: &'static [&'static str],
+    ) -> Self {
+        Self {
+            id,
+            name,
+            program,
+            args,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Cell for ShellCell {
+    fn cell_id(&self) -> &str {
+        self.id
+    }
+    fn cell_name(&self) -> &str {
+        self.name
+    }
+    fn cell_version(&self) -> crate::cell::CellVersion {
+        (0, 1, 0)
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Gate"]
+    }
+    fn estimated_cost(&self) -> Option<f64> {
+        None
+    }
+    fn estimated_duration(&self) -> Option<Duration> {
+        Some(Duration::from_secs(60))
+    }
+    async fn execute(
+        &self,
+        input: Vec<roko_core::Engram>,
+        _ctx: &CellContext,
+    ) -> roko_core::error::Result<Vec<roko_core::Engram>> {
+        let output = tokio::process::Command::new(self.program)
+            .args(self.args)
+            .output()
+            .await
+            .map_err(|e| roko_core::error::RokoError::Gate {
+                gate: self.name.to_string(),
+                message: format!("failed to spawn '{}': {}", self.program, e),
+            })?;
+
+        if output.status.success() {
+            Ok(input)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = if stderr.is_empty() {
+                stdout.to_string()
+            } else {
+                stderr.to_string()
+            };
+            // Truncate to avoid massive error messages
+            let detail = if detail.len() > 2000 {
+                format!("{}...(truncated)", &detail[..2000])
+            } else {
+                detail
+            };
+            Err(roko_core::error::RokoError::Gate {
+                gate: self.name.to_string(),
+                message: format!(
+                    "{} exited with code {}: {}",
+                    self.program,
+                    output.status.code().unwrap_or(-1),
+                    detail
+                ),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::condition::EdgeCondition;
-    use crate::types::GraphConfig;
-    use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use crate::loader::load_from_str;
 
-    /// Helper: create a simple pass-through executor that marks nodes as successful.
-    fn passthrough_executor() -> CellExecutor {
-        Arc::new(|node: Node, _inputs: Vec<NodeOutput>| {
-            Box::pin(
-                async move { NodeOutput::success(&node.id, json!({"cell_type": node.cell_type})) },
-            )
-        })
-    }
-
-    /// Helper: create an executor that records execution order.
-    fn order_tracking_executor(counter: Arc<AtomicUsize>) -> CellExecutor {
-        Arc::new(move |node: Node, _inputs: Vec<NodeOutput>| {
-            let counter = counter.clone();
-            Box::pin(async move {
-                let order = counter.fetch_add(1, Ordering::SeqCst);
-                NodeOutput::success(&node.id, json!({"order": order}))
-            })
-        })
-    }
-
-    fn simple_linear_graph() -> GraphDef {
-        GraphDef {
-            name: "linear".into(),
-            description: "A -> B -> C".into(),
-            nodes: vec![
-                Node {
-                    id: "a".into(),
-                    name: "Node A".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "b".into(),
-                    name: "Node B".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "c".into(),
-                    name: "Node C".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-            ],
-            edges: vec![
-                Edge {
-                    from: "a".into(),
-                    to: "b".into(),
-                    condition: EdgeCondition::Always,
-                },
-                Edge {
-                    from: "b".into(),
-                    to: "c".into(),
-                    condition: EdgeCondition::Always,
-                },
-            ],
-            config: GraphConfig::default(),
-        }
-    }
-
-    fn fan_out_graph() -> GraphDef {
-        // A fans out to B and C (parallel), then D fans in from B and C.
-        GraphDef {
-            name: "fan-out-in".into(),
-            description: "A -> (B, C) -> D".into(),
-            nodes: vec![
-                Node {
-                    id: "a".into(),
-                    name: "Source".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "b".into(),
-                    name: "Branch 1".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "c".into(),
-                    name: "Branch 2".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "d".into(),
-                    name: "Merge".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-            ],
-            edges: vec![
-                Edge {
-                    from: "a".into(),
-                    to: "b".into(),
-                    condition: EdgeCondition::Always,
-                },
-                Edge {
-                    from: "a".into(),
-                    to: "c".into(),
-                    condition: EdgeCondition::Always,
-                },
-                Edge {
-                    from: "b".into(),
-                    to: "d".into(),
-                    condition: EdgeCondition::Always,
-                },
-                Edge {
-                    from: "c".into(),
-                    to: "d".into(),
-                    condition: EdgeCondition::Always,
-                },
-            ],
-            config: GraphConfig::default(),
-        }
-    }
-
-    #[tokio::test]
-    async fn linear_graph_executes_in_order() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let engine = GraphEngine::new(simple_linear_graph(), order_tracking_executor(counter));
-
-        let result = engine.execute().await.unwrap();
-        assert_eq!(result.status, GraphStatus::Success);
-        assert_eq!(result.node_outputs.len(), 3);
-
-        // Verify execution order: a=0, b=1, c=2.
-        let a_order = result
-            .node_outputs
-            .iter()
-            .find(|o| o.node_id == "a")
-            .unwrap();
-        let b_order = result
-            .node_outputs
-            .iter()
-            .find(|o| o.node_id == "b")
-            .unwrap();
-        let c_order = result
-            .node_outputs
-            .iter()
-            .find(|o| o.node_id == "c")
-            .unwrap();
-        assert_eq!(a_order.data["order"], 0);
-        assert_eq!(b_order.data["order"], 1);
-        assert_eq!(c_order.data["order"], 2);
-    }
-
-    #[tokio::test]
-    async fn fan_out_executes_in_parallel() {
-        let engine = GraphEngine::new(fan_out_graph(), passthrough_executor());
-        let result = engine.execute().await.unwrap();
-
-        assert_eq!(result.status, GraphStatus::Success);
-        assert_eq!(result.node_outputs.len(), 4);
-
-        // d should come after both b and c.
-        let d_idx = result
-            .node_outputs
-            .iter()
-            .position(|o| o.node_id == "d")
-            .unwrap();
-        let b_idx = result
-            .node_outputs
-            .iter()
-            .position(|o| o.node_id == "b")
-            .unwrap();
-        let c_idx = result
-            .node_outputs
-            .iter()
-            .position(|o| o.node_id == "c")
-            .unwrap();
-        assert!(d_idx > b_idx);
-        assert!(d_idx > c_idx);
-    }
-
-    #[tokio::test]
-    async fn fan_in_receives_all_inputs() {
-        // Executor that records how many inputs each node received.
-        let executor: CellExecutor = Arc::new(|node: Node, inputs: Vec<NodeOutput>| {
-            Box::pin(
-                async move { NodeOutput::success(&node.id, json!({"input_count": inputs.len()})) },
-            )
+    fn noop_registry() -> CellRegistry {
+        let mut r = CellRegistry::new();
+        r.register("noop", |_| Box::new(NoopCell::default()));
+        r.register("gate.compile", |_| {
+            Box::new(NoopCell::with_id_and_name("gate.compile", "CompileGate"))
         });
-
-        let engine = GraphEngine::new(fan_out_graph(), executor);
-        let result = engine.execute().await.unwrap();
-
-        // Node D should receive 2 inputs (from B and C).
-        let d_output = result
-            .node_outputs
-            .iter()
-            .find(|o| o.node_id == "d")
-            .unwrap();
-        assert_eq!(d_output.data["input_count"], 2);
-    }
-
-    #[tokio::test]
-    async fn cycle_detected() {
-        let graph = GraphDef {
-            name: "cyclic".into(),
-            description: "".into(),
-            nodes: vec![
-                Node {
-                    id: "a".into(),
-                    name: "A".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "b".into(),
-                    name: "B".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-            ],
-            edges: vec![
-                Edge {
-                    from: "a".into(),
-                    to: "b".into(),
-                    condition: EdgeCondition::Always,
-                },
-                Edge {
-                    from: "b".into(),
-                    to: "a".into(),
-                    condition: EdgeCondition::Always,
-                },
-            ],
-            config: GraphConfig::default(),
-        };
-
-        let engine = GraphEngine::new(graph, passthrough_executor());
-        let err = engine.execute().await.unwrap_err();
-        assert!(matches!(err, GraphError::CycleDetected { .. }));
-    }
-
-    #[tokio::test]
-    async fn empty_graph_rejected() {
-        let graph = GraphDef {
-            name: "empty".into(),
-            description: "".into(),
-            nodes: vec![],
-            edges: vec![],
-            config: GraphConfig::default(),
-        };
-
-        let engine = GraphEngine::new(graph, passthrough_executor());
-        let err = engine.execute().await.unwrap_err();
-        assert!(matches!(err, GraphError::InvalidGraph { .. }));
-    }
-
-    #[tokio::test]
-    async fn invalid_edge_rejected() {
-        let graph = GraphDef {
-            name: "bad-edge".into(),
-            description: "".into(),
-            nodes: vec![Node {
-                id: "a".into(),
-                name: "A".into(),
-                cell_type: "test".into(),
-                config: HashMap::new(),
-            }],
-            edges: vec![Edge {
-                from: "a".into(),
-                to: "nonexistent".into(),
-                condition: EdgeCondition::Always,
-            }],
-            config: GraphConfig::default(),
-        };
-
-        let engine = GraphEngine::new(graph, passthrough_executor());
-        let err = engine.execute().await.unwrap_err();
-        assert!(matches!(err, GraphError::InvalidEdge { .. }));
-    }
-
-    #[tokio::test]
-    async fn conditional_edge_prunes_downstream() {
-        // A -> (on_success) -> B, A -> (on_failure) -> C
-        // A succeeds, so B runs but C is pruned.
-        let graph = GraphDef {
-            name: "conditional".into(),
-            description: "".into(),
-            nodes: vec![
-                Node {
-                    id: "a".into(),
-                    name: "A".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "b".into(),
-                    name: "B (success path)".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "c".into(),
-                    name: "C (failure path)".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-            ],
-            edges: vec![
-                Edge {
-                    from: "a".into(),
-                    to: "b".into(),
-                    condition: EdgeCondition::OnSuccess,
-                },
-                Edge {
-                    from: "a".into(),
-                    to: "c".into(),
-                    condition: EdgeCondition::OnFailure,
-                },
-            ],
-            config: GraphConfig::default(),
-        };
-
-        let engine = GraphEngine::new(graph, passthrough_executor());
-        let result = engine.execute().await.unwrap();
-
-        // A and B should have run, C should not appear in outputs
-        // (it was pruned before execution).
-        let node_ids: Vec<&str> = result
-            .node_outputs
-            .iter()
-            .map(|o| o.node_id.as_str())
-            .collect();
-        assert!(node_ids.contains(&"a"));
-        assert!(node_ids.contains(&"b"));
-        // C should not be in results since it was pruned.
-        assert!(!node_ids.contains(&"c"));
-    }
-
-    #[tokio::test]
-    async fn budget_skips_remaining_nodes() {
-        use crate::budget::BudgetLimits;
-
-        let graph = simple_linear_graph();
-        // Set a token limit of 1 — first node will exhaust it.
-        let budget = BudgetTracker::with_limits(BudgetLimits {
-            max_tokens: Some(1),
-            max_cost_usd: None,
-            deadline: None,
+        r.register("gate.test", |_| {
+            Box::new(NoopCell::with_id_and_name("gate.test", "TestGate"))
         });
-
-        // Executor that uses 5 tokens per node.
-        let executor: CellExecutor = Arc::new(|node: Node, _inputs: Vec<NodeOutput>| {
-            Box::pin(async move {
-                let mut out = NodeOutput::success(&node.id, json!({}));
-                out.tokens_used = 5;
-                out
-            })
+        r.register("gate.clippy", |_| {
+            Box::new(NoopCell::with_id_and_name("gate.clippy", "ClippyGate"))
         });
-
-        let engine = GraphEngine::with_budget(graph, executor, budget);
-        let result = engine.execute().await.unwrap();
-
-        assert!(matches!(result.status, GraphStatus::BudgetExceeded { .. }));
-        // First node should succeed, remaining should be skipped.
-        let a_out = result
-            .node_outputs
-            .iter()
-            .find(|o| o.node_id == "a")
-            .unwrap();
-        assert!(a_out.status.is_success());
-
-        let b_out = result
-            .node_outputs
-            .iter()
-            .find(|o| o.node_id == "b")
-            .unwrap();
-        assert!(matches!(b_out.status, NodeStatus::Skipped { .. }));
+        r
     }
 
     #[tokio::test]
-    async fn max_parallelism_respected() {
-        use std::sync::atomic::AtomicUsize;
-        use tokio::time::sleep;
+    async fn execute_linear_graph() {
+        let toml_str = r#"
+[graph]
+name = "linear"
 
-        let concurrent = Arc::new(AtomicUsize::new(0));
-        let max_seen = Arc::new(AtomicUsize::new(0));
+[[nodes]]
+id = "a"
+cell_type = "noop"
 
-        let conc = concurrent.clone();
-        let ms = max_seen.clone();
+[[nodes]]
+id = "b"
+cell_type = "noop"
 
-        // 4 independent nodes, max_parallelism = 2.
-        let graph = GraphDef {
-            name: "parallel-limited".into(),
-            description: "".into(),
-            nodes: vec![
-                Node {
-                    id: "a".into(),
-                    name: "A".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "b".into(),
-                    name: "B".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "c".into(),
-                    name: "C".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-                Node {
-                    id: "d".into(),
-                    name: "D".into(),
-                    cell_type: "test".into(),
-                    config: HashMap::new(),
-                },
-            ],
-            edges: vec![],
-            config: GraphConfig {
-                max_parallelism: 2,
-                ..Default::default()
-            },
-        };
+[[nodes]]
+id = "c"
+cell_type = "noop"
 
-        let executor: CellExecutor = Arc::new(move |node: Node, _| {
-            let conc = conc.clone();
-            let ms = ms.clone();
-            Box::pin(async move {
-                let current = conc.fetch_add(1, Ordering::SeqCst) + 1;
-                ms.fetch_max(current, Ordering::SeqCst);
-                sleep(Duration::from_millis(50)).await;
-                conc.fetch_sub(1, Ordering::SeqCst);
-                NodeOutput::success(&node.id, json!({}))
-            })
-        });
+[[edges]]
+from = "a"
+to = "b"
 
-        let engine = GraphEngine::new(graph, executor);
-        let result = engine.execute().await.unwrap();
+[[edges]]
+from = "b"
+to = "c"
+"#;
+        let graph = load_from_str(toml_str).unwrap();
+        let engine = GraphEngine::new(graph, noop_registry());
+        let ctx = CellContext::new();
+        let output = engine.execute(&ctx).await.unwrap();
 
-        assert_eq!(result.node_outputs.len(), 4);
-        assert_eq!(result.status, GraphStatus::Success);
-        // Max concurrency should not exceed 2.
-        assert!(max_seen.load(Ordering::SeqCst) <= 2);
+        assert!(output.success);
+        assert_eq!(output.node_results.len(), 3);
+        assert!(
+            output
+                .node_results
+                .iter()
+                .all(|r| r.status == NodeStatus::Complete)
+        );
     }
 
     #[tokio::test]
-    async fn node_failure_propagates() {
-        let executor: CellExecutor = Arc::new(|node: Node, _inputs: Vec<NodeOutput>| {
-            Box::pin(async move {
-                if node.id == "b" {
-                    NodeOutput::failed(&node.id, "intentional failure")
-                } else {
-                    NodeOutput::success(&node.id, json!({}))
-                }
-            })
-        });
+    async fn execute_single_node() {
+        let toml_str = r#"
+[graph]
+name = "single"
 
-        let engine = GraphEngine::new(simple_linear_graph(), executor);
-        let result = engine.execute().await.unwrap();
-        assert_eq!(result.status, GraphStatus::PartialFailure);
+[[nodes]]
+id = "only"
+cell_type = "noop"
+"#;
+        let graph = load_from_str(toml_str).unwrap();
+        let engine = GraphEngine::new(graph, noop_registry());
+        let ctx = CellContext::new();
+        let output = engine.execute(&ctx).await.unwrap();
+
+        assert!(output.success);
+        assert_eq!(output.node_results.len(), 1);
+        assert_eq!(output.node_results[0].status, NodeStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn validate_missing_cell_type() {
+        let toml_str = r#"
+[graph]
+name = "bad"
+
+[[nodes]]
+id = "a"
+cell_type = "nonexistent"
+"#;
+        let graph = load_from_str(toml_str).unwrap();
+        let engine = GraphEngine::new(graph, noop_registry());
+        let issues = engine.validate();
+        assert!(!issues.is_empty());
+        assert!(issues[0].contains("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn validate_valid_graph() {
+        let toml_str = r#"
+[graph]
+name = "valid"
+
+[[nodes]]
+id = "a"
+cell_type = "noop"
+
+[[nodes]]
+id = "b"
+cell_type = "gate.compile"
+
+[[edges]]
+from = "a"
+to = "b"
+"#;
+        let graph = load_from_str(toml_str).unwrap();
+        let engine = GraphEngine::new(graph, noop_registry());
+        let issues = engine.validate();
+        assert!(issues.is_empty());
     }
 }

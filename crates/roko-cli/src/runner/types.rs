@@ -15,24 +15,7 @@ use roko_core::defaults::{
 };
 use roko_fs::RokoLayout;
 
-// ─── Cost Tracking ──────────────────────────────────────────────────────
-
-/// Per-task cost report produced when a task completes (pass or fail).
-/// Collected into `RunReport.task_costs` for final summary display.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskCostReport {
-    pub plan_id: String,
-    pub task_id: String,
-    pub model: String,
-    pub provider: String,
-    pub tokens_in: u64,
-    pub tokens_out: u64,
-    pub cost_usd: f64,
-    pub agent_calls: u32,
-    pub outcome: String, // "pass" or "fail"
-}
-
-// ─── Agent Events ──────────────────���─────────────────────────────���──────
+// ─── Agent Events ───────────────────────────────────────────────────────
 
 // Events emitted by provider runtime adapters. Re-exporting the canonical
 // runtime event keeps runner code away from provider-specific stream schemas.

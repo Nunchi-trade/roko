@@ -2,6 +2,9 @@
 //!
 //! Event-driven fan-out from the runtime event bus into learning systems.
 //!
+//! STATUS: WIRED — spawned as a `tokio::spawn` background task in
+//! `orchestrate.rs::run_task_plans_inner()` during plan execution.
+//!
 //! The current event schema does not carry full turn identity on every event,
 //! so this subscriber keeps the latest started turn in memory and uses it to
 //! enrich later `TurnCompleted` and `ToolCallExecuted` events.

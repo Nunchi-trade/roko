@@ -122,6 +122,9 @@ toml = "0.8"
 indexmap = { version = "2", features = ["serde"] }
 notify = "6"
 
+# Graph
+petgraph = "0.7"
+
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"

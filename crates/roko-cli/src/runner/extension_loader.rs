@@ -125,12 +125,13 @@ pub fn load_extensions(
     let mut loaded = 0usize;
 
     for dir in &scan_dirs {
-        if !dir.exists() {
-            debug!(dir = %dir.display(), "extension directory does not exist, skipping");
-            continue;
-        }
-
+        // Call discover_plugins directly — it returns Ok(empty) for non-existent
+        // directories, avoiding a separate .exists() TOCTOU check.
         let plugins = match roko_plugin::manifest::discover_plugins(dir) {
+            Ok(p) if p.is_empty() => {
+                debug!(dir = %dir.display(), "no plugins found in extension directory");
+                continue;
+            }
             Ok(p) => p,
             Err(err) => {
                 warn!(
