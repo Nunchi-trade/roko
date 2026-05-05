@@ -70,7 +70,7 @@ pub async fn dispatch_via_model_call_service(prompt: &str) -> AnyhowResult<Dispa
     use roko_learn::feedback_service::FeedbackService;
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let config = crate::config::load_layered(&workdir)
+    let config = crate::config::load_resolved_config(&workdir)
         .map(|r| r.config)
         .unwrap_or_default();
 
@@ -826,7 +826,7 @@ impl AgentDispatcherV2 {
             .await;
 
         // Set up streaming channel: chunks flow from agent -> forwarder -> event_tx.
-        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<StreamChunk>();
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamChunk>(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
         let forwarder_tx = event_tx.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(chunk) = chunk_rx.recv().await {

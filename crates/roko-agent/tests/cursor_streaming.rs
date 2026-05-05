@@ -403,7 +403,7 @@ fn read_http_request(stream: &mut TcpStream) -> RecordedRequest {
     }
 }
 
-async fn collect_chunks(mut rx: mpsc::UnboundedReceiver<StreamChunk>) -> Vec<StreamChunk> {
+async fn collect_chunks(mut rx: mpsc::Receiver<StreamChunk>) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
     while let Some(chunk) = rx.recv().await {
         chunks.push(chunk);
@@ -450,7 +450,7 @@ async fn cursor_streaming_basic_replays_cleanly() {
         json!({"role": "user", "content": "stream the basic answer"}),
     ];
     let session = SessionState::default();
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
 
     let response = backend
         .send_turn_streaming(&messages, &rendered_tools, &session, event_tx)

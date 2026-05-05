@@ -175,16 +175,16 @@ pub trait Agent: Send + Sync {
         &self,
         input: &Signal,
         ctx: &Context,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> AgentResult {
         let result = self.run(input, ctx).await;
         if let Ok(text) = result.output.body.as_text() {
             if !text.is_empty() {
-                let _ = event_tx.send(StreamChunk::ContentDelta(text.to_string()));
+                let _ = event_tx.send(StreamChunk::ContentDelta(text.to_string())).await;
             }
         }
         if result.usage.total_tokens() > 0 {
-            let _ = event_tx.send(StreamChunk::Usage(result.usage));
+            let _ = event_tx.send(StreamChunk::Usage(result.usage)).await;
         }
         result
     }

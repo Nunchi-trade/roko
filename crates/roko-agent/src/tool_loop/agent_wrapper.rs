@@ -211,7 +211,7 @@ impl Agent for ToolLoopAgent {
         &self,
         input: &Signal,
         ctx: &Context,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> AgentResult {
         let prompt = input.body.as_text().unwrap_or_default();
         let tool_ctx = ToolContext::testing(&self.worktree_path);

@@ -428,7 +428,7 @@ async fn codex_ten_turn_basic_replays_cleanly() {
     let mut final_text = String::new();
 
     for turn in &fixture.turns {
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
         let response = backend
             .send_turn_streaming(&messages, &rendered_tools, &session, event_tx)
             .await
@@ -579,7 +579,7 @@ fn echo_tool() -> ToolDef {
     )
 }
 
-async fn collect_chunks(event_rx: &mut mpsc::UnboundedReceiver<StreamChunk>) -> Vec<StreamChunk> {
+async fn collect_chunks(event_rx: &mut mpsc::Receiver<StreamChunk>) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
     while let Some(chunk) = event_rx.recv().await {
         chunks.push(chunk);

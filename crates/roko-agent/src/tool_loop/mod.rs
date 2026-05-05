@@ -126,7 +126,7 @@ pub trait LlmBackend: Send + Sync {
         messages: &[serde_json::Value],
         tools: &RenderedTools,
         session: &SessionState,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
         let _ = event_tx;
         self.send_turn(messages, tools, session).await
@@ -447,7 +447,7 @@ impl ToolLoop {
         user: &str,
         tools: &[ToolDef],
         ctx: &ToolContext,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> ToolLoopOutput {
         let messages = if self.few_shot_messages.is_empty() {
             result_msg::initial_messages(system, user)
@@ -478,7 +478,7 @@ impl ToolLoop {
         messages: Vec<Value>,
         tools: &[ToolDef],
         ctx: &ToolContext,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> ToolLoopOutput {
         self.run_inner_with_mcp_errors(
             messages,
@@ -524,7 +524,7 @@ impl ToolLoop {
         total_usage: Usage,
         tools: &[ToolDef],
         ctx: &ToolContext,
-        event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
+        event_tx: Option<mpsc::Sender<StreamChunk>>,
         session: SessionState,
     ) -> ToolLoopOutput {
         let mut output = self
@@ -557,7 +557,7 @@ impl ToolLoop {
         mut total_usage: Usage,
         tools: &[ToolDef],
         ctx: &ToolContext,
-        event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
+        event_tx: Option<mpsc::Sender<StreamChunk>>,
         initial_session: SessionState,
     ) -> ToolLoopOutput {
         let rendered_tools = self.translator.render_tools(tools);
@@ -1656,7 +1656,7 @@ mod tests {
             serde_json::json!({"role": "assistant", "content": "earlier answer"}),
             serde_json::json!({"role": "user", "content": "new prompt"}),
         ];
-        let (stream_tx, _stream_rx) = mpsc::unbounded_channel();
+        let (stream_tx, _stream_rx) = mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
 
         let out = tl
             .run_messages_streaming(messages.clone(), &test_tools(), &ctx, stream_tx)

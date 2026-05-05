@@ -350,10 +350,10 @@ impl CursorAgent {
         }
     }
 
-    fn push_stream_line(
+    async fn push_stream_line(
         line: &[u8],
         accumulator: &mut StreamAccumulator,
-        event_tx: &mpsc::UnboundedSender<StreamChunk>,
+        event_tx: &mpsc::Sender<StreamChunk>,
     ) {
         let line = String::from_utf8_lossy(line);
         let line = line.trim_end_matches(['\r', '\n']);
@@ -363,7 +363,7 @@ impl CursorAgent {
 
         if let Some(chunk) = parse_sse_line(line) {
             accumulator.push(chunk.clone());
-            let _ = event_tx.send(chunk);
+            let _ = event_tx.send(chunk).await;
             return;
         }
 
@@ -654,7 +654,7 @@ impl LlmBackend for CursorAgent {
         messages: &[Value],
         tools: &RenderedTools,
         session: &SessionState,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
         let body = self.build_chat_completion_body(messages, tools, session, true)?;
 
@@ -665,21 +665,27 @@ impl LlmBackend for CursorAgent {
             req = req.header(key, value);
         }
 
-        let response = req.body(body).send().await.map_err(|err| {
-            let message = format!("request failed: {err}");
-            let _ = event_tx.send(StreamChunk::Error(message.clone()));
-            LlmError::Network(message)
-        })?;
+        let response = match req.body(body).send().await {
+            Ok(response) => response,
+            Err(err) => {
+                let message = format!("request failed: {err}");
+                let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                return Err(LlmError::Network(message));
+            }
+        };
 
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.map_err(|err| {
-                let message = format!("read body failed: {err}");
-                let _ = event_tx.send(StreamChunk::Error(message.clone()));
-                LlmError::Network(message)
-            })?;
+            let text = match response.text().await {
+                Ok(text) => text,
+                Err(err) => {
+                    let message = format!("read body failed: {err}");
+                    let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                    return Err(LlmError::Network(message));
+                }
+            };
             let message = crate::http::HttpPostError::http(status.as_u16(), text).to_string();
-            let _ = event_tx.send(StreamChunk::Error(message.clone()));
+            let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
             return Err(LlmError::Network(message));
         }
 
@@ -689,11 +695,14 @@ impl LlmBackend for CursorAgent {
         let mut metadata = StreamResponseMetadata::default();
 
         loop {
-            let chunk = response.chunk().await.map_err(|err| {
-                let message = format!("read chunk failed: {err}");
-                let _ = event_tx.send(StreamChunk::Error(message.clone()));
-                LlmError::Network(message)
-            })?;
+            let chunk = match response.chunk().await {
+                Ok(c) => c,
+                Err(err) => {
+                    let message = format!("read chunk failed: {err}");
+                    let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                    return Err(LlmError::Network(message));
+                }
+            };
             let Some(chunk) = chunk else {
                 break;
             };
@@ -702,13 +711,13 @@ impl LlmBackend for CursorAgent {
             while let Some(newline_idx) = pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = pending.drain(..=newline_idx).collect();
                 Self::capture_stream_metadata(&line, &mut metadata);
-                Self::push_stream_line(&line, &mut accumulator, &event_tx);
+                Self::push_stream_line(&line, &mut accumulator, &event_tx).await;
             }
         }
 
         if !pending.is_empty() {
             Self::capture_stream_metadata(&pending, &mut metadata);
-            Self::push_stream_line(&pending, &mut accumulator, &event_tx);
+            Self::push_stream_line(&pending, &mut accumulator, &event_tx).await;
         }
 
         let json = Self::stream_response_to_json(accumulator.finalize(), metadata)?;

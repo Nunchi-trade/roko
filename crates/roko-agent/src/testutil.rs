@@ -460,7 +460,7 @@ async fn run_llm_streaming(backend: ParityBackend) -> Result<(), String> {
     let messages = prompt_messages("streaming parity");
     let rendered_tools = empty_tools();
     let session = SessionState::default();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
 
     let response = match backend {
         ParityBackend::Codex | ParityBackend::OpenAi => {

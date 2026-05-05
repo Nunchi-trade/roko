@@ -301,16 +301,16 @@ impl OpenAiCompatLlmBackend {
         serde_json::to_vec(&body).map_err(|e| LlmError::Backend(format!("serialize: {e}")))
     }
 
-    fn push_stream_line(
+    async fn push_stream_line(
         line: &[u8],
         accumulator: &mut StreamAccumulator,
-        event_tx: &mpsc::UnboundedSender<StreamChunk>,
+        event_tx: &mpsc::Sender<StreamChunk>,
     ) {
         let line = String::from_utf8_lossy(line);
         let line = line.trim_end_matches(['\r', '\n']);
         if let Some(chunk) = parse_sse_line(line) {
             accumulator.push(chunk.clone());
-            let _ = event_tx.send(chunk);
+            let _ = event_tx.send(chunk).await;
         }
     }
 
@@ -424,7 +424,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         messages: &[serde_json::Value],
         tools: &RenderedTools,
         session: &SessionState,
-        event_tx: mpsc::UnboundedSender<StreamChunk>,
+        event_tx: mpsc::Sender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
         let body_bytes = self.build_body(messages, tools, session, true)?;
         self.rate_limiter.acquire(&self.provider_id).await;
@@ -436,21 +436,27 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             req = req.header(key.as_str(), value.as_str());
         }
 
-        let response = req.body(body_bytes).send().await.map_err(|e| {
-            let message = format!("request failed: {e}");
-            let _ = event_tx.send(StreamChunk::Error(message.clone()));
-            LlmError::Network(message)
-        })?;
+        let response = match req.body(body_bytes).send().await {
+            Ok(response) => response,
+            Err(e) => {
+                let message = format!("request failed: {e}");
+                let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                return Err(LlmError::Network(message));
+            }
+        };
 
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.map_err(|e| {
-                let message = format!("read body failed: {e}");
-                let _ = event_tx.send(StreamChunk::Error(message.clone()));
-                LlmError::Network(message)
-            })?;
+            let text = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    let message = format!("read body failed: {e}");
+                    let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                    return Err(LlmError::Network(message));
+                }
+            };
             let message = crate::http::HttpPostError::http(status.as_u16(), text).to_string();
-            let _ = event_tx.send(StreamChunk::Error(message.clone()));
+            let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
             return Err(LlmError::Network(message));
         }
 
@@ -468,9 +474,9 @@ impl LlmBackend for OpenAiCompatLlmBackend {
                 // received until the provider starts streaming content.
                 first_chunk = false;
                 if let Some(ttft_ms) = self.ttft_timeout_ms {
-                    tokio::time::timeout(Duration::from_millis(ttft_ms), chunk_fut)
-                        .await
-                        .map_err(|_| {
+                    match tokio::time::timeout(Duration::from_millis(ttft_ms), chunk_fut).await {
+                        Ok(inner) => inner,
+                        Err(_) => {
                             let message =
                                 format!("TTFT timeout: no streaming data within {ttft_ms}ms");
                             tracing::warn!(
@@ -478,20 +484,24 @@ impl LlmBackend for OpenAiCompatLlmBackend {
                                 ttft_timeout_ms = ttft_ms,
                                 "TTFT timeout — no first chunk within deadline"
                             );
-                            let _ = event_tx.send(StreamChunk::Error(message.clone()));
-                            LlmError::Network(message)
-                        })?
+                            let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                            return Err(LlmError::Network(message));
+                        }
+                    }
                 } else {
                     chunk_fut.await
                 }
             } else {
                 chunk_fut.await
-            }
-            .map_err(|e| {
-                let message = format!("read chunk failed: {e}");
-                let _ = event_tx.send(StreamChunk::Error(message.clone()));
-                LlmError::Network(message)
-            })?;
+            };
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    let message = format!("read chunk failed: {e}");
+                    let _ = event_tx.send(StreamChunk::Error(message.clone())).await;
+                    return Err(LlmError::Network(message));
+                }
+            };
             let Some(chunk) = chunk else {
                 break;
             };
@@ -500,13 +510,13 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             while let Some(newline_idx) = pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = pending.drain(..=newline_idx).collect();
                 Self::capture_stream_metadata(&line, &mut metadata);
-                Self::push_stream_line(&line, &mut accumulator, &event_tx);
+                Self::push_stream_line(&line, &mut accumulator, &event_tx).await;
             }
         }
 
         if !pending.is_empty() {
             Self::capture_stream_metadata(&pending, &mut metadata);
-            Self::push_stream_line(&pending, &mut accumulator, &event_tx);
+            Self::push_stream_line(&pending, &mut accumulator, &event_tx).await;
         }
 
         let json = Self::stream_response_to_json(accumulator.finalize(), metadata)?;
@@ -1228,7 +1238,7 @@ mod tests {
             .with_timeout_ms(5_000);
         let tool_loop = make_tool_loop(backend);
         let tools = test_tools();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
         let run = tokio::spawn(async move {
             let ctx = ToolContext::testing("/tmp");
             tool_loop
@@ -1384,7 +1394,7 @@ mod tests {
             .with_base_url(&format!("http://{addr}/v1/"))
             .with_ttft_timeout_ms(Some(100)); // 100ms TTFT — server delays 2s
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(roko_core::defaults::DEFAULT_CHANNEL_BUFFER);
         let started = Instant::now();
 
         let result = backend
