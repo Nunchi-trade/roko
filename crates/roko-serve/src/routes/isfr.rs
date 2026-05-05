@@ -104,10 +104,8 @@ async fn isfr_rate_history(
     let limit = q.limit.unwrap_or(50).min(256);
     // Most recent first: iterate in reverse, collect up to `limit` entries.
     let rates: Vec<_> = history.iter().rev().take(limit).collect();
-    Ok(Json(serde_json::json!({
-        "rates": rates,
-        "total": history.len()
-    })))
+    // Return the array directly so the frontend can call history.map(...).
+    Ok(Json(serde_json::to_value(&rates).unwrap_or(serde_json::Value::Array(vec![]))))
 }
 
 // ─── GET /api/isfr/sources ───────────────────────────────────────────────────
@@ -116,5 +114,6 @@ async fn isfr_sources(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let sources = state.isfr.sources.read().await;
-    Ok(Json(serde_json::json!({ "sources": *sources })))
+    // Return the array directly so the frontend can call sources.map(...).
+    Ok(Json(serde_json::to_value(&*sources).unwrap_or(serde_json::Value::Array(vec![]))))
 }
