@@ -72,7 +72,7 @@ export interface IsfrRate {
 
 export interface IsfrSource {
   id: string;
-  health: 'healthy' | 'degraded' | 'down';
+  health: 'live' | 'stale' | 'offline';
   lastRateBps: number | null;
 }
 
@@ -436,72 +436,99 @@ export const useDataHub = create<DataHub>()((set, get) => ({
   // -- ISFR fetch actions -----------------------------------------
 
   fetchIsfrStatus: async () => {
-    const res = await api.get<{ keeper_running: boolean; sources_count: number;
-      current_rate_bps: number | null }>('/api/isfr/status');
-    if (res.ok) {
-      set({
-        isfrKeeperStatus: res.data.keeper_running ? 'running' : 'stopped',
-      });
+    try {
+      const res = await api.get<{ keeper_running: boolean; sources_count: number;
+        current_rate_bps: number | null }>('/api/isfr/status');
+      if (res.ok) {
+        set({
+          isfrKeeperStatus: res.data.keeper_running ? 'running' : 'stopped',
+        });
+      }
+    } catch (err) {
+      console.warn('[DataHub] fetchIsfrStatus failed:', err);
     }
   },
 
   fetchIsfrCurrent: async () => {
-    const res = await api.get<{
-      composite_bps: number; lending_bps: number; structured_bps: number;
-      funding_bps: number; staking_bps: number; confidence_bps: number;
-      source_count: number; timestamp_ms: number;
-    }>('/api/isfr/current');
-    if (res.ok) {
-      set({
-        isfrCurrentRate: {
-          compositeBps: res.data.composite_bps,
-          lendingBps: res.data.lending_bps,
-          structuredBps: res.data.structured_bps,
-          fundingBps: res.data.funding_bps,
-          stakingBps: res.data.staking_bps,
-          confidenceBps: res.data.confidence_bps,
-          sourceCount: res.data.source_count,
-          timestampMs: res.data.timestamp_ms,
-        },
-      });
+    try {
+      const res = await api.get<{
+        composite_bps: number; lending_bps: number; structured_bps: number;
+        funding_bps: number; staking_bps: number; confidence_bps: number;
+        source_count: number; timestamp_ms: number;
+      }>('/api/isfr/current');
+      if (res.ok && 'composite_bps' in res.data) {
+        set({
+          isfrCurrentRate: {
+            compositeBps: res.data.composite_bps,
+            lendingBps: res.data.lending_bps,
+            structuredBps: res.data.structured_bps,
+            fundingBps: res.data.funding_bps,
+            stakingBps: res.data.staking_bps,
+            confidenceBps: res.data.confidence_bps,
+            sourceCount: res.data.source_count,
+            timestampMs: res.data.timestamp_ms,
+          },
+        });
+      }
+    } catch (err) {
+      console.warn('[DataHub] fetchIsfrCurrent failed:', err);
     }
   },
 
   fetchIsfrHistory: async (limit = 50) => {
-    const res = await api.get<Array<{
-      composite_bps: number; lending_bps: number; structured_bps: number;
-      funding_bps: number; staking_bps: number; confidence_bps: number;
-      source_count: number; timestamp_ms: number;
-    }>>(`/api/isfr/history?limit=${limit}`);
-    if (res.ok) {
-      set({
-        isfrHistory: res.data.map((r) => ({
-          compositeBps: r.composite_bps,
-          lendingBps: r.lending_bps,
-          structuredBps: r.structured_bps,
-          fundingBps: r.funding_bps,
-          stakingBps: r.staking_bps,
-          confidenceBps: r.confidence_bps,
-          sourceCount: r.source_count,
-          timestampMs: r.timestamp_ms,
-        })),
-      });
+    try {
+      const res = await api.get<
+        | Array<{
+            composite_bps: number; lending_bps: number; structured_bps: number;
+            funding_bps: number; staking_bps: number; confidence_bps: number;
+            source_count: number; timestamp_ms: number;
+          }>
+        | { rates: Array<{
+            composite_bps: number; lending_bps: number; structured_bps: number;
+            funding_bps: number; staking_bps: number; confidence_bps: number;
+            source_count: number; timestamp_ms: number;
+          }>; total: number }
+      >(`/api/isfr/history?limit=${limit}`);
+      if (res.ok) {
+        const data = res.data;
+        const arr = Array.isArray(data) ? data : (data?.rates ?? []);
+        set({
+          isfrHistory: arr.map((r) => ({
+            compositeBps: r.composite_bps,
+            lendingBps: r.lending_bps,
+            structuredBps: r.structured_bps,
+            fundingBps: r.funding_bps,
+            stakingBps: r.staking_bps,
+            confidenceBps: r.confidence_bps,
+            sourceCount: r.source_count,
+            timestampMs: r.timestamp_ms,
+          })),
+        });
+      }
+    } catch (err) {
+      console.warn('[DataHub] fetchIsfrHistory failed:', err);
     }
   },
 
   fetchIsfrSources: async () => {
-    const res = await api.get<Array<{
-      id: string; health: 'healthy' | 'degraded' | 'down';
-      last_rate_bps: number | null;
-    }>>('/api/isfr/sources');
-    if (res.ok) {
-      set({
-        isfrSources: res.data.map((s) => ({
-          id: s.id,
-          health: s.health,
-          lastRateBps: s.last_rate_bps,
-        })),
-      });
+    try {
+      const res = await api.get<
+        | Array<{ id: string; health: string; last_rate_bps: number | null }>
+        | { sources: Array<{ id: string; health: string; last_rate_bps: number | null }> }
+      >('/api/isfr/sources');
+      if (res.ok) {
+        const data = res.data;
+        const arr = Array.isArray(data) ? data : (data?.sources ?? []);
+        set({
+          isfrSources: arr.map((s) => ({
+            id: s.id,
+            health: s.health as IsfrSource['health'],
+            lastRateBps: s.last_rate_bps,
+          })),
+        });
+      }
+    } catch (err) {
+      console.warn('[DataHub] fetchIsfrSources failed:', err);
     }
   },
 }));

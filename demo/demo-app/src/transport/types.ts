@@ -156,7 +156,7 @@ export type ServerEvent =
        structuredBps: number; fundingBps: number; stakingBps: number;
        confidenceBps: number; sourceCount: number; timestampMs: number }
   | { type: 'isfr_source_health_changed'; sourceId: string;
-       health: 'healthy' | 'degraded' | 'down'; lastRateBps: number | null }
+       health: 'live' | 'stale' | 'offline'; lastRateBps: number | null }
   | { type: 'isfr_keeper_state_changed'; running: boolean }
   // System
   | { type: 'server_shutdown' }

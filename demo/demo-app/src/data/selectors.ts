@@ -193,8 +193,8 @@ export const useIsfrCompositePercent = () =>
     s.isfrCurrentRate ? s.isfrCurrentRate.compositeBps / 100 : null,
   );
 
-/** Derived: number of healthy sources. */
+/** Derived: number of live (healthy) sources. */
 export const useIsfrHealthySourceCount = () =>
   useDataHub(
-    (s) => s.isfrSources.filter((src) => src.health === 'healthy').length,
+    (s) => s.isfrSources.filter((src) => src.health === 'live').length,
   );
