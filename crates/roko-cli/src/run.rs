@@ -129,18 +129,6 @@ struct DispatchOutcome {
     model_selection: Option<EffectiveModelSelection>,
 }
 
-/// Reject `--share` for engines that do not support it.
-pub fn ensure_share_supported(is_legacy_engine: bool, share: bool) -> Result<()> {
-    if share && !is_legacy_engine {
-        return Err(anyhow!(
-            "--share is not yet supported with the v2 engine. \
-             Use --engine legacy for share functionality, or omit --share."
-        ));
-    }
-
-    Ok(())
-}
-
 /// Write a RunReport to `.roko/shared/{token}.json` and return the token.
 #[cfg(feature = "legacy-orchestrate")]
 pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow::Result<String> {
@@ -502,7 +490,7 @@ pub fn workflow_shell_gate_commands(gates: &[GateConfig]) -> Vec<CoreShellGateCo
 /// - EffectDriver for side-effect execution
 /// - RuntimeEvent bus for observability
 ///
-/// Enable via config or `--engine v2` flag (to be wired).
+/// Used by the default `roko run` execution path.
 pub async fn run_with_workflow_engine(
     prompt: &str,
     workdir: &std::path::Path,
@@ -1095,8 +1083,6 @@ pub async fn run_once(
     strategy: Option<BenchStrategy>,
     external_hub: Option<&StateHub>,
 ) -> Result<RunReport> {
-    // Future `--engine v2` dispatch should call `run_with_workflow_engine`
-    // before entering this existing orchestration path.
     let substrate_dir = workdir.join(".roko");
     let substrate = FileSubstrate::open(substrate_dir)
         .await
@@ -3296,18 +3282,6 @@ mod tests {
                     && role == "implementer"
                     && model == "share-mock-model"
         )));
-    }
-
-    #[test]
-    fn share_requires_legacy_engine() {
-        assert!(ensure_share_supported(true, true).is_ok());
-        assert!(ensure_share_supported(true, false).is_ok());
-
-        let err = ensure_share_supported(false, true).expect_err("v2 share should error");
-        assert!(
-            err.to_string()
-                .contains("--share is not yet supported with the v2 engine")
-        );
     }
 
     #[cfg(feature = "legacy-orchestrate")]

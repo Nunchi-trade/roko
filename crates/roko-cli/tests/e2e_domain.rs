@@ -167,8 +167,6 @@ fn run_with_research_domain_uses_shell_gate() {
         workdir,
         &[
             "run",
-            "--engine",
-            "legacy",
             "summarize the codebase",
             "--workdir",
             &workdir.display().to_string(),

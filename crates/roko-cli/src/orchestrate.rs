@@ -2629,6 +2629,7 @@ impl EfficiencyCache {
 ///
 /// Connects the CLI to the orchestrator, agents, and gates. Maintains
 /// an event log for crash recovery and periodically auto-saves state.
+#[deprecated(note = "Use event_loop.rs v2")]
 pub struct PlanRunner {
     /// Working directory (repo root).
     workdir: PathBuf,
