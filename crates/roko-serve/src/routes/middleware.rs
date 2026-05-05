@@ -365,6 +365,11 @@ fn required_scope_for(method: &Method, path: &str) -> &'static str {
     {
         return "admin";
     }
+    // Event ingest accepts runtime events from subprocesses and agent-like
+    // integrations, so read-only API keys must not be enough.
+    if path.starts_with("/api/events/ingest") {
+        return "agent:write";
+    }
     // Agent write routes.
     if path.starts_with("/api/agents") {
         return "agent:write";
