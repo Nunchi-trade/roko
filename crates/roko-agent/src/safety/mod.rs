@@ -259,6 +259,52 @@ impl SafetyLayer {
         }
     }
 
+    /// A [`SafetyLayer`] that passes all checks. For test use only.
+    ///
+    /// Do NOT use in production code. Every production dispatcher should be
+    /// constructed with [`SafetyLayer::with_defaults()`] or an explicit policy.
+    #[cfg(test)]
+    #[must_use]
+    pub fn permissive() -> Self {
+        Self {
+            bash_policy: BashPolicy {
+                deny_patterns: Vec::new(),
+                allow_prefixes: Vec::new(),
+                max_command_len: usize::MAX,
+                allowed_path_prefixes: Vec::new(),
+            },
+            git_policy: GitPolicy {
+                protected_branches: Vec::new(),
+                allow_force_push_on: Vec::new(),
+                block_force_push: false,
+                block_hard_reset_on_protected: false,
+                block_branch_delete_protected: false,
+            },
+            network_policy: NetworkPolicy {
+                allow_schemes: Vec::new(),
+                allow_hosts: Vec::new(),
+                deny_hosts: Vec::new(),
+                block_private_networks: false,
+            },
+            path_policy: PathPolicy {
+                deny_symlinks: false,
+                prevent_escapes: false,
+            },
+            scrub_policy: ScrubPolicy {
+                extra_patterns: Vec::new(),
+                disable_defaults: true,
+            },
+            rate_limiter: None,
+            safety_budget: None,
+            role: "test".to_string(),
+            contract: AgentContract::permissive("test"),
+            warrant: None,
+            role_tools: HashMap::new(),
+            role_overrides: HashMap::new(),
+            temporal_monitor: None,
+        }
+    }
+
     /// Construct with default policies and role-local tool whitelists from config.
     #[must_use]
     pub fn from_config(config: &RokoConfig) -> Self {

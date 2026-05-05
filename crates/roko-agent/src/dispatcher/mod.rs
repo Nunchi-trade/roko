@@ -117,6 +117,29 @@ impl ToolDispatcher {
         }
     }
 
+    /// Construct a dispatcher that skips safety enforcement (test-only).
+    ///
+    /// Use this in unit tests that need to call handlers directly without
+    /// interference from the default `BashPolicy` or network allowlist.
+    /// Production code must use [`ToolDispatcher::new`], which initializes
+    /// with [`SafetyLayer::with_defaults()`].
+    #[cfg(test)]
+    #[must_use]
+    pub fn new_unguarded(
+        registry: Arc<dyn ToolRegistry>,
+        resolver: Arc<dyn HandlerResolver>,
+    ) -> Self {
+        Self {
+            registry,
+            resolver,
+            max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
+            safety: SafetyLayer::permissive(),
+            tool_cache: None,
+            hook_chain: None,
+            tool_selector: None,
+        }
+    }
+
     /// Override the default result-byte cap.
     #[must_use]
     pub const fn with_max_result_bytes(mut self, n: usize) -> Self {
@@ -207,6 +230,40 @@ impl ToolDispatcher {
     pub async fn dispatch(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
         let timeout = ctx.timeout;
         let timeout_ms = duration_to_ms(timeout);
+
+        // 0. Detect translator-salvaged truncated args (translate/openai.rs).
+        //    When the model hits its output token limit mid-JSON, the translator
+        //    wraps the unparseable fragment as {"__truncated": true, "raw": "..."}.
+        //    Return a clear error so the model can retry with a smaller payload.
+        if call.arguments.get("__truncated").and_then(|v| v.as_bool()) == Some(true) {
+            let raw_fragment = call
+                .arguments
+                .get("raw")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<empty>");
+            let err = ToolError::Other(format!(
+                "tool `{}` received truncated arguments ({} chars) — the model hit its output \
+                 token limit mid-call. Retry with a smaller payload or split into multiple calls. \
+                 Truncated fragment: {:.120}",
+                call.name,
+                raw_fragment.len(),
+                raw_fragment,
+            ));
+            tracing::warn!(
+                tool = %call.name,
+                raw_len = raw_fragment.len(),
+                "truncated tool-call arguments detected at dispatcher"
+            );
+            Self::emit_audit(
+                ctx,
+                &call,
+                "args",
+                "truncated",
+                &json!({ "raw_len": raw_fragment.len(), "tool": call.name }),
+            );
+            Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+            return ToolResult::err(err);
+        }
 
         // 1. Validate args.
         if let Err(e) = validate(&call, self.registry.as_ref()) {
@@ -327,7 +384,7 @@ impl ToolDispatcher {
                 "granted": format!("{:?}", role_perms),
             }),
         );
-        // 3b. Safety checks — if a SafetyLayer is attached, run all
+        // 3b. Safety checks — the SafetyLayer is always present; run all
         //     pre-execution policies (including contract invariants).
         //     First failure short-circuits.
         //
@@ -801,7 +858,7 @@ mod tests {
             ToolConcurrency::Parallel,
         )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let call = ToolCall::new("c", "no_such_tool", serde_json::json!({}));
         let res = d.dispatch(call, &ToolContext::testing("/tmp")).await;
         match res {
@@ -819,7 +876,7 @@ mod tests {
         )]);
         let registry: Arc<dyn ToolRegistry> = Arc::new(RejectingRegistry { inner });
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let call = ToolCall::new("c", "echo", serde_json::json!({}));
         let res = d.dispatch(call, &ToolContext::testing("/tmp")).await;
         match res {
@@ -839,7 +896,7 @@ mod tests {
             ToolConcurrency::Parallel,
         )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let call = ToolCall::new("c", "echo", serde_json::json!({}));
 
         let read_only_perms = ToolPermission::read_only();
@@ -869,7 +926,7 @@ mod tests {
             ToolConcurrency::Parallel,
         )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let ctx = ToolContext::testing("/tmp")
             .with_allowed_tools(Some(vec!["read_file".into(), "grep".into()]));
         let res = d
@@ -895,7 +952,7 @@ mod tests {
             ToolConcurrency::Parallel,
         )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let ctx = ToolContext::testing("/tmp")
             .with_allowed_tools(Some(vec!["echo".into(), "grep".into()]))
             .with_denied_tools(Some(vec!["echo".into()]));
@@ -925,7 +982,7 @@ mod tests {
             "sleep",
             Arc::new(SleepHandler { ms: 500 }) as Arc<dyn ToolHandler>,
         )]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let call = ToolCall::new("c", "sleep", serde_json::json!({}));
         let ctx = ToolContext::new(
             "/tmp",
@@ -959,7 +1016,7 @@ mod tests {
             "sleep",
             Arc::new(SleepHandler { ms: 2_000 }) as Arc<dyn ToolHandler>,
         )]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let cancel = Arc::new(AtomicCancel::new());
         let ctx = ToolContext::new(
             "/tmp",
@@ -992,7 +1049,7 @@ mod tests {
             ToolConcurrency::Parallel,
         )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let call = ToolCall::new("c", "echo", serde_json::json!({"x": 1}));
         let res = d.dispatch(call, &ToolContext::testing("/tmp")).await;
         match res {
@@ -1009,7 +1066,7 @@ mod tests {
             ToolConcurrency::Parallel,
         )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let audit_sink = Arc::new(CollectAuditSink::default());
         let ctx = ToolContext::testing("/tmp").with_audit_sink(audit_sink.clone());
 
@@ -1041,7 +1098,7 @@ mod tests {
             ToolConcurrency::Parallel,
         )]));
         let resolver = resolver_from([("echo", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let audit_sink = Arc::new(CollectAuditSink::default());
         let ctx = ToolContext::new(
             "/tmp",
@@ -1085,7 +1142,7 @@ mod tests {
                 payload_bytes: 5_000,
             }) as Arc<dyn ToolHandler>,
         )]);
-        let d = ToolDispatcher::new(registry, resolver).with_max_result_bytes(1_024);
+        let d = ToolDispatcher::new_unguarded(registry, resolver).with_max_result_bytes(1_024);
         let call = ToolCall::new("c", "huge", serde_json::json!({}));
         let res = d.dispatch(call, &ToolContext::testing("/tmp")).await;
         match res {
@@ -1120,7 +1177,7 @@ mod tests {
             ToolConcurrency::Parallel,
         )]));
         let resolver = resolver_from([("mb", Arc::new(MultibyteHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver).with_max_result_bytes(100);
+        let d = ToolDispatcher::new_unguarded(registry, resolver).with_max_result_bytes(100);
         let call = ToolCall::new("c", "mb", serde_json::json!({}));
         let res = d.dispatch(call, &ToolContext::testing("/tmp")).await;
         match res {
@@ -1145,7 +1202,7 @@ mod tests {
             "sleep",
             Arc::new(SleepHandler { ms: 100 }) as Arc<dyn ToolHandler>,
         )]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let ctx = ToolContext::testing("/tmp");
         let calls = vec![
             ToolCall::new("a", "sleep", serde_json::json!({})),
@@ -1196,7 +1253,7 @@ mod tests {
             ToolConcurrency::Serial,
         )]));
         let resolver = resolver_from([("ser", Arc::new(SerialHandler) as Arc<dyn ToolHandler>)]);
-        let d = ToolDispatcher::new(registry, resolver);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
         let ctx = ToolContext::testing("/tmp");
         let calls = vec![
             ToolCall::new("a", "ser", serde_json::json!({})),
@@ -1223,5 +1280,45 @@ mod tests {
             })
             .collect();
         assert_eq!(observations, vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn truncated_args_detected_before_validation() {
+        // The registry would reject `{"__truncated": true, "raw": "..."}` on
+        // schema validation, but truncation detection fires first and returns
+        // a clear error naming the tool, the cause, and the fragment length.
+        let inner = VecToolRegistry::from_tools(vec![tool(
+            "read_file",
+            ToolPermission::read_only(),
+            ToolConcurrency::Parallel,
+        )]);
+        let registry: Arc<dyn ToolRegistry> = Arc::new(RejectingRegistry { inner });
+        let resolver = resolver_from([("read_file", Arc::new(EchoHandler) as Arc<dyn ToolHandler>)]);
+        let d = ToolDispatcher::new_unguarded(registry, resolver);
+
+        let raw_fragment = "{ \"path\": \"/some/very/long/path/that/got/cut/off/by/token/lim";
+        let call = ToolCall::new(
+            "c",
+            "read_file",
+            serde_json::json!({ "__truncated": true, "raw": raw_fragment }),
+        );
+        let res = d.dispatch(call, &ToolContext::testing("/tmp")).await;
+        match res {
+            ToolResult::Err(ToolError::Other(msg)) => {
+                assert!(
+                    msg.contains("read_file"),
+                    "error should name the tool: {msg}"
+                );
+                assert!(
+                    msg.contains("truncated"),
+                    "error should mention truncation: {msg}"
+                );
+                assert!(
+                    msg.contains(&raw_fragment.len().to_string()),
+                    "error should include the raw fragment length: {msg}"
+                );
+            }
+            other => panic!("expected Other error for truncated args, got {other:?}"),
+        }
     }
 }

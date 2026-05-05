@@ -70,6 +70,11 @@ pub struct BashPolicy {
     pub allow_prefixes: Vec<String>,
     /// Maximum allowed command length in **characters** (not bytes).
     pub max_command_len: usize,
+    /// Restrict absolute paths referenced in commands to these prefix
+    /// directories. Empty by default (no confinement). When non-empty,
+    /// any command token that looks like an absolute path and falls outside
+    /// all listed prefixes is rejected.
+    pub allowed_path_prefixes: Vec<String>,
 }
 
 impl BashPolicy {
@@ -118,6 +123,7 @@ impl BashPolicy {
             deny_patterns,
             allow_prefixes: Vec::new(),
             max_command_len: 8192,
+            allowed_path_prefixes: Vec::new(),
         }
     }
 }
@@ -129,6 +135,31 @@ impl Default for BashPolicy {
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────
+
+/// Check that all absolute-path tokens in `command` start with one of
+/// the allowed prefixes. Only tokens that look like plain paths (start
+/// with `/`, contain no shell metacharacters `$`, `` ` ``, `|`, `;`,
+/// `&`, `(`, `)`) are inspected. Shell syntax parsing is intentionally
+/// NOT attempted — the denylist covers the worst cases; this is an
+/// additional depth-of-defense layer.
+pub fn check_path_confinement(command: &str, prefixes: &[String]) -> Result<(), ToolError> {
+    if prefixes.is_empty() {
+        return Ok(());
+    }
+    let metachar = |c: char| matches!(c, '$' | '`' | '|' | ';' | '&' | '(' | ')');
+    for token in command.split_ascii_whitespace() {
+        if token.starts_with('/') && !token.contains(metachar) {
+            // Strip trailing punctuation that isn't part of the path
+            let path = token.trim_end_matches(|c: char| matches!(c, ':' | ',' | ')' | ']'));
+            if !prefixes.iter().any(|p| path.starts_with(p.as_str())) {
+                return Err(ToolError::CommandNotAllowed(format!(
+                    "absolute path `{path}` is outside the allowed prefixes"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Check `command` against `policy`.
 ///
@@ -170,6 +201,8 @@ pub fn check_command_with_policy(command: &str, policy: &BashPolicy) -> Result<(
             )));
         }
     }
+    // Path confinement check (only fires when allowed_path_prefixes is set).
+    check_path_confinement(command, &policy.allowed_path_prefixes)?;
     Ok(())
 }
 
@@ -286,6 +319,7 @@ mod tests {
             deny_patterns: Vec::new(),
             allow_prefixes: Vec::new(),
             max_command_len: 10,
+            allowed_path_prefixes: Vec::new(),
         };
         let res = check_command_with_policy("echo hello world", &policy);
         assert!(matches!(res, Err(ToolError::CommandNotAllowed(_))));
@@ -300,6 +334,7 @@ mod tests {
             deny_patterns: Vec::new(),
             allow_prefixes: Vec::new(),
             max_command_len: 16,
+            allowed_path_prefixes: Vec::new(),
         };
         assert!(check_command_with_policy("echo hello world", &policy).is_ok());
     }
@@ -310,6 +345,7 @@ mod tests {
             deny_patterns: vec![DenyPattern::Substring("sudo ".to_string())],
             allow_prefixes: vec!["sudo systemctl restart roko-approved".to_string()],
             max_command_len: 8192,
+            allowed_path_prefixes: Vec::new(),
         };
         assert!(check_command_with_policy("sudo systemctl restart roko-approved", &policy).is_ok());
         // A different sudo invocation still gets blocked.
@@ -388,10 +424,63 @@ mod tests {
             deny_patterns: Vec::new(),
             allow_prefixes: Vec::new(),
             max_command_len: 3,
+            allowed_path_prefixes: Vec::new(),
         };
         // 3 multi-byte chars, but only 3 chars — should be allowed.
         assert!(check_command_with_policy("αβγ", &policy).is_ok());
         // 4 chars — should be rejected.
         assert!(check_command_with_policy("αβγδ", &policy).is_err());
+    }
+
+    // ─── Path confinement tests ─────────────────────────────────────────
+
+    #[test]
+    fn empty_allowed_path_prefixes_allows_any_path() {
+        // When allowed_path_prefixes is empty, all paths pass (no confinement).
+        assert!(check_path_confinement("cat /tmp/file", &[]).is_ok());
+        assert!(check_path_confinement("cat /etc/passwd", &[]).is_ok());
+    }
+
+    #[test]
+    fn allowed_path_prefix_permits_command_under_prefix() {
+        let prefixes = vec!["/home/user/project".to_string()];
+        assert!(
+            check_path_confinement("cat /home/user/project/src/main.rs", &prefixes).is_ok()
+        );
+    }
+
+    #[test]
+    fn path_outside_allowed_prefixes_is_rejected() {
+        let prefixes = vec!["/home/user/project".to_string()];
+        let res = check_path_confinement("cat /etc/passwd", &prefixes);
+        assert!(matches!(res, Err(ToolError::CommandNotAllowed(ref msg)) if msg.contains("/etc/passwd")));
+    }
+
+    #[test]
+    fn tokens_with_shell_metacharacters_not_parsed_as_paths() {
+        // Tokens containing metacharacters are skipped — they are shell
+        // syntax, not plain paths.
+        let prefixes = vec!["/home/user".to_string()];
+        // `$(cat /etc/shadow)` — contains `$`, should not be parsed as path.
+        assert!(check_path_confinement("echo $(cat /etc/shadow)", &prefixes).is_ok());
+        // `/dev/null;rm` — contains `;`, should not be parsed as path.
+        assert!(check_path_confinement("echo /dev/null;rm", &prefixes).is_ok());
+        // `|/bin/sh` — contains `|`, should not be parsed as path.
+        assert!(check_path_confinement("echo |/bin/sh", &prefixes).is_ok());
+    }
+
+    #[test]
+    fn path_confinement_wired_into_check_command_with_policy() {
+        let policy = BashPolicy {
+            deny_patterns: Vec::new(),
+            allow_prefixes: Vec::new(),
+            max_command_len: 8192,
+            allowed_path_prefixes: vec!["/home/user/project".to_string()],
+        };
+        // Allowed path passes.
+        assert!(check_command_with_policy("ls /home/user/project/src", &policy).is_ok());
+        // Disallowed path fails.
+        let res = check_command_with_policy("cat /etc/passwd", &policy);
+        assert!(matches!(res, Err(ToolError::CommandNotAllowed(_))));
     }
 }
