@@ -1659,13 +1659,7 @@ impl CascadeRouter {
                 "failed to serialize cascade snapshot",
             ));
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        roko_core::io::atomic_write_str(path, &json)
     }
 
     fn from_snapshot(snapshot: CascadeSnapshot, model_slugs: Vec<String>) -> Self {

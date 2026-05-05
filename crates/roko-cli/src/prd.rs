@@ -351,7 +351,7 @@ async fn regenerate_old_format_plan(
 
     let merged = preserve_completed_task_status(existing_tasks.as_ref(), regenerated, plan_dir);
     let rendered = toml::to_string_pretty(&merged).context("serialize regenerated tasks.toml")?;
-    if let Err(err) = std::fs::write(&tasks_path, rendered) {
+    if let Err(err) = atomic_write_str(&tasks_path, &rendered) {
         std::fs::write(&tasks_path, &existing)
             .with_context(|| format!("restore {}", tasks_path.display()))?;
         return Err(err.into());
