@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/provider-race.ts ---
-import type { ClickableScenario, CommandDef, CommandTarget, ScenarioContext } from '../scenarios';
-import { showCmd, roko, trackMetrics } from '../terminal-session';
+import type { ClickableScenario, CommandDef, CommandTarget, ScenarioContext } from '../../scenarios';
+import { showCmd, roko, trackMetrics } from '../../terminal-session';
 
 export const PROVIDER_RACE_COMMANDS: CommandDef[] = [
   {

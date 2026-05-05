@@ -1,7 +1,7 @@
 // --- src/lib/scenario-runners/gate-retry.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { stripAnsi } from '../scenario-helpers';
-import { showCmd, roko, trackMetrics } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { stripAnsi } from '../../scenario-helpers';
+import { showCmd, roko, trackMetrics } from '../../terminal-session';
 
 // ── Module-level state for tracking run outcome ───────────────
 

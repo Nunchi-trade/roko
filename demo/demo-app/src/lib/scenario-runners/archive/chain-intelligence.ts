@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/chain-intelligence.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { showCmd, roko } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { showCmd, roko } from '../../terminal-session';
 
 // ── Static command definitions ────────────────────────────────
 

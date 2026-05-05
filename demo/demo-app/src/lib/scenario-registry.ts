@@ -1,5 +1,5 @@
 // --- src/lib/scenario-registry.ts ---
-// Pure config metadata for each scenario. No orchestration code.
+// Pure config metadata for each active scenario. No orchestration code.
 
 export type ScenarioComplexity = 'simple' | 'medium' | 'complex';
 
@@ -10,126 +10,54 @@ export interface ScenarioMeta {
   complexity: ScenarioComplexity;
   phases: string[];      // phase names for PhaseRail
   estimatedDuration: number; // seconds at 1x speed
-  tags: string[];        // for filtering/grouping: 'prd', 'bench', 'model', 'knowledge', 'chain'
+  tags: string[];        // for filtering/grouping
 }
 
 export const SCENARIO_REGISTRY: ScenarioMeta[] = [
   {
-    id: 'prd-pipeline',
-    label: 'PRD Pipeline',
-    description: 'Full idea-to-code workflow: draft PRD, research, generate plan, execute tasks, validate with gates.',
+    id: 'cost',
+    label: 'Cost',
+    description: 'Same task, same model class. Cascade routing is the variable.',
+    complexity: 'medium',
+    phases: ['Baseline', 'Cascade', 'Compare'],
+    estimatedDuration: 120,
+    tags: ['cost', 'model', 'comparison'],
+  },
+  {
+    id: 'pipeline',
+    label: 'Pipeline',
+    description: 'One command takes an idea to working, validated code.',
+    complexity: 'medium',
+    phases: ['Classify', 'Plan', 'Execute', 'Gate', 'Done'],
+    estimatedDuration: 120,
+    tags: ['pipeline'],
+  },
+  {
+    id: 'memory',
+    label: 'Memory',
+    description: 'Second run inherits useful knowledge from the first run.',
+    complexity: 'medium',
+    phases: ['Cold', 'Ingest', 'Warm', 'Delta'],
+    estimatedDuration: 120,
+    tags: ['knowledge', 'learning'],
+  },
+  {
+    id: 'isfr',
+    label: 'ISFR',
+    description: 'Four specialized agents compute a DeFi risk-free rate.',
     complexity: 'complex',
-    phases: ['Idea', 'Draft', 'Research', 'Plan', 'Execute', 'Gate', 'Done'],
-    estimatedDuration: 45,
-    tags: ['prd'],
+    phases: ['Scout', 'Aggregate', 'Validate', 'Publish'],
+    estimatedDuration: 120,
+    tags: ['chain', 'defi', 'agents'],
   },
   {
-    id: 'prd-research-loop',
-    label: 'Research Loop',
-    description: 'Research-enhanced PRD generation with Perplexity-powered context enrichment.',
-    complexity: 'medium',
-    phases: ['Draft', 'Research', 'Enhance', 'Done'],
-    estimatedDuration: 30,
-    tags: ['prd'],
-  },
-  {
-    id: 'race',
-    label: 'Model Race',
-    description: 'Side-by-side model comparison on identical prompts with cost and quality tracking.',
-    complexity: 'medium',
-    phases: ['Configure', 'Race', 'Score', 'Done'],
-    estimatedDuration: 25,
-    tags: ['model', 'bench'],
-  },
-  {
-    id: 'gate-retry',
-    label: 'Gate Retry',
-    description: 'Demonstrates gate failure detection and automatic replan-retry loop.',
-    complexity: 'medium',
-    phases: ['Execute', 'Gate Fail', 'Replan', 'Retry', 'Pass'],
-    estimatedDuration: 30,
-    tags: ['prd'],
-  },
-  {
-    id: 'providers',
-    label: 'Provider Health',
-    description: 'Iterates all configured providers and checks health, latency, and model availability.',
-    complexity: 'simple',
-    phases: ['Scan', 'Test', 'Report'],
-    estimatedDuration: 15,
-    tags: ['model'],
-  },
-  {
-    id: 'provider-race',
-    label: 'Provider Race',
-    description: 'Concurrent provider benchmark: same prompt to multiple backends, first-to-finish wins.',
-    complexity: 'medium',
-    phases: ['Configure', 'Race', 'Compare', 'Done'],
-    estimatedDuration: 20,
-    tags: ['model', 'bench'],
-  },
-  {
-    id: 'explore',
-    label: 'Code Explorer',
-    description: 'Code intelligence walkthrough: index build, semantic search, dependency graph.',
-    complexity: 'simple',
-    phases: ['Index', 'Search', 'Graph', 'Done'],
-    estimatedDuration: 20,
-    tags: ['knowledge'],
-  },
-  {
-    id: 'knowledge-accumulation',
-    label: 'Knowledge Accumulation',
-    description: 'Shows neuro store ingestion, distillation, tier progression, and query.',
-    complexity: 'medium',
-    phases: ['Ingest', 'Distill', 'Promote', 'Query', 'Done'],
-    estimatedDuration: 25,
-    tags: ['knowledge'],
-  },
-  {
-    id: 'dream-consolidation',
-    label: 'Dream Consolidation',
-    description: 'Offline dream cycle: hypnagogia, imagination, consolidation, journal entry.',
+    id: 'oracle',
+    label: 'Oracle',
+    description: 'On-chain data becomes reusable agent knowledge and a strategy recommendation.',
     complexity: 'complex',
-    phases: ['Hypnagogia', 'Imagine', 'Consolidate', 'Journal', 'Done'],
-    estimatedDuration: 35,
-    tags: ['knowledge'],
-  },
-  {
-    id: 'chat',
-    label: 'Agent Chat',
-    description: 'Interactive chat session with streaming response and tool calls.',
-    complexity: 'simple',
-    phases: ['Connect', 'Chat', 'Done'],
-    estimatedDuration: 15,
-    tags: ['model'],
-  },
-  {
-    id: 'knowledge-transfer',
-    label: 'Knowledge Transfer',
-    description: 'Mesh knowledge sync between agents with custody verification.',
-    complexity: 'complex',
-    phases: ['Source', 'Transfer', 'Verify', 'Done'],
-    estimatedDuration: 30,
-    tags: ['knowledge', 'chain'],
-  },
-  {
-    id: 'chain-intelligence',
-    label: 'Chain Intelligence',
-    description: 'Chain witness anchoring with HDC fingerprints and custody audit.',
-    complexity: 'complex',
-    phases: ['Fingerprint', 'Anchor', 'Verify', 'Done'],
-    estimatedDuration: 35,
-    tags: ['chain'],
-  },
-  {
-    id: 'mirage',
-    label: 'Mirage Deploy',
-    description: 'Deploy pipeline: build, test, containerize, deploy to Mirage endpoint.',
-    complexity: 'medium',
-    phases: ['Build', 'Test', 'Container', 'Deploy', 'Done'],
-    estimatedDuration: 30,
-    tags: ['chain'],
+    phases: ['Connect', 'Scan', 'Write', 'Recommend'],
+    estimatedDuration: 120,
+    tags: ['chain', 'defi', 'knowledge'],
   },
 ];
 

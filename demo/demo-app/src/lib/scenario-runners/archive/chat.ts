@@ -1,7 +1,7 @@
 // --- src/lib/scenario-runners/chat.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { rawSleep, stripAnsi } from '../scenario-helpers';
-import { getRoko } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { rawSleep, stripAnsi } from '../../scenario-helpers';
+import { getRoko } from '../../terminal-session';
 
 export const CHAT_COMMANDS: CommandDef[] = [
   { id: 'start', command: 'roko', timeout: 30000, description: 'Start chat TUI' },

@@ -115,6 +115,16 @@ function ChainBlocks() {
 /** Scenario-specific visual diagram. */
 function ScenarioDiagram({ scenarioId }: { scenarioId: string }) {
   switch (scenarioId) {
+    case 'cost':
+      return <RaceLanes left="Naive" right="Cascade" />;
+    case 'pipeline':
+      return <FlowDiagram />;
+    case 'memory':
+      return <TransferDiagram left="Cold run" right="Warm run" />;
+    case 'isfr':
+      return <CategoryGrid items={['Lending', 'Staking', 'Aggregator', 'Validator']} />;
+    case 'oracle':
+      return <ChainBlocks />;
     case 'prd-research-loop':
       return <FlowDiagram />;
     case 'race':
@@ -147,6 +157,11 @@ function ScenarioDiagram({ scenarioId }: { scenarioId: string }) {
 /** What this scenario demonstrates. */
 function scenarioFeature(scenarioId: string): string {
   switch (scenarioId) {
+    case 'cost': return 'Cost delta';
+    case 'pipeline': return 'Idea to code';
+    case 'memory': return 'Compounding intelligence';
+    case 'isfr': return 'Agent swarm';
+    case 'oracle': return 'DeFi oracle';
     case 'prd-research-loop': return 'Full self-hosting loop';
     case 'race': return 'Cost comparison';
     case 'gate-retry': return 'Gate failure recovery';

@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/knowledge-accumulation.ts ---
-import type { ClickableScenario, CommandDef, ScenarioContext } from '../scenarios';
-import { showCmd, roko } from '../terminal-session';
+import type { ClickableScenario, CommandDef, ScenarioContext } from '../../scenarios';
+import { showCmd, roko } from '../../terminal-session';
 
 // ── Static command definitions (display layer, no ctx needed) ─
 

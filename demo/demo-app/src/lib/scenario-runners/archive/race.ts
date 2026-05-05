@@ -1,6 +1,6 @@
 // --- src/lib/scenario-runners/race.ts ---
-import type { ClickableScenario, CommandDef, CommandTarget, ScenarioContext } from '../scenarios';
-import { showCmd, roko, trackMetrics } from '../terminal-session';
+import type { ClickableScenario, CommandDef, CommandTarget, ScenarioContext } from '../../scenarios';
+import { showCmd, roko, trackMetrics } from '../../terminal-session';
 
 export const RACE_COMMANDS: CommandDef[] = [
   { id: 'naive',   command: 'roko run "Build a CLI calculator in Rust" --no-replan', description: 'Run naive (no replan)',      timeout: 180000, target: { pane: 0 } },
