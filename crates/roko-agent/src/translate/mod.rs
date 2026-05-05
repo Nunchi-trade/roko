@@ -229,23 +229,6 @@ impl BackendResponse {
         }
     }
 
-    /// Extract the raw finish reason string from this response.
-    ///
-    /// Returns `None` when the finish reason is missing or cannot be read.
-    /// Used by the tool loop to detect token-budget exhaustion (`"length"`).
-    #[must_use]
-    pub fn extract_finish_reason_raw(&self) -> Option<String> {
-        match self {
-            Self::Json(v) => v
-                .pointer("/choices/0/finish_reason")
-                .and_then(|x| x.as_str())
-                .or_else(|| v.pointer("/finish_reason").and_then(|x| x.as_str()))
-                .map(String::from),
-            Self::Text(_) => None,
-            Self::StreamJson(_) => None,
-        }
-    }
-
     /// Extract tool execution outputs from stream-json events.
     ///
     /// Returns a list of `(tool_name, content)` pairs. Only meaningful for
@@ -322,11 +305,150 @@ impl BackendResponse {
     }
 
     /// Extract token usage metadata when the backend reports it.
+    ///
+    /// For `StreamJson` (Claude CLI), prefers the final `result` event's
+    /// cumulative usage; falls back to the last `assistant` event's usage
+    /// for partial/interrupted streams.
     #[must_use]
     pub fn extract_usage(&self) -> Usage {
         match self {
             Self::Json(v) => openai::parse_usage(v),
-            Self::StreamJson(_) | Self::Text(_) => Usage::default(),
+            Self::StreamJson(events) => {
+                // Prefer the final `result` event — it carries cumulative session usage.
+                for ev in events.iter().rev() {
+                    if ev.get("type").and_then(|t| t.as_str()) == Some("result") {
+                        if let Some(usage) = ev.get("usage") {
+                            return Usage {
+                                input_tokens: usage
+                                    .get("input_tokens")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0)
+                                    .min(u64::from(u32::MAX))
+                                    as u32,
+                                output_tokens: usage
+                                    .get("output_tokens")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0)
+                                    .min(u64::from(u32::MAX))
+                                    as u32,
+                                cache_read_tokens: usage
+                                    .get("cache_read_input_tokens")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0)
+                                    .min(u64::from(u32::MAX))
+                                    as u32,
+                                cache_create_tokens: usage
+                                    .get("cache_creation_input_tokens")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0)
+                                    .min(u64::from(u32::MAX))
+                                    as u32,
+                                ..Default::default()
+                            };
+                        }
+                        break; // result event present but no usage block — stop here
+                    }
+                }
+                // Fall back to the last assistant event's usage (partial stream).
+                for ev in events.iter().rev() {
+                    if ev.get("type").and_then(|t| t.as_str()) == Some("assistant") {
+                        if let Some(usage) = ev
+                            .get("message")
+                            .and_then(|msg| msg.get("usage"))
+                        {
+                            return Usage {
+                                input_tokens: usage
+                                    .get("input_tokens")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0)
+                                    .min(u64::from(u32::MAX))
+                                    as u32,
+                                output_tokens: usage
+                                    .get("output_tokens")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0)
+                                    .min(u64::from(u32::MAX))
+                                    as u32,
+                                cache_read_tokens: usage
+                                    .get("cache_read_input_tokens")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0)
+                                    .min(u64::from(u32::MAX))
+                                    as u32,
+                                cache_create_tokens: usage
+                                    .get("cache_creation_input_tokens")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0)
+                                    .min(u64::from(u32::MAX))
+                                    as u32,
+                                ..Default::default()
+                            };
+                        }
+                    }
+                }
+                Usage::default()
+            }
+            Self::Text(_) => Usage::default(),
+        }
+    }
+
+    /// Extract the raw finish reason string from this response.
+    ///
+    /// For `StreamJson` (Claude CLI), scans the events in reverse for the
+    /// `result` event and derives a finish reason from `is_error` and the
+    /// presence of tool-use blocks.
+    #[must_use]
+    pub fn extract_finish_reason_raw(&self) -> Option<String> {
+        match self {
+            Self::Json(v) => {
+                // OpenAI / Ollama style
+                v.pointer("/choices/0/finish_reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            }
+            Self::StreamJson(events) => {
+                for ev in events.iter().rev() {
+                    if ev.get("type").and_then(|t| t.as_str()) == Some("result") {
+                        // is_error: true maps to a terminal error condition.
+                        if ev.get("is_error").and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        {
+                            return Some("error".to_string());
+                        }
+                        // Detect tool use from content_block_start events or
+                        // assistant message content blocks.
+                        let has_tool = events.iter().any(|e| {
+                            // content_block_start with type=tool_use
+                            if e.get("type").and_then(|t| t.as_str())
+                                == Some("content_block_start")
+                            {
+                                if let Some(block) = e.get("content_block") {
+                                    return block.get("type").and_then(|t| t.as_str())
+                                        == Some("tool_use");
+                                }
+                            }
+                            // assistant event with tool_use content blocks
+                            if e.get("type").and_then(|t| t.as_str()) == Some("assistant") {
+                                if let Some(content) = e
+                                    .pointer("/message/content")
+                                    .and_then(serde_json::Value::as_array)
+                                {
+                                    return content.iter().any(|block| {
+                                        block.get("type").and_then(|t| t.as_str())
+                                            == Some("tool_use")
+                                    });
+                                }
+                            }
+                            false
+                        });
+                        return Some(
+                            if has_tool { "tool_use" } else { "end_turn" }.to_string(),
+                        );
+                    }
+                }
+                None
+            }
+            Self::Text(_) => None,
         }
     }
 }
@@ -774,5 +896,115 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         assert!(outputs[0].1.len() < 4200);
         assert!(outputs[0].1.ends_with("...[truncated]"));
+    }
+
+    // ── StreamJson usage extraction tests ───────────────────────────────
+
+    #[test]
+    fn stream_json_extract_usage_from_result_event() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "content_block_delta", "delta": {"text": "hi"}}),
+            serde_json::json!({
+                "type": "result",
+                "usage": {
+                    "input_tokens": 1500,
+                    "output_tokens": 350,
+                    "cache_read_input_tokens": 200,
+                    "cache_creation_input_tokens": 50
+                }
+            }),
+        ]);
+        let usage = r.extract_usage();
+        assert_eq!(usage.input_tokens, 1500);
+        assert_eq!(usage.output_tokens, 350);
+        assert_eq!(usage.cache_read_tokens, 200);
+        assert_eq!(usage.cache_create_tokens, 50);
+    }
+
+    #[test]
+    fn stream_json_extract_usage_from_result_event_missing_usage() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "content_block_delta", "delta": {"text": "hi"}}),
+            serde_json::json!({"type": "result", "is_error": false}),
+        ]);
+        assert_eq!(r.extract_usage(), Usage::default());
+    }
+
+    #[test]
+    fn stream_json_extract_usage_no_result_falls_back_to_assistant() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "content": [],
+                    "usage": {
+                        "input_tokens": 800,
+                        "output_tokens": 120,
+                        "cache_read_input_tokens": 30,
+                        "cache_creation_input_tokens": 10
+                    }
+                }
+            }),
+            serde_json::json!({"type": "content_block_delta", "delta": {"text": "text"}}),
+        ]);
+        let usage = r.extract_usage();
+        assert_eq!(usage.input_tokens, 800);
+        assert_eq!(usage.output_tokens, 120);
+        assert_eq!(usage.cache_read_tokens, 30);
+        assert_eq!(usage.cache_create_tokens, 10);
+    }
+
+    #[test]
+    fn stream_json_extract_usage_returns_default_when_no_events() {
+        let r = BackendResponse::StreamJson(vec![]);
+        assert_eq!(r.extract_usage(), Usage::default());
+    }
+
+    // ── StreamJson finish reason extraction tests ───────────────────────
+
+    #[test]
+    fn stream_json_extract_finish_reason_end_turn() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "content_block_delta", "delta": {"text": "done"}}),
+            serde_json::json!({"type": "result", "is_error": false}),
+        ]);
+        assert_eq!(r.extract_finish_reason_raw(), Some("end_turn".to_string()));
+    }
+
+    #[test]
+    fn stream_json_extract_finish_reason_tool_use() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({
+                "type": "content_block_start",
+                "content_block": {"type": "tool_use", "name": "read_file", "id": "123"}
+            }),
+            serde_json::json!({"type": "content_block_delta", "delta": {"text": ""}}),
+            serde_json::json!({"type": "result", "is_error": false}),
+        ]);
+        assert_eq!(
+            r.extract_finish_reason_raw(),
+            Some("tool_use".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_json_extract_finish_reason_error() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "content_block_delta", "delta": {"text": "partial"}}),
+            serde_json::json!({"type": "result", "is_error": true}),
+        ]);
+        assert_eq!(r.extract_finish_reason_raw(), Some("error".to_string()));
+    }
+
+    #[test]
+    fn stream_json_extract_finish_reason_none_when_no_result() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [], "stop_reason": "end_turn"}
+            }),
+            serde_json::json!({"type": "content_block_delta", "delta": {"text": "hi"}}),
+        ]);
+        assert_eq!(r.extract_finish_reason_raw(), None);
     }
 }
