@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- called internally by floating code but no runtime entrypoint.
+//!
 //! VerdictAwareScorer — weights gate verdict signals by recency and severity (GATE-05).
 //!
 //! This scorer implements the `Scorer` trait from `roko-core` and specifically

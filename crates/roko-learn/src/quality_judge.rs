@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Lightweight LLM judge for tasks without compilable output.
 //!
 //! Some routing tasks, such as research, documentation, and architecture

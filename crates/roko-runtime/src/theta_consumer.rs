@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Theta reflective loop consumer (BEAT-01).
 //!
 

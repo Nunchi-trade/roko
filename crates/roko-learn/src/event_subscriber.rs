@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Event-driven fan-out from the runtime event bus into learning systems.
 //!
 //! The current event schema does not carry full turn identity on every event,
