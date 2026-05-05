@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use roko_agent::Usage;
 use roko_agent::cursor_agent::CursorAgent;
 use roko_agent::streaming::StreamChunk;
 use roko_agent::tool_loop::LlmBackend;
 use roko_agent::translate::{OpenAiTranslator, SessionState, Translator};
+use roko_agent::{SafetyLayer, Usage};
 use roko_core::tool::ToolCall;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -435,7 +435,7 @@ fn collect_content(chunks: &[StreamChunk]) -> String {
 async fn cursor_streaming_basic_replays_cleanly() {
     let fixture = Fixture::load("streaming-basic.jsonl");
     let mock_http = MockHttp::spawn(fixture.response_lines.clone());
-    let backend = CursorAgent::new("test-key", "cursor-composer")
+    let backend = CursorAgent::new("test-key", "cursor-composer", SafetyLayer::with_defaults())
         .with_base_url(mock_http.base_url())
         .with_timeout_ms(5_000);
     let translator = OpenAiTranslator;

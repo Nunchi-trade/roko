@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use roko_agent::Agent;
 use roko_agent::gemini::{GeminiAdapter, GeminiMetadata, GeminiNativeAgent};
 use roko_agent::provider::{AgentOptions, ProviderAdapter, ProviderError, create_agent_for_model};
 use roko_agent::translate::{BackendResponse, GeminiTranslator, RenderedResults, Translator};
+use roko_agent::{Agent, SafetyLayer};
 use roko_core::agent::ProviderKind;
 use roko_core::config::DEFAULT_TTFT_TIMEOUT_MS;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
@@ -271,6 +271,7 @@ async fn gemini_native_generate_content_with_function_calling() {
         server.base_url().to_string(),
         gemini_model("gemini-2.5-pro"),
         &AgentOptions::default(),
+        SafetyLayer::with_defaults(),
     );
 
     let result = agent
@@ -353,6 +354,7 @@ async fn gemini_native_generate_content_with_google_search_grounding() {
             ..gemini_model("gemini-3-flash-preview")
         },
         &AgentOptions::default(),
+        SafetyLayer::with_defaults(),
     );
 
     let result = agent
@@ -440,6 +442,7 @@ async fn gemini_native_generate_content_with_code_execution() {
             ..gemini_model("gemini-2.5-pro")
         },
         &AgentOptions::default(),
+        SafetyLayer::with_defaults(),
     );
 
     let result = agent.run(&prompt("Verify 2 + 2"), &Context::now()).await;
@@ -495,6 +498,7 @@ async fn gemini_native_generate_content_with_thinking() {
             effort: Some("high".to_string()),
             ..Default::default()
         },
+        SafetyLayer::with_defaults(),
     );
 
     let result = agent.run(&prompt("Think carefully"), &Context::now()).await;

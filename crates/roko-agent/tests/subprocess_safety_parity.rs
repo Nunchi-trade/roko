@@ -19,8 +19,8 @@ async fn exec_agent_blocks_direct_git_force_push_before_spawn() {
             "origin".to_string(),
             "main".to_string(),
         ],
-    )
-    .with_safety_layer(Some(SafetyLayer::with_defaults()));
+        SafetyLayer::with_defaults(),
+    );
 
     let result = agent.run(&prompt(""), &Context::now()).await;
     assert!(

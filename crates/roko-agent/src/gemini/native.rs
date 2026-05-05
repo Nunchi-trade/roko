@@ -8,14 +8,13 @@ use crate::agent::derived_output;
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::AgentOptions;
-use crate::provider::current_safety_layer;
 use crate::safety::SafetyLayer;
 use crate::translate::{ChatResponse, FinishReason, ResponseMetadata, normalize_finish_reason};
 use crate::usage::{UsageObservation, UsageSource};
 use crate::{Agent, AgentResult};
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
-use roko_core::tool::{ToolCall, ToolDef};
+use roko_core::tool::{ToolCall, ToolContext, ToolDef, ToolResult};
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::{Value, json};
 
@@ -116,7 +115,7 @@ pub struct GeminiNativeAgent {
     enable_grounding: bool,
     enable_code_execution: bool,
     safety_settings: Vec<SafetySettingRequest>,
-    safety: Option<SafetyLayer>,
+    safety: SafetyLayer,
     system_prompt: Option<String>,
     timeout_ms: u64,
     name: String,
@@ -131,6 +130,7 @@ impl GeminiNativeAgent {
         base_url: String,
         model: ModelProfile,
         options: &AgentOptions,
+        safety: SafetyLayer,
     ) -> Self {
         let name = if options.name.is_empty() {
             format!("gemini-native:{}", model.slug)
@@ -149,7 +149,7 @@ impl GeminiNativeAgent {
             enable_grounding: model.supports_grounding,
             enable_code_execution: model.supports_code_execution,
             safety_settings: Vec::new(),
-            safety: current_safety_layer(),
+            safety,
             system_prompt: options.system_prompt.clone(),
             timeout_ms: options.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
             name,
@@ -159,7 +159,7 @@ impl GeminiNativeAgent {
     }
 
     #[must_use]
-    pub fn with_safety_layer(mut self, safety: Option<SafetyLayer>) -> Self {
+    pub fn with_safety_layer(mut self, safety: SafetyLayer) -> Self {
         self.safety = safety;
         self
     }
@@ -417,6 +417,16 @@ impl Agent for GeminiNativeAgent {
             Ok(parsed) => parsed,
             Err(error) => return self.failure(input, error, &started),
         };
+        let tool_ctx = ToolContext::testing(std::env::current_dir().unwrap_or_else(|_| ".".into()));
+        for call in &parsed.tool_calls {
+            if let Err(err) = self.safety.check_pre_execution(call, &tool_ctx) {
+                return self.failure(
+                    input,
+                    format!("gemini tool call blocked by safety layer: {err}"),
+                    &started,
+                );
+            }
+        }
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let observation = gemini_observation(
@@ -425,11 +435,17 @@ impl Agent for GeminiNativeAgent {
             Some(self.model.slug.clone()),
         );
 
-        let content = self
+        let content = self.safety.scrub_text(&parsed.content);
+        if let Err(err) = self
             .safety
-            .as_ref()
-            .map(|safety| safety.scrub_text(&parsed.content))
-            .unwrap_or_else(|| parsed.content.clone());
+            .check_recovery(&ToolResult::text(content.clone()))
+        {
+            return self.failure(
+                input,
+                format!("gemini output blocked by safety layer: {err}"),
+                &started,
+            );
+        }
         let mut builder = derived_output(input, Kind::AgentOutput, Body::text(content))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
@@ -600,6 +616,7 @@ mod tests {
                 system_prompt: Some("system seed".to_string()),
                 ..Default::default()
             },
+            SafetyLayer::with_defaults(),
         );
 
         let messages = vec![
@@ -642,6 +659,7 @@ mod tests {
             "https://generativelanguage.googleapis.com".to_string(),
             base_model(),
             &AgentOptions::default(),
+            SafetyLayer::with_defaults(),
         );
         let tools = vec![
             ToolDef::new(
@@ -680,6 +698,7 @@ mod tests {
             "https://generativelanguage.googleapis.com".to_string(),
             base_model(),
             &AgentOptions::default(),
+            SafetyLayer::with_defaults(),
         );
         let response = serde_json::from_value::<GenerateContentResponse>(json!({
             "candidates": [
@@ -819,6 +838,7 @@ mod tests {
                 effort: Some("low".to_string()),
                 ..Default::default()
             },
+            SafetyLayer::with_defaults(),
         )
         .with_http_poster(poster);
 
@@ -910,8 +930,9 @@ mod tests {
             "https://generativelanguage.googleapis.com".to_string(),
             base_model(),
             &AgentOptions::default(),
+            SafetyLayer::with_defaults(),
         )
-        .with_safety_layer(Some(SafetyLayer::with_defaults()))
+        .with_safety_layer(SafetyLayer::with_defaults())
         .with_http_poster(poster);
 
         let result = agent.run(&input, &Context::now()).await;
@@ -922,6 +943,48 @@ mod tests {
             "PASSWORD=[REDACTED]"
         );
         assert_eq!(result.output.lineage, vec![ancestor.id, input.id]);
+    }
+
+    #[tokio::test]
+    async fn gemini_native_agent_blocks_dangerous_tool_call_before_dispatch() {
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let poster = Arc::new(MockPoster::ok(
+            Arc::clone(&captured),
+            json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{
+                            "functionCall": {
+                                "name": "bash",
+                                "args": { "command": "rm -rf /" },
+                                "id": "gemini-danger"
+                            }
+                        }]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }),
+        ));
+        let agent = GeminiNativeAgent::new(
+            "test-key".to_string(),
+            "https://generativelanguage.googleapis.com".to_string(),
+            base_model(),
+            &AgentOptions::default(),
+            SafetyLayer::with_defaults(),
+        )
+        .with_http_poster(poster);
+
+        let result = agent
+            .run(&prompt("clean up everything"), &Context::now())
+            .await;
+
+        assert!(!result.success);
+        let output = result.output.body.as_text().expect("failure text");
+        assert!(
+            output.contains("blocked by safety layer"),
+            "unexpected output: {output}"
+        );
     }
 
     #[tokio::test]
@@ -952,6 +1015,7 @@ mod tests {
             "https://generativelanguage.googleapis.com".to_string(),
             base_model(),
             &AgentOptions::default(),
+            SafetyLayer::with_defaults(),
         )
         .with_http_poster(poster_zero);
         let result_zero = agent_zero.run(&prompt("hi"), &Context::now()).await;
@@ -981,6 +1045,7 @@ mod tests {
             "https://generativelanguage.googleapis.com".to_string(),
             base_model(),
             &AgentOptions::default(),
+            SafetyLayer::with_defaults(),
         )
         .with_http_poster(poster_absent);
         let result_absent = agent_absent.run(&prompt("hi"), &Context::now()).await;
