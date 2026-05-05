@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        Path, State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::StatusCode,
@@ -19,10 +19,15 @@ use tokio::sync::mpsc;
 use tower_http::trace::TraceLayer;
 use tracing::warn;
 
+pub mod bus;
 pub mod protocol;
 pub mod state;
 
-use protocol::{AgentInboundFrame, RelayEvent, RelayMessageRequest, RelayOutboundFrame};
+pub use bus::{TopicBus, TopicBusConfig};
+
+use protocol::{
+    AgentInboundFrame, RelayEvent, RelayMessageRequest, RelayOutboundFrame, TopicEnvelope,
+};
 use state::{AwaitMessageError, BeginMessageError, RegisteredAgent, RelayState};
 
 pub fn app(state: Arc<RelayState>) -> Router {
@@ -43,6 +48,10 @@ pub fn app(state: Arc<RelayState>) -> Router {
             "/relay/workspaces/{id}",
             axum::routing::delete(unregister_workspace),
         )
+        // Feed metadata endpoints (A5)
+        .route("/relay/topics", get(list_topics))
+        .route("/relay/topics/{topic}/messages", get(topic_messages))
+        .route("/relay/topics/{topic}/subscribers", get(topic_subscribers))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -215,6 +224,7 @@ async fn handle_agent_socket(state: Arc<RelayState>, socket: WebSocket) {
         }
     }
 
+    state.bus.unsubscribe_all(&agent_id);
     state.unregister_agent(&agent_id, session_id);
     writer.abort();
 }
@@ -258,6 +268,61 @@ fn handle_agent_frame(
             let _ = outbound_tx.send(RelayOutboundFrame::Error {
                 message_id: None,
                 error: "agent already registered on this socket".to_string(),
+            });
+            true
+        }
+        Ok(AgentInboundFrame::Subscribe { topic }) => {
+            tracing::debug!(%agent_id, %topic, "subscribe");
+            let replay = state.bus.subscribe(agent_id, &topic);
+            for envelope in replay {
+                let frame = RelayOutboundFrame::TopicMessage {
+                    topic: envelope.topic,
+                    msg_type: envelope.msg_type,
+                    payload: envelope.payload,
+                    publisher_id: envelope.publisher_id,
+                    seq: envelope.seq,
+                };
+                if outbound_tx.send(frame).is_err() {
+                    tracing::warn!(%agent_id, "failed to send replay — agent disconnected");
+                    break;
+                }
+            }
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: format!("subscribed:{topic}"),
+            });
+            true
+        }
+        Ok(AgentInboundFrame::Unsubscribe { topic }) => {
+            tracing::debug!(%agent_id, %topic, "unsubscribe");
+            state.bus.unsubscribe(agent_id, &topic);
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: format!("unsubscribed:{topic}"),
+            });
+            true
+        }
+        Ok(AgentInboundFrame::Publish {
+            topic,
+            msg_type,
+            payload,
+        }) => {
+            tracing::debug!(%agent_id, %topic, %msg_type, "publish");
+            let envelope = TopicEnvelope::new(&topic, &msg_type, payload).with_publisher(agent_id);
+            let (seq, subscribers) = state.bus.publish(envelope.clone());
+            for sub_id in &subscribers {
+                if sub_id == agent_id {
+                    continue;
+                }
+                let frame = RelayOutboundFrame::TopicMessage {
+                    topic: envelope.topic.clone(),
+                    msg_type: envelope.msg_type.clone(),
+                    payload: envelope.payload.clone(),
+                    publisher_id: envelope.publisher_id.clone(),
+                    seq,
+                };
+                state.send_to_agent(sub_id, frame);
+            }
+            let _ = outbound_tx.send(RelayOutboundFrame::Ack {
+                event: format!("published:{topic}:{seq}"),
             });
             true
         }
@@ -342,4 +407,68 @@ async fn next_text_frame(stream: &mut futures::stream::SplitStream<WebSocket>) -
             Some(Ok(_)) => {}
         }
     }
+}
+
+// ── Feed metadata endpoints (A5) ────────────────────────────────────────────
+
+/// Query parameters for the `GET /relay/topics/:topic/messages` endpoint.
+#[derive(Debug, serde::Deserialize)]
+struct TopicMessagesQuery {
+    /// Maximum number of messages to return (default 50, max 200).
+    limit: Option<usize>,
+}
+
+/// `GET /relay/topics` — list all active topics with subscriber counts.
+async fn list_topics(State(state): State<Arc<RelayState>>) -> Json<Value> {
+    let mut stats = state.bus.topic_stats();
+    stats.sort_by(|a, b| a.0.cmp(&b.0));
+    let topics: Vec<Value> = stats
+        .iter()
+        .map(|(topic, count)| {
+            json!({
+                "topic": topic,
+                "subscribers": count,
+            })
+        })
+        .collect();
+    Json(json!({ "topics": topics }))
+}
+
+/// `GET /relay/topics/:topic/messages` — get recent messages from the ring buffer.
+async fn topic_messages(
+    State(state): State<Arc<RelayState>>,
+    Path(topic): Path<String>,
+    Query(params): Query<TopicMessagesQuery>,
+) -> Json<Value> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    let messages: Vec<Value> = state
+        .bus
+        .peek_ring(&topic)
+        .into_iter()
+        .rev()
+        .take(limit)
+        .map(|env| {
+            json!({
+                "seq": env.seq,
+                "topic": env.topic,
+                "msg_type": env.msg_type,
+                "payload": env.payload,
+                "publisher_id": env.publisher_id,
+                "timestamp_ms": env.timestamp_ms,
+            })
+        })
+        .collect();
+    Json(json!({ "topic": topic, "messages": messages }))
+}
+
+/// `GET /relay/topics/:topic/subscribers` — subscriber count for a topic.
+async fn topic_subscribers(
+    State(state): State<Arc<RelayState>>,
+    Path(topic): Path<String>,
+) -> Json<Value> {
+    let count = state.bus.subscriber_count(&topic);
+    Json(json!({
+        "topic": topic,
+        "subscriber_count": count,
+    }))
 }

@@ -6,6 +6,7 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::bus::{TopicBus, TopicBusConfig};
 use crate::protocol::{
     AgentHello, ConnectedAgent, ConnectedWorkspace, RelayEvent, RelayMessageRequest,
     RelayMessageResponse, RelayOutboundFrame, WorkspaceHello,
@@ -30,10 +31,12 @@ struct RelayStateInner {
     workspaces: HashMap<String, ConnectedWorkspace>,
 }
 
-/// Shared in-memory relay state for directory, cards, and pending replies.
+/// Shared in-memory relay state for directory, cards, pending replies, and pub/sub bus.
 pub struct RelayState {
     inner: RwLock<RelayStateInner>,
     events_tx: broadcast::Sender<RelayEvent>,
+    /// Topic-based pub/sub bus. Agents subscribe/publish via WebSocket frames.
+    pub bus: TopicBus,
 }
 
 impl Default for RelayState {
@@ -49,6 +52,7 @@ impl RelayState {
         Self {
             inner: RwLock::new(RelayStateInner::default()),
             events_tx,
+            bus: TopicBus::new(TopicBusConfig::default()),
         }
     }
 
@@ -328,6 +332,18 @@ impl RelayState {
             });
         }
         expired
+    }
+
+    /// Send a frame to a connected agent by ID.
+    ///
+    /// Returns `false` if the agent is not found or its channel is closed.
+    pub fn send_to_agent(&self, agent_id: &str, frame: RelayOutboundFrame) -> bool {
+        let inner = self.inner.read();
+        if let Some(handle) = inner.agents.get(agent_id) {
+            handle.tx.send(frame).is_ok()
+        } else {
+            false
+        }
     }
 }
 
