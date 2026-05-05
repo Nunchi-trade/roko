@@ -63,7 +63,7 @@ pub fn check_provider_readiness(config: &RokoConfig) -> Vec<ProviderReadinessIss
             continue;
         };
 
-        check_single_provider(*provider_name, provider, &mut issues);
+        check_single_provider(provider_name, provider, &mut issues);
     }
 
     issues
@@ -80,9 +80,7 @@ fn check_single_provider(
             if !binary_on_path(command) {
                 issues.push(ProviderReadinessIssue {
                     provider_name: provider_name.to_string(),
-                    message: format!(
-                        "claude CLI not found on PATH. Install: https://claude.ai/cli"
-                    ),
+                    message: "claude CLI not found on PATH. Install: https://claude.ai/cli".to_string(),
                 });
             }
         }

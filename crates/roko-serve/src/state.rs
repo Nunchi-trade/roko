@@ -674,6 +674,8 @@ impl AppState {
         let runtime_event_logger =
             Arc::new(roko_runtime::JsonlLogger::from_roko_dir(layout.root()));
 
+        let ephemeral_workspaces = RwLock::new(load_workspace_registry(&workdir));
+
         Ok(Self {
             workdir,
             layout,
@@ -723,7 +725,7 @@ impl AppState {
             terminal_sessions,
             active_bench_runs: RwLock::new(HashMap::new()),
             active_matrix_runs: RwLock::new(HashMap::new()),
-            ephemeral_workspaces: RwLock::new(load_workspace_registry(&workdir)),
+            ephemeral_workspaces,
             mirage_url: std::env::var("ROKO_MIRAGE_URL")
                 .ok()
                 .filter(|s| !s.is_empty()),

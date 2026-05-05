@@ -144,9 +144,9 @@ pub async fn reload_config(
 fn map_load_config_error(err: LoadConfigError) -> ApiError {
     match err {
         LoadConfigError::Read { .. } => ApiError::internal(err.to_string()),
-        LoadConfigError::Parse { .. } | LoadConfigError::Validation { .. } => {
-            ApiError::bad_request(err.to_string())
-        }
+        LoadConfigError::Parse { .. }
+        | LoadConfigError::Validation { .. }
+        | LoadConfigError::ProviderReference { .. } => ApiError::bad_request(err.to_string()),
     }
 }
 

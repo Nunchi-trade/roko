@@ -1520,6 +1520,8 @@ pub struct ModelProfileLayer {
     pub tier: Option<roko_core::ModelTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_max_completion_tokens: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_iterations: Option<u32>,
 }
 
 impl ModelProfileLayer {
@@ -1571,6 +1573,7 @@ impl ModelProfileLayer {
             use_max_completion_tokens: overlay
                 .use_max_completion_tokens
                 .or(self.use_max_completion_tokens),
+            max_tool_iterations: overlay.max_tool_iterations.or(self.max_tool_iterations),
         }
     }
 
@@ -1609,6 +1612,7 @@ impl ModelProfileLayer {
             search_context_size: self.search_context_size,
             cost_per_request: self.cost_per_request,
             use_max_completion_tokens: self.use_max_completion_tokens.unwrap_or(false),
+            max_tool_iterations: self.max_tool_iterations,
             tier: self.tier,
         })
     }

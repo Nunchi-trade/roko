@@ -252,6 +252,7 @@ async fn get_workspace_state(
     };
 
     // Re-validate: if the path is missing, attempt to re-create it.
+    #[allow(clippy::if_not_else)]
     let ws = if !ws.path.exists() {
         // Try to re-create the workspace directory and .roko layout.
         let recreated = tokio::fs::create_dir_all(&ws.path).await.is_ok();
@@ -348,8 +349,7 @@ async fn get_workspace_state(
                     result = Value::Array(v);
                     break;
                 }
-                Ok(_) => continue,
-                Err(ReadFileError::NotFound) => continue,
+                Ok(_) | Err(ReadFileError::NotFound) => continue,
                 Err(ReadFileError::Io(e)) => {
                     errors.push(format!("episodes.jsonl: {e}"));
                     break;

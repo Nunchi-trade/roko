@@ -14,7 +14,7 @@ use super::schema::{
     CoreRunnerConfig, DeployConfig, GatesConfig, GeminiConfig, GithubWebhookConfig, LearningConfig,
     PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RelayConfig, RokoConfig,
     RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, ToolsConfig,
-    TuiConfig, WatcherConfig, WebhooksConfig,
+    TuiConfig, ValidationConfig, WatcherConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -119,6 +119,7 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         runner: CoreRunnerConfig::default(),
         timeouts: super::timeouts::TimeoutConfig::default(),
         agents: Vec::new(),
+        validation: ValidationConfig::default(),
     }
 }
 
@@ -179,6 +180,7 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         data_llm: None,
         mode: Default::default(),
         extensions: Vec::new(),
+        defaults: Default::default(),
     }
 }
 
@@ -190,6 +192,7 @@ fn convert_gates(m: &MoriConfig) -> GatesConfig {
         max_iterations: m.max_iterations.unwrap_or(d.max_iterations),
         domain_gates: HashMap::new(),
         custom_rungs: Vec::new(),
+        enable_advanced_rungs: d.enable_advanced_rungs,
     }
 }
 

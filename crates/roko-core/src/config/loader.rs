@@ -414,10 +414,9 @@ fn set_toml_value_at_path(root: &mut toml::Value, path: &str, raw_value: &str) {
             Some(t) => t,
             None => return, // Path doesn't resolve to a table; skip this override.
         };
-        table
+        current = table
             .entry(*segment)
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        current = table.get_mut(*segment).unwrap();
     }
 
     // Set the leaf value.

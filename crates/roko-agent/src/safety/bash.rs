@@ -150,7 +150,7 @@ pub fn check_path_confinement(command: &str, prefixes: &[String]) -> Result<(), 
     for token in command.split_ascii_whitespace() {
         if token.starts_with('/') && !token.contains(metachar) {
             // Strip trailing punctuation that isn't part of the path
-            let path = token.trim_end_matches(|c: char| matches!(c, ':' | ',' | ')' | ']'));
+            let path = token.trim_end_matches([':', ',', ')', ']']);
             if !prefixes.iter().any(|p| path.starts_with(p.as_str())) {
                 return Err(ToolError::CommandNotAllowed(format!(
                     "absolute path `{path}` is outside the allowed prefixes"

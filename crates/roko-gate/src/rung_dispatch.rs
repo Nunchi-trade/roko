@@ -126,6 +126,7 @@ impl GatePipelineBuilder {
         Self::from_default_rungs_with_execution(rungs, inputs, execution)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn from_custom_config_with_execution(
         rungs: Vec<GateRungConfig>,
         inputs: RungExecutionInputs,
@@ -143,6 +144,7 @@ impl GatePipelineBuilder {
         pipeline
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn from_default_rungs_with_execution(
         rungs: impl IntoIterator<Item = Rung>,
         inputs: RungExecutionInputs,

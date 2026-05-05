@@ -81,7 +81,7 @@ async fn batch_and_post(
 
         while batch.len() < BATCH_MAX_EVENTS {
             tokio::select! {
-                _ = &mut deadline => {
+                () = &mut deadline => {
                     break;
                 }
                 next = rx.recv() => {

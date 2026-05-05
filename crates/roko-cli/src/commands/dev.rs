@@ -4,7 +4,7 @@
 //! manages serve + optional frontend with PID file coordination, graceful
 //! shutdown, and port conflict detection.
 
-#![allow(unused_imports)]
+#![allow(unsafe_code, unused_imports)]
 
 use std::io;
 use std::net::TcpListener;

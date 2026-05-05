@@ -855,6 +855,9 @@ pub enum LearningRuntimeError {
     /// JSON serialization/parsing errors.
     #[error("learning runtime serde error: {0}")]
     Serde(#[from] serde_json::Error),
+    /// Learning subsystem errors.
+    #[error("learning subsystem error: {0}")]
+    Learn(#[from] crate::error::LearnError),
 }
 
 impl EfficiencySummaryRecord {
@@ -1338,6 +1341,8 @@ impl LearningRuntime {
 
         sync_experiment_winner_artifact(&paths.experiment_winners_json, &experiment_store)?;
 
+        let provider_health = provider_health_tracker_from_persisted(&paths.root);
+
         Ok(Self {
             paths,
             episode_logger,
@@ -1346,7 +1351,7 @@ impl LearningRuntime {
             affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
-            provider_health: provider_health_tracker_from_persisted(&paths.root),
+            provider_health,
             skill_library,
             playbook_store,
             playbook_rules,
@@ -1406,6 +1411,8 @@ impl LearningRuntime {
 
         sync_experiment_winner_artifact(&paths.experiment_winners_json, &experiment_store)?;
 
+        let provider_health = provider_health_tracker_from_persisted(&paths.root);
+
         Ok(Self {
             paths,
             episode_logger,
@@ -1414,7 +1421,7 @@ impl LearningRuntime {
             affect_engine: parking_lot::Mutex::new(DaimonState::load_or_new(&affect_path)),
             costs_log,
             costs_db,
-            provider_health: provider_health_tracker_from_persisted(&paths.root),
+            provider_health,
             skill_library,
             playbook_store,
             playbook_rules,

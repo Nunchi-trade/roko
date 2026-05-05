@@ -149,7 +149,9 @@ impl ModelCallFeedbackRecorder {
         if self.save_cascade_router
             && let Some(router) = &self.cascade_router
         {
-            router.save(&self.cascade_path)?;
+            router.save(&self.cascade_path).map_err(|e| {
+                roko_core::error::RokoError::Io(std::io::Error::other(e.to_string()))
+            })?;
         }
 
         Ok(())

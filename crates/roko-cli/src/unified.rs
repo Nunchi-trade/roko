@@ -43,7 +43,7 @@ pub async fn cmd_unified_chat(
 
     // 3. Bootstrap: workspace auto-create (not required) + config load.
     //    Chat does not require a workspace — it auto-creates .roko/ if missing.
-    let _boot = RokoBootstrap::new(
+    let boot = RokoBootstrap::new(
         &workdir,
         BootOpts {
             require_workspace: false,
@@ -68,7 +68,19 @@ pub async fn cmd_unified_chat(
     let config = load_config_or_defaults(config_path, &workdir)?;
 
     // 5b. Aggregate provider readiness: warn/abort if no providers are usable.
-    crate::commands::util::preflight_providers_aggregate(&config)?;
+    {
+        let issues = roko_agent::provider::check_provider_readiness(&boot.config);
+        if !issues.is_empty() {
+            let all_blocked =
+                roko_agent::provider::report_readiness_issues(&issues, &boot.config);
+            if all_blocked {
+                anyhow::bail!(
+                    "no usable providers: all referenced providers have configuration issues. \
+                     Run `roko config providers available` for setup instructions."
+                );
+            }
+        }
+    }
 
     // 6. Start serve in background only when the resolved config opts in.
     let serve_state = if no_serve {

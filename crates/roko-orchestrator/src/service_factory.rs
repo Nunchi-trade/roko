@@ -173,14 +173,14 @@ impl ServiceFactory {
             .with_event_consumer(Arc::new(JsonlLogger::from_roko_dir(&config.roko_dir)))
             .with_knowledge_store(gateway_knowledge_query)
             .with_run_id(config.run_id.unwrap_or_else(default_run_id));
-        if let Some(cascade_router) = cascade_router.clone() {
+        if let Some(cascade_router) = cascade_router {
             let model_router = Some(Arc::clone(&cascade_router));
             model_call_service = model_call_service
                 .with_cascade_router(cascade_router)
                 .with_model_router(move |role| {
                     routed_model_for_role(
                         &routing_config,
-                        &model_router,
+                        model_router.as_ref(),
                         agent_role_from_label(role.unwrap_or("implementer")),
                     )
                 });
@@ -205,7 +205,7 @@ impl ServiceFactory {
             .with_model_context_window(model_context_window_tokens)
             .with_model_context_window_resolver(move |role| {
                 let selected_model =
-                    routed_model_for_role(&prompt_routing_config, &prompt_model_router, role);
+                    routed_model_for_role(&prompt_routing_config, prompt_model_router.as_ref(), role);
                 context_window_tokens_for_model(&prompt_routing_config, &selected_model)
             })
             .with_knowledge_store(knowledge_store)
@@ -242,10 +242,10 @@ impl ServiceFactory {
 
 fn routed_model_for_role(
     config: &RokoConfig,
-    router: &Option<Arc<CascadeRouter>>,
+    router: Option<&Arc<CascadeRouter>>,
     role: AgentRole,
 ) -> String {
-    let Some(router) = router.as_ref() else {
+    let Some(router) = router else {
         return resolve_model(config, &config.agent.default_model).slug;
     };
     let ctx = RoutingContext {
