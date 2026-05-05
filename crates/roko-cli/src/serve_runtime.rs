@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use async_trait::async_trait;
 use roko_core::config::schema::RokoConfig;
+use roko_fs::RokoLayout;
 use roko_learn::playbook::PlaybookStore;
 use roko_neuro::KnowledgeStore;
 use roko_serve::bench::{BenchConfigOverrides, BenchStrategy};
@@ -244,7 +245,7 @@ impl RokoCliRuntime {
         // playbooks, so this store can be initialized on demand from the same
         // workspace.
         self.playbook_store.get_or_init(|| {
-            PlaybookStore::new(workdir.join(".roko").join("learn").join("playbooks"))
+            PlaybookStore::new(RokoLayout::for_project(workdir).playbooks_dir())
         })
     }
 }
@@ -417,10 +418,8 @@ fn prepare_plan_execution_root(workdir: &Path, plan_target: &Path) -> anyhow::Re
         .map(sanitize_plan_base)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "job-plan".to_string());
-    let run_root = workdir
-        .join(".roko")
-        .join("jobs")
-        .join("plan-runs")
+    let run_root = RokoLayout::for_project(workdir)
+        .plan_runs_dir()
         .join(format!("{plan_base}-{}", unique_suffix()));
     std::fs::create_dir_all(&run_root)?;
 
@@ -463,7 +462,8 @@ fn load_effective_roko_config(
     } else if let Some(config) = repo_roko_config_for_workdir(workdir, repo_registry) {
         config
     } else {
-        load_roko_config_file(&workdir.join(".roko").join("roko.toml"))?.unwrap_or_default()
+        load_roko_config_file(&RokoLayout::for_project(workdir).roko_toml_path())?
+            .unwrap_or_default()
     };
 
     roko_core::config::loader::merge_global_into(&mut config);
@@ -527,10 +527,8 @@ fn build_runner_config(
         .max(1);
 
     // Initialize Phase 0 subsystems.
-    let router_path = workdir
-        .join(".roko")
-        .join("learn")
-        .join("cascade-router.json");
+    let layout = RokoLayout::for_project(workdir);
+    let router_path = layout.cascade_router_path();
     let model_slugs = vec![model.clone(), "claude-haiku-4-5".to_string()];
     let cascade_router = Arc::new(roko_learn::cascade_router::CascadeRouter::load_or_new(
         &router_path,
@@ -543,6 +541,7 @@ fn build_runner_config(
     let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
 
     crate::runner::RunConfig {
+        layout,
         workdir: workdir.to_path_buf(),
         plan_dir: plan_dir.to_path_buf(),
         model,
@@ -608,7 +607,7 @@ fn runner_events_offset(workdir: &Path) -> u64 {
 }
 
 fn runner_events_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("events.jsonl")
+    RokoLayout::for_project(workdir).events_jsonl_path()
 }
 
 fn collect_runner_gate_results(
