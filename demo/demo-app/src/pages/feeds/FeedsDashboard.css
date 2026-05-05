@@ -569,4 +569,5 @@
 @media (prefers-reduced-motion: reduce) {
   .feeds__dot--live { animation: none; }
   .feeds { animation: none; }
+  .feeds__feed-card { animation: none; }
 }

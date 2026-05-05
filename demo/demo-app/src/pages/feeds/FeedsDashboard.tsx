@@ -64,6 +64,7 @@ export default function FeedsDashboard() {
   const feedLog = useDataHub((s) => s.feedLog);
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [kindFilter, setKindFilter] = useState<string>('all');
   const [, setTick] = useState(0);
 
   // Refresh time-ago labels every 5s.
