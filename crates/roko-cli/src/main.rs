@@ -2175,7 +2175,10 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _lock = roko_cli::workspace_lock::acquire_workspace_lock(&wd.join(".roko"))?;
             let config = resolve_config_for_workdir(cli, &wd)?;
             let repo_registry = RepoRegistry::load(&config, &wd).unwrap_or_default();
-            let runtime = RokoCliRuntime::new(config, repo_registry).into_arc();
+            let state_hub = roko_serve::state::AppState::state_hub_for_workdir(&wd);
+            let runtime =
+                RokoCliRuntime::new_with_state_hub(config, repo_registry, state_hub.clone())
+                    .into_arc();
 
             // Bootstrap: consistent workspace check + unified config load.
             let boot = roko_cli::bootstrap::RokoBootstrap::new(
@@ -2199,16 +2202,21 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             }
 
             let server_config =
-                roko_serve::ServerBuildConfig::new(wd.clone(), runtime, roko_config, bind, port);
+                roko_serve::ServerBuildConfig::new(wd.clone(), runtime, roko_config, bind, port)
+                    .with_state_hub(state_hub);
             let server_builder = roko_serve::ServerBuilder::new(server_config);
 
             if tui {
                 let (state, server_handle) = server_builder.start_background().await?;
-                // TODO(converge): pass server's SharedStateHub once roko-core
-                // re-exports StateHub to unify the duplicated #[path] types.
-                let tui_result =
-                    commands::dashboard::cmd_dashboard(cli, Some(wd), None, false, false, None)
-                        .await;
+                let tui_result = commands::dashboard::cmd_dashboard(
+                    cli,
+                    Some(wd),
+                    None,
+                    false,
+                    false,
+                    Some(state.state_hub.clone()),
+                )
+                .await;
                 state.cancel.cancel();
                 match server_handle.await {
                     Ok(Ok(())) => {}

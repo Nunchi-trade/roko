@@ -188,8 +188,29 @@ async fn spawn_background_serve(
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Option<(Arc<roko_serve::state::AppState>, JoinHandle<Result<()>>)> {
-    let runtime = RokoCliRuntime::new(config.clone(), RepoRegistry::default()).into_arc();
-    match roko_serve::start_server_background(workdir.to_path_buf(), runtime, None, None).await {
+    let state_hub = roko_serve::state::AppState::state_hub_for_workdir(workdir);
+    let runtime = RokoCliRuntime::new_with_state_hub(
+        config.clone(),
+        RepoRegistry::default(),
+        state_hub.clone(),
+    )
+    .into_arc();
+    let roko_config = match roko_core::config::loader::load_config_unified(workdir) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::warn!("background serve failed to load config: {e:#}");
+            return None;
+        }
+    };
+    let server_config = roko_serve::ServerBuildConfig::new(
+        workdir.to_path_buf(),
+        runtime,
+        roko_config,
+        None,
+        None,
+    )
+    .with_state_hub(state_hub);
+    match roko_serve::ServerBuilder::new(server_config).start_background().await {
         Ok(pair) => Some(pair),
         Err(e) => {
             tracing::warn!("background serve failed to start: {e:#}");

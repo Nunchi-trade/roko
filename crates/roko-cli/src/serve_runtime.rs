@@ -22,6 +22,7 @@ use crate::config::{Config, RepoRegistry};
 use crate::prd;
 use crate::run::run_once;
 use crate::runner::types::{GateCompletionKind, RunnerEvent};
+use crate::state_hub::SharedStateHub;
 use crate::status::collect_session_status;
 use crate::tui::DashboardScaffold;
 use crate::workspace_paths;
@@ -30,6 +31,7 @@ use crate::workspace_paths;
 pub struct RokoCliRuntime {
     config: Config,
     repo_registry: RepoRegistry,
+    state_hub: SharedStateHub,
     // Lazily bound to the workspace used by the first bench task that needs it.
     knowledge_store: OnceLock<KnowledgeStore>,
     // Lazily bound to the workspace used by the first bench task that earns a playbook.
@@ -39,9 +41,19 @@ pub struct RokoCliRuntime {
 impl RokoCliRuntime {
     #[must_use]
     pub fn new(config: Config, repo_registry: RepoRegistry) -> Self {
+        Self::new_with_state_hub(config, repo_registry, SharedStateHub::new_in_process())
+    }
+
+    #[must_use]
+    pub fn new_with_state_hub(
+        config: Config,
+        repo_registry: RepoRegistry,
+        state_hub: SharedStateHub,
+    ) -> Self {
         Self {
             config,
             repo_registry,
+            state_hub,
             knowledge_store: OnceLock::new(),
             playbook_store: OnceLock::new(),
         }
@@ -180,8 +192,9 @@ impl CliRuntime for RokoCliRuntime {
         let plan_target = plan_target.to_path_buf();
         let config = self.config.clone();
         let repo_registry = self.repo_registry.clone();
+        let state_hub = self.state_hub.clone();
         tokio::task::spawn_blocking(move || {
-            run_plan_on_local_runtime(workdir, plan_target, config, repo_registry)
+            run_plan_on_local_runtime(workdir, plan_target, config, repo_registry, state_hub)
         })
         .await
         .map_err(|err| anyhow::anyhow!("plan execution worker failed: {err}"))?
@@ -254,6 +267,7 @@ fn run_plan_on_local_runtime(
     plan_target: PathBuf,
     config: Config,
     repo_registry: RepoRegistry,
+    state_hub: SharedStateHub,
 ) -> anyhow::Result<PlanExecutionResult> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -271,7 +285,6 @@ fn run_plan_on_local_runtime(
         let roko_config = load_effective_roko_config(&workdir, &repo_registry)?;
         let run_config = build_runner_config(&workdir, &execution_root, &config, roko_config);
         let events_offset = runner_events_offset(&workdir);
-        let state_hub = crate::state_hub::shared_state_hub();
         let cancel = tokio_util::sync::CancellationToken::new();
 
         let report = crate::runner::run(plans, &run_config, &state_hub, cancel).await?;
@@ -541,6 +554,31 @@ fn build_runner_config(
     ));
     let connector_registry = Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
     let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
+    let run_uuid = uuid::Uuid::new_v4().to_string();
+    let projection = Arc::new(crate::runner::projection::Projection::new(run_uuid));
+    let episodes_path = workdir.join(".roko").join("episodes.jsonl");
+    let knowledge_path = workdir
+        .join(".roko")
+        .join("learn")
+        .join(roko_neuro::admission::DEFAULT_KNOWLEDGE_CANDIDATES_FILE);
+    let _ = std::fs::create_dir_all(workdir.join(".roko").join("learn"));
+    let feedback_facade = Arc::new(
+        crate::runtime_feedback::FeedbackFacade::new()
+            .with_sink(Arc::new(crate::runtime_feedback::EpisodeSink::at(
+                &episodes_path,
+            )))
+            .with_sink(Arc::new(crate::runtime_feedback::RoutingObservationSink::new(
+                cascade_router.clone(),
+            )))
+            .with_sink(Arc::new(
+                crate::runtime_feedback::KnowledgeIngestionSink::at(&knowledge_path)
+                    .with_ingestor(Arc::new(
+                        crate::runtime_feedback::NeuroKnowledgeIngestor::new(
+                            KnowledgeStore::for_workdir(workdir),
+                        ),
+                    )),
+            )),
+    );
 
     crate::runner::RunConfig {
         workdir: workdir.to_path_buf(),
@@ -568,8 +606,8 @@ fn build_runner_config(
         cascade_router: Some(cascade_router),
         connector_registry: Some(connector_registry),
         feed_registry: Some(feed_registry),
-        feedback_facade: None,
-        projection: None,
+        feedback_facade: Some(feedback_facade),
+        projection: Some(projection),
         stream_to_stderr: false,
         warm_cache: true,
     }
