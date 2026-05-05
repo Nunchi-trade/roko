@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- called internally by floating code but no runtime entrypoint.
+//!
 //! CalibrationPolicy — closes the predict-publish-correct loop (LEARN-09).
 //!
 //! The policy listens for prediction events, matches them to outcomes, and

@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Heartbeat attention auction primitives.
 //!
 //! This module provides a self-contained VCG-style attention auction surface

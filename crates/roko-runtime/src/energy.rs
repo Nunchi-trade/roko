@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Cognitive energy model -- metabolic costs for cognitive operations.
 //!
 //! Agents have a finite energy pool that is consumed by operations (LLM calls,

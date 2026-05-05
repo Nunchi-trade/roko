@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Bayesian confidence updating (AS-07).
 //!
 //! Provides a lightweight Bayesian updater that maintains a confidence estimate

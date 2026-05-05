@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- called internally by floating code but no runtime entrypoint.
+//!
 //! Active inference helpers for tier routing.
 //!
 //! This module keeps the math small but concrete: a belief state over a

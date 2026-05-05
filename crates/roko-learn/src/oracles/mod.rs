@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Domain-specific Oracle implementations.
 //!
 //! Each oracle implements the [`roko_core::Oracle`] trait for a specific

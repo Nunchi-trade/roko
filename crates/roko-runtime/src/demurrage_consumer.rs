@@ -1,3 +1,5 @@
+//! STATUS: NOT WIRED -- built but no non-test runtime caller.
+//!
 //! Demurrage heartbeat consumer (LIFE-10).
 //!
 //! Runs periodic knowledge demurrage at configurable intervals within the
