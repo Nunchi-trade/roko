@@ -11,10 +11,10 @@ use serde::Deserialize;
 
 use super::schema::{
     AgentConfig, BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig, ConductorConfig,
-    CoreRunnerConfig, DeployConfig, GatesConfig, GeminiConfig, GithubWebhookConfig, LearningConfig,
-    PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RelayConfig, RokoConfig,
-    RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, ToolsConfig,
-    TuiConfig, ValidationConfig, WatcherConfig, WebhooksConfig,
+    CoreRunnerConfig, DeployConfig, GatesConfig, GeminiConfig, GithubWebhookConfig, ISFRSection,
+    LearningConfig, PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RelayConfig,
+    RokoConfig, RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig,
+    ToolsConfig, TuiConfig, ValidationConfig, WatcherConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -116,6 +116,7 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         chain: ChainConfig::default(),
         relay: RelayConfig::default(),
         tools: ToolsConfig::default(),
+        isfr: ISFRSection::default(),
         runner: CoreRunnerConfig::default(),
         timeouts: super::timeouts::TimeoutConfig::default(),
         agents: Vec::new(),

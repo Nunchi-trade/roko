@@ -127,6 +127,9 @@ pub struct RokoConfig {
     pub chain: ChainConfig,
     #[serde(default)]
     pub relay: RelayConfig,
+    /// ISFR keeper configuration.
+    #[serde(default)]
+    pub isfr: ISFRSection,
     #[serde(default)]
     pub runner: CoreRunnerConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -185,6 +188,7 @@ impl Default for RokoConfig {
             tools: ToolsConfig::default(),
             chain: ChainConfig::default(),
             relay: RelayConfig::default(),
+            isfr: ISFRSection::default(),
             runner: CoreRunnerConfig::default(),
             agents: Vec::new(),
             validation: ValidationConfig::default(),
