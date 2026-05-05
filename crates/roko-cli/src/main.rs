@@ -206,12 +206,12 @@ COMMAND GROUPS:
   Core workflow:     init, run, status, doctor
   Planning:          plan, prd
   Agents:            agent (create, start, stop, chat, serve)
-  Research:          research
+  Research:          research, think
   Knowledge:         knowledge (query, dream, custody, archive)
   Learning:          learn (router, experiments, efficiency, tune)
   Jobs:              job
   Benchmarks:        bench
-  Configuration:     config (providers, models, subscriptions, plugins, secrets)
+  Configuration:     tune, config (providers, models, subscriptions, plugins, secrets)
   Code intelligence: index
   Server:            up, serve, acp, daemon, deploy, worker
   Interactive:       dashboard
@@ -410,6 +410,27 @@ Examples:
         #[command(subcommand)]
         cmd: ResearchCmd,
     },
+    /// Research a question without executing agents or changing source files.
+    #[command(after_help = "\
+Examples:
+  roko think \"how does auth work in this codebase?\"
+  roko think \"what do we know about rate limiting?\"")]
+    Think {
+        /// Question to analyze.
+        question: Vec<String>,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Adjust behavior by writing roko.toml.
+    #[command(subcommand, after_help = "\
+Examples:
+  roko tune routing
+  roko tune gates
+  roko tune budget
+  roko tune model sonnet
+  roko tune model haiku")]
+    Tune(TuneCmd),
 
     // ── Knowledge (neuro + dreams + custody + archive) ──────────────
     /// Durable knowledge store, dream consolidation, custody chain, and archival.
@@ -1288,6 +1309,36 @@ enum ResearchCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum TuneCmd {
+    /// Tune model routing preferences.
+    Routing {
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Tune validation gate strictness.
+    Gates {
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Tune cost and prompt budget limits.
+    Budget {
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Tune the default model.
+    Model {
+        /// Model key or alias, for example sonnet or haiku.
+        name: String,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum JobCmd {
     /// List all marketplace jobs.
     List {
@@ -2114,6 +2165,10 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&wd);
             result
         }
+        Command::Think { question, workdir } => {
+            commands::think::cmd_think(cli, question, workdir).await
+        }
+        Command::Tune(cmd) => commands::tune::cmd_tune(cli, cmd).await,
         Command::Knowledge { cmd } => commands::knowledge::dispatch_knowledge(cli, cmd).await,
         Command::Learn { cmd } => commands::learn::dispatch_learn(cli, cmd).await,
         Command::Job { cmd } => commands::job::cmd_job(cli, cmd).await,

@@ -15,4 +15,6 @@ pub mod prd;
 pub mod research;
 pub mod server;
 pub mod status;
+pub mod think;
+pub mod tune;
 pub mod util;
