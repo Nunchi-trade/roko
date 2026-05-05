@@ -6052,6 +6052,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "roko-graph"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "roko-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "roko-index"
 version = "0.1.0"
 dependencies = [

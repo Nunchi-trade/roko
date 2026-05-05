@@ -1,0 +1,162 @@
+# task-execution.toml — Compose -> Agent -> Gate pipeline.
+#
+# This is the canonical roko task execution pattern:
+# 1. ComposeCell assembles the prompt from template + context
+# 2. AgentCell dispatches to an LLM for implementation
+# 3. Gate validates the output (compile/test/clippy)
+#
+# If the gate fails, a conditional edge routes back to a retry compose
+# that includes the gate feedback.
+
+name = "task-execution"
+description = "Standard compose -> agent -> gate pipeline with retry on failure"
+
+# ─── Nodes ────────��───────────────────��──────────────────────────────────────
+
+[[nodes]]
+id = "compose_task"
+name = "Task Prompt Assembly"
+cell_type = "compose"
+
+[nodes.config]
+template = """
+## Task
+{{task_description}}
+
+## Context
+{{domain_context}}
+
+## Constraints
+- Write idiomatic Rust
+- Include unit tests
+- No unsafe code
+"""
+
+[nodes.config.variables]
+task_description = "Implement a rate limiter using token bucket algorithm"
+domain_context = "This is for the HTTP API layer in roko-serve"
+
+[[nodes]]
+id = "agent_implement"
+name = "Implementation Agent"
+cell_type = "agent"
+
+[nodes.config]
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+system_prompt = "You are a Rust engineer. Implement the requested feature with tests. Output complete file contents."
+tools = ["read_file", "write_file", "shell"]
+max_response_tokens = 8192
+temperature = 0.3
+
+[[nodes]]
+id = "compile_gate"
+name = "Compilation Check"
+cell_type = "gate"
+
+[nodes.config]
+gate_type = "compile"
+command = "cargo check --workspace"
+
+[[nodes]]
+id = "test_gate"
+name = "Test Suite"
+cell_type = "gate"
+
+[nodes.config]
+gate_type = "test"
+command = "cargo test --workspace"
+
+[[nodes]]
+id = "success_report"
+name = "Success Report"
+cell_type = "compose"
+
+[nodes.config]
+template = "Task completed successfully. Implementation passed all gates."
+
+[[nodes]]
+id = "retry_compose"
+name = "Retry Prompt with Feedback"
+cell_type = "compose"
+
+[nodes.config]
+template = """
+## Previous Attempt Failed
+
+The gate check failed with the following output:
+{{compile_gate}}
+
+Please fix the issues and try again.
+
+## Original Task
+{{compose_task}}
+"""
+
+[[nodes]]
+id = "retry_agent"
+name = "Retry Agent"
+cell_type = "agent"
+
+[nodes.config]
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+system_prompt = "You are fixing a failed implementation. Read the gate feedback carefully and correct the issues."
+tools = ["read_file", "write_file", "shell"]
+max_response_tokens = 8192
+temperature = 0.2
+
+# ─── Edges ───────────────────────────────────────────────────────────────────
+
+# Main path: compose -> agent -> compile gate.
+[[edges]]
+from = "compose_task"
+to = "agent_implement"
+
+[edges.condition]
+type = "always"
+
+[[edges]]
+from = "agent_implement"
+to = "compile_gate"
+
+[edges.condition]
+type = "on_success"
+
+# Gate success path: compile -> test -> success report.
+[[edges]]
+from = "compile_gate"
+to = "test_gate"
+
+[edges.condition]
+type = "on_success"
+
+[[edges]]
+from = "test_gate"
+to = "success_report"
+
+[edges.condition]
+type = "on_success"
+
+# Gate failure path: compile fails -> retry compose -> retry agent.
+[[edges]]
+from = "compile_gate"
+to = "retry_compose"
+
+[edges.condition]
+type = "on_failure"
+
+[[edges]]
+from = "retry_compose"
+to = "retry_agent"
+
+[edges.condition]
+type = "always"
+
+# ─── Configuration ───────────────���───────────────────────────────────���───────
+
+[config]
+max_tokens = 50000
+max_cost_usd = 5.0
+deadline = 900
+max_parallelism = 2
