@@ -58,6 +58,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+use crate::event_forward::AcpEventForwarder;
 use crate::knowledge::{DispatchKnowledge, append_context, query_dispatch_knowledge};
 use crate::runner::run_with_workflow_engine;
 use crate::{
@@ -786,6 +787,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut assistant_text = String::new();
+    let event_forwarder = AcpEventForwarder::from_env(session_id);
 
     loop {
         enum StreamAction {
@@ -829,6 +831,10 @@ where
                         usage: None,
                     });
                 };
+
+                if let Some(forwarder) = event_forwarder.as_ref() {
+                    forwarder.forward(&event);
+                }
 
                 match event {
                     CognitiveEvent::Complete { stop_reason, usage } => {
