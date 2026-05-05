@@ -1040,6 +1040,45 @@ wallet_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 agent_registry = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
 bounty_market = "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
 
+[isfr]
+enabled = true
+poll_interval_secs = 10
+epoch_duration_secs = 28800
+min_submissions = 2
+outlier_sigma = 3.0
+
+[[isfr.sources]]
+name = "mock-aave-v3"
+kind = "mock"
+weight = 0.30
+class = "lending"
+rate_bps = 620
+jitter_bps = 50
+
+[[isfr.sources]]
+name = "mock-compound-v3"
+kind = "mock"
+weight = 0.25
+class = "lending"
+rate_bps = 580
+jitter_bps = 40
+
+[[isfr.sources]]
+name = "mock-ethena"
+kind = "mock"
+weight = 0.25
+class = "structured"
+rate_bps = 850
+jitter_bps = 80
+
+[[isfr.sources]]
+name = "mock-eth-staking"
+kind = "mock"
+weight = 0.20
+class = "staking"
+rate_bps = 350
+jitter_bps = 30
+
 [relay]
 heartbeat_interval_secs = 30
 
