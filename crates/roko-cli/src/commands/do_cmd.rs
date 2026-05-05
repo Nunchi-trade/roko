@@ -604,6 +604,25 @@ async fn run_plan_execution(
                 p.plan_id, p.tasks_completed, p.tasks_total,
             );
         }
+        // Per-task cost breakdown.
+        if !v2_report.task_costs.is_empty() {
+            eprintln!("\n  Task costs:");
+            eprintln!(
+                "  {:.<24} {:>8} {:>8} {:>9} {:>6} {:>6}",
+                "task", "tok_in", "tok_out", "cost", "calls", "result"
+            );
+            for tc in &v2_report.task_costs {
+                eprintln!(
+                    "  {:.<24} {:>8} {:>8} ${:>7.4} {:>6} {:>6}",
+                    tc.task_id,
+                    tc.tokens_in,
+                    tc.tokens_out,
+                    tc.cost_usd,
+                    tc.agent_calls,
+                    tc.outcome,
+                );
+            }
+        }
     }
 
     if v2_report.tasks_failed > 0 && !cli.quiet && !v2_report.failure_reasons.is_empty() {

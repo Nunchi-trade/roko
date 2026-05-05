@@ -619,6 +619,17 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                             "tasks_completed": p.tasks_completed,
                             "tasks_failed": p.tasks_failed,
                         })).collect::<Vec<_>>(),
+                        "task_costs": v2_report.task_costs.iter().map(|tc| serde_json::json!({
+                            "plan_id": tc.plan_id,
+                            "task_id": tc.task_id,
+                            "model": tc.model,
+                            "provider": tc.provider,
+                            "tokens_in": tc.tokens_in,
+                            "tokens_out": tc.tokens_out,
+                            "cost_usd": tc.cost_usd,
+                            "agent_calls": tc.agent_calls,
+                            "outcome": tc.outcome,
+                        })).collect::<Vec<_>>(),
                     }))
                     .unwrap_or_default()
                 );
@@ -636,6 +647,25 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         "  {status} {} — {}/{} tasks",
                         p.plan_id, p.tasks_completed, p.tasks_total,
                     );
+                }
+                // Per-task cost breakdown.
+                if !v2_report.task_costs.is_empty() {
+                    eprintln!("\n  Task costs:");
+                    eprintln!(
+                        "  {:.<24} {:>8} {:>8} {:>9} {:>6} {:>6}",
+                        "task", "tok_in", "tok_out", "cost", "calls", "result"
+                    );
+                    for tc in &v2_report.task_costs {
+                        eprintln!(
+                            "  {:.<24} {:>8} {:>8} ${:>7.4} {:>6} {:>6}",
+                            tc.task_id,
+                            tc.tokens_in,
+                            tc.tokens_out,
+                            tc.cost_usd,
+                            tc.agent_calls,
+                            tc.outcome,
+                        );
+                    }
                 }
             }
 

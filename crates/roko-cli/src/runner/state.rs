@@ -140,6 +140,14 @@ pub struct RunState {
     /// Per-task failure reasons (plan_id:task_id → reason string).
     /// Populated when a task fails so the final summary can show why.
     pub failure_reasons: HashMap<String, String>,
+
+    /// Playbook IDs injected per task attempt (keyed by attempt key
+    /// `"{plan_id}:{task_id}:{attempt}"`). Populated at dispatch time from
+    /// prompt diagnostics so gate terminal can call `PlaybookStore::record_outcome`.
+    pub task_playbook_ids: HashMap<String, Vec<String>>,
+
+    /// Per-task cost reports collected as tasks complete or fail.
+    pub task_costs: Vec<super::types::TaskCostReport>,
 }
 
 impl RunState {
@@ -193,6 +201,8 @@ impl RunState {
             task_fingerprints: Vec::new(),
             routing_context: None,
             failure_reasons: HashMap::new(),
+            task_playbook_ids: HashMap::new(),
+            task_costs: Vec::new(),
         }
     }
 
