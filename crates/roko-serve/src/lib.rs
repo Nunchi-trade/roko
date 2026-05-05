@@ -308,7 +308,11 @@ impl ServerBuilder {
                 state_hub,
             )?));
         }
-        let state = Arc::clone(self.state.as_ref().expect("state just set"));
+        let state = Arc::clone(
+            self.state
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("server state not initialized"))?,
+        );
         let roko_config = state.load_roko_config();
         validate_bind_safety(&addr, &roko_config.serve)?;
         if let Err(err) = state.restore_snapshot().await {
@@ -331,6 +335,7 @@ impl ServerBuilder {
         let _cold_archival = start_cold_archival_timer(Arc::clone(&state));
         let _workspace_gc = start_workspace_gc(Arc::clone(&state));
         let _handle_gc = start_handle_gc(Arc::clone(&state));
+        let _demurrage = start_demurrage_timer(Arc::clone(&state));
 
         // Load persisted deployments from disk.
         routes::load_persisted_deployments(&state).await;
@@ -389,9 +394,17 @@ impl ServerBuilder {
                     .append(true)
                     .open(&log_path)
                 {
-                    let f2 = f
-                        .try_clone()
-                        .unwrap_or_else(|_| std::fs::File::open("/dev/null").expect("/dev/null"));
+                    let f2 = f.try_clone().unwrap_or_else(|e| {
+                        warn!("failed to clone log file handle: {e}; stderr will be suppressed");
+                        // Return a handle to /dev/null via a pipe-to-nowhere trick:
+                        // Stdio::null() is the spawn-level API, so for the File slot we
+                        // open /dev/null explicitly, falling back to piped-null.
+                        std::fs::File::open("/dev/null").unwrap_or_else(|_| {
+                            // On platforms without /dev/null, create a temp file as last resort.
+                            let tmp = std::env::temp_dir().join(".roko-null");
+                            std::fs::File::create(&tmp).unwrap_or_else(|_| f.try_clone().unwrap_or(f))
+                        })
+                    });
                     (std::process::Stdio::from(f), std::process::Stdio::from(f2))
                 } else {
                     (std::process::Stdio::null(), std::process::Stdio::null())
@@ -1678,6 +1691,47 @@ fn start_handle_gc(state: Arc<AppState>) -> JoinHandle<()> {
     })
 }
 
+/// Periodic knowledge demurrage: applies confidence/balance decay to knowledge
+/// entries that have not been re-validated since the last pass.
+///
+/// Runs every 5 minutes. Each tick opens the `KnowledgeStore` for the
+/// workspace and calls `apply_demurrage()`, which reduces balances on stale
+/// entries so that unused knowledge naturally fades.
+///
+/// Failures are logged at debug level but never crash the server.
+fn start_demurrage_timer(state: Arc<AppState>) -> JoinHandle<()> {
+    use roko_runtime::demurrage_consumer::{DemurrageConsumer, DemurrageConsumerConfig};
+
+    tokio::spawn(async move {
+        let _consumer = DemurrageConsumer::new(DemurrageConsumerConfig::default());
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+
+        // Skip the first immediate tick — let the server warm up.
+        interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = state.cancel.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+
+            let store =
+                roko_neuro::knowledge_store::KnowledgeStore::for_workdir(&state.workdir);
+            match store.apply_demurrage() {
+                Ok(0) => {
+                    debug!("demurrage pass: no entries taxed");
+                }
+                Ok(n) => {
+                    debug!(entries_taxed = n, "demurrage pass completed");
+                }
+                Err(e) => {
+                    debug!(error = %e, "demurrage pass failed");
+                }
+            }
+        }
+    })
+}
+
 /// Periodic cold archival: migrates aged-out engrams from the hot substrate
 /// (`.roko/engrams.jsonl` / `FileSubstrate`) to compressed monthly JSONL
 /// archives in `.roko/cold/`.
@@ -1860,10 +1914,13 @@ fn create_deploy_backend(roko_config: &RokoConfig) -> Arc<dyn deploy::DeployBack
                 "failed to create deploy backend '{}': {e}; falling back to manual",
                 dc.backend
             );
-            Arc::from(
-                deploy::create_backend("manual", None, None, None)
-                    .expect("manual backend cannot fail"),
-            )
+            match deploy::create_backend("manual", None, None, None) {
+                Ok(b) => Arc::from(b),
+                Err(e2) => {
+                    warn!("manual backend creation unexpectedly failed: {e2}; using default");
+                    Arc::from(deploy::manual::ManualBackend::default())
+                }
+            }
         }
     }
 }
