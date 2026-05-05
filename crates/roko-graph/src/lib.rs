@@ -37,6 +37,7 @@
 //! ```
 
 pub mod cell;
+pub mod engine;
 pub mod loader;
 pub mod registry;
 pub mod topo;
@@ -44,6 +45,7 @@ pub mod types;
 
 // Re-export primary types at crate root for convenience.
 pub use cell::{Cell, CellContext, CellVersion};
+pub use engine::{GraphEngine, GraphOutput, NodeResult, NodeStatus, default_registry};
 pub use registry::{CellFactory, CellRegistry};
 pub use types::{
     Edge, EdgeCondition, Graph, GraphError, GraphMetadata, GraphNodeIdx, Node, NodeId,

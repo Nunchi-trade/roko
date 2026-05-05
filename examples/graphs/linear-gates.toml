@@ -1,0 +1,52 @@
+# Linear gate pipeline: compile -> test -> clippy
+#
+# This is the standard CI verification pipeline for a Rust workspace.
+# Each gate must pass before the next one executes.
+#
+# Usage:
+#   roko graph run examples/graphs/linear-gates.toml
+#   roko graph validate examples/graphs/linear-gates.toml
+
+[graph]
+name = "linear-gates"
+description = "Standard Rust CI pipeline: compile, test, then clippy"
+version = "1.0.0"
+
+[graph.labels]
+category = "ci"
+language = "rust"
+
+[[nodes]]
+id = "compile"
+cell_type = "gate.compile"
+outputs = ["artifact"]
+[nodes.config]
+workspace = "."
+
+[[nodes]]
+id = "test"
+cell_type = "gate.test"
+inputs = ["compile.artifact"]
+outputs = ["report"]
+[nodes.config]
+timeout_secs = 300
+
+[[nodes]]
+id = "clippy"
+cell_type = "gate.clippy"
+inputs = ["test.report"]
+outputs = ["lint_report"]
+[nodes.config]
+strict = true
+
+[[edges]]
+from = "compile"
+to = "test"
+[edges.condition]
+type = "success"
+
+[[edges]]
+from = "test"
+to = "clippy"
+[edges.condition]
+type = "success"

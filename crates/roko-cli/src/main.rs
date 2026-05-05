@@ -408,6 +408,13 @@ Examples:
         cmd: IndexCmd,
     },
 
+    // ── Graph execution ──────────────────────────────────────────────
+    /// Execute, validate, and inspect graph definitions (DAGs of cells).
+    Graph {
+        #[command(subcommand)]
+        cmd: commands::graph::GraphCmd,
+    },
+
     // ── Server & deployment ─────────────────────────────────────────
     /// Start roko serve + all configured [[agents]] in one command.
     #[command(after_help = "\
@@ -1894,6 +1901,9 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
 
         // ── Code intelligence ───────────────────────────────────────
         Command::Index { cmd } => cmd_index(cli, cmd),
+
+        // ── Graph execution ──────────────────────────────────────────
+        Command::Graph { cmd } => commands::graph::cmd_graph(cmd).await,
 
         // ── Server & deployment ─────────────────────────────────────
         Command::Up { workdir } => {

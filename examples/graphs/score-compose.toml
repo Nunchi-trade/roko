@@ -1,0 +1,45 @@
+# Score -> Compose -> Act pipeline
+#
+# Demonstrates the universal loop pattern: score a signal, compose a prompt,
+# then act on it. Each step passes its output engrams to the next.
+#
+# These cells are currently backed by no-op implementations that pass
+# input through unchanged. Replace with real Scorer/Composer/Actor cells
+# once those are registered in the default registry.
+#
+# Usage:
+#   roko graph run examples/graphs/score-compose.toml
+
+[graph]
+name = "score-compose-act"
+description = "Universal loop: score -> compose -> act"
+version = "1.0.0"
+
+[graph.labels]
+category = "workflow"
+pattern = "universal-loop"
+
+[[nodes]]
+id = "score"
+cell_type = "score"
+outputs = ["scored_signal"]
+
+[[nodes]]
+id = "compose"
+cell_type = "compose"
+inputs = ["score.scored_signal"]
+outputs = ["prompt"]
+
+[[nodes]]
+id = "act"
+cell_type = "act"
+inputs = ["compose.prompt"]
+outputs = ["result"]
+
+[[edges]]
+from = "score"
+to = "compose"
+
+[[edges]]
+from = "compose"
+to = "act"
