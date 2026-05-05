@@ -3168,15 +3168,20 @@ pub struct ProjectLearningSnapshot {
     pub knowledge_path: PathBuf,
 }
 
-/// Return known episode JSONL locations for `workdir`, newest canonical path
-/// first, followed by legacy locations.
+/// Return known episode JSONL locations for `workdir`, canonical paths first,
+/// followed by legacy locations.
+///
+/// Order: root episodes (canonical) -> learn dir -> memory dir (legacy fallback).
 #[must_use]
 pub fn project_episode_paths(workdir: impl AsRef<Path>) -> Vec<PathBuf> {
     let roko = workdir.as_ref().join(".roko");
     vec![
-        roko.join("memory").join("episodes.jsonl"),
+        // Canonical: root episodes.jsonl
         roko.join("episodes.jsonl"),
+        // Canonical: learn directory
         roko.join("learn").join("episodes.jsonl"),
+        // Legacy fallback: memory directory (migration surface only)
+        roko.join("memory").join("episodes.jsonl"),
     ]
 }
 

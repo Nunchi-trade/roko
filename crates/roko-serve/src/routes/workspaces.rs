@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::state::{AppState, WorkspaceInfo};
+use crate::state::{AppState, WorkspaceInfo, WorkspaceStatus};
 use roko_fs::layout::RokoLayout;
 
 /// Request body for `POST /api/workspaces`.
@@ -160,19 +160,25 @@ async fn create_workspace(
         }
     }
 
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let info = WorkspaceInfo {
         id: id.clone(),
         path: dir.clone(),
-        created_at: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        created_at: now,
+        last_accessed_at: now,
+        status: WorkspaceStatus::Active,
     };
-    state
-        .ephemeral_workspaces
-        .write()
-        .await
-        .insert(id.clone(), info);
+    if let Err(e) = state.insert_workspace(info).await {
+        // Registry persistence failed — clean up directory best-effort.
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("persist workspace registry: {e}") })),
+        ));
+    }
 
     Ok(Json(json!({
         "id": id,
@@ -191,13 +197,19 @@ async fn delete_workspace(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
-    let info = {
-        let mut map = state.ephemeral_workspaces.write().await;
-        map.remove(&id)
+    let removed = match state.remove_workspace(&id).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("persist workspace registry: {e}"), "id": id })),
+            ));
+        }
     };
 
-    match info {
+    match removed {
         Some(ws) => {
+            // Best-effort directory removal after registry persistence succeeded.
             if let Err(err) = tokio::fs::remove_dir_all(&ws.path).await {
                 tracing::warn!(
                     workspace_id = %id,
@@ -220,14 +232,14 @@ async fn delete_workspace(
 /// Reads files from the workspace `.roko/` directory and returns whatever is
 /// available. Missing files are silently skipped; read errors are collected in
 /// the `errors` array so the caller always gets a 200 with partial data.
+///
+/// If the workspace path no longer exists, attempts to re-create it. If
+/// re-creation fails, returns HTTP 410 Gone.
 async fn get_workspace_state(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
-    let ws = {
-        let map = state.ephemeral_workspaces.read().await;
-        map.get(&id).cloned()
-    };
+    let ws = state.get_workspace_info(&id).await;
 
     let ws = match ws {
         Some(ws) => ws,
@@ -237,6 +249,70 @@ async fn get_workspace_state(
                 Json(json!({ "error": "workspace not found", "id": id })),
             ));
         }
+    };
+
+    // Re-validate: if the path is missing, attempt to re-create it.
+    let ws = if !ws.path.exists() {
+        // Try to re-create the workspace directory and .roko layout.
+        let recreated = tokio::fs::create_dir_all(&ws.path).await.is_ok();
+        if recreated {
+            let layout = RokoLayout::for_project(&ws.path);
+            if layout.ensure_dirs().await.is_ok() {
+                // Mark as Active, update last_accessed_at, persist.
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                {
+                    let mut map = state.ephemeral_workspaces.write().await;
+                    if let Some(entry) = map.get_mut(&id) {
+                        entry.status = WorkspaceStatus::Active;
+                        entry.last_accessed_at = now;
+                    }
+                }
+                let _ = state.persist_workspace_registry().await;
+                // Re-read the updated entry.
+                state.get_workspace_info(&id).await.unwrap_or(ws)
+            } else {
+                // Re-creation of .roko layout failed — mark Stale and return 410.
+                {
+                    let mut map = state.ephemeral_workspaces.write().await;
+                    if let Some(entry) = map.get_mut(&id) {
+                        entry.status = WorkspaceStatus::Stale;
+                    }
+                }
+                let _ = state.persist_workspace_registry().await;
+                return Err((
+                    axum::http::StatusCode::GONE,
+                    Json(json!({
+                        "error": "workspace path could not be recreated; create a new workspace",
+                        "id": id,
+                        "path": ws.path.display().to_string(),
+                    })),
+                ));
+            }
+        } else {
+            // Directory creation failed — mark Stale and return 410.
+            {
+                let mut map = state.ephemeral_workspaces.write().await;
+                if let Some(entry) = map.get_mut(&id) {
+                    entry.status = WorkspaceStatus::Stale;
+                }
+            }
+            let _ = state.persist_workspace_registry().await;
+            return Err((
+                axum::http::StatusCode::GONE,
+                Json(json!({
+                    "error": "workspace path could not be recreated; create a new workspace",
+                    "id": id,
+                    "path": ws.path.display().to_string(),
+                })),
+            ));
+        }
+    } else {
+        // Path exists — just touch last_accessed_at.
+        let _ = state.touch_workspace(&id).await;
+        ws
     };
 
     let roko_dir = ws.path.join(".roko");
@@ -256,18 +332,35 @@ async fn get_workspace_state(
         }
     };
 
-    // 2. Episodes: last 10 lines of .roko/memory/episodes.jsonl
-    let episodes = match read_jsonl_tail(roko_dir.join("memory").join("episodes.jsonl"), 10).await {
-        Ok(v) => Value::Array(v),
-        Err(ReadFileError::NotFound) => Value::Array(Vec::new()),
-        Err(ReadFileError::Io(e)) => {
-            errors.push(format!("episodes.jsonl: {e}"));
-            Value::Array(Vec::new())
+    // 2. Episodes: try canonical paths first, then legacy memory fallback.
+    //    Order: .roko/episodes.jsonl -> .roko/learn/episodes.jsonl -> .roko/memory/episodes.jsonl
+    let episodes = {
+        let candidate_paths = [
+            roko_dir.join("episodes.jsonl"),
+            roko_dir.join("learn").join("episodes.jsonl"),
+            // Legacy fallback — only used when canonical paths are missing.
+            roko_dir.join("memory").join("episodes.jsonl"),
+        ];
+        let mut result = Value::Array(Vec::new());
+        for path in candidate_paths {
+            match read_jsonl_tail(path, 10).await {
+                Ok(v) if !v.is_empty() => {
+                    result = Value::Array(v);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(ReadFileError::NotFound) => continue,
+                Err(ReadFileError::Io(e)) => {
+                    errors.push(format!("episodes.jsonl: {e}"));
+                    break;
+                }
+                Err(ReadFileError::Parse(e)) => {
+                    errors.push(format!("episodes.jsonl parse: {e}"));
+                    break;
+                }
+            }
         }
-        Err(ReadFileError::Parse(e)) => {
-            errors.push(format!("episodes.jsonl parse: {e}"));
-            Value::Array(Vec::new())
-        }
+        result
     };
 
     // 3. Plans: scan .roko/plans/ for subdirectories containing tasks.toml.

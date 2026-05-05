@@ -974,7 +974,9 @@ fn collect_episode_knowledge(task: &TaskDef, ctx: &PromptContext) -> Option<Prom
 }
 
 fn collect_playbooks(task: &TaskDef, ctx: &PromptContext) -> Option<PromptSection> {
-    let root = ctx.workdir.join(".roko").join("learn").join("playbooks");
+    let root = roko_core::Workspace::open(&ctx.workdir)
+        .map(|ws| ws.playbooks_dir())
+        .unwrap_or_else(|_| ctx.workdir.join(".roko").join("learn").join("playbooks"));
     let query = query_keywords(&task_query_text(task, ctx));
     let mut scored = Vec::new();
     let read_dir = match std::fs::read_dir(&root) {
@@ -1289,11 +1291,23 @@ fn query_keywords(text: &str) -> HashSet<String> {
 }
 
 fn episode_paths(workdir: &Path) -> Vec<PathBuf> {
-    vec![
-        workdir.join(".roko").join("episodes.jsonl"),
-        workdir.join(".roko").join("learn").join("episodes.jsonl"),
-        workdir.join(".roko").join("memory").join("episodes.jsonl"),
-    ]
+    // Build paths through Workspace accessors where possible; fall back to
+    // raw construction only for the legacy memory path.
+    //
+    // Order: root (canonical) -> learn -> memory (legacy fallback only).
+    match roko_core::Workspace::open(workdir) {
+        Ok(ws) => vec![
+            ws.episodes_path(),
+            ws.learn_episodes_path(),
+            // Legacy fallback — retained for reading pre-migration data.
+            ws.memory_dir().join("episodes.jsonl"),
+        ],
+        Err(_) => vec![
+            workdir.join(".roko").join("episodes.jsonl"),
+            workdir.join(".roko").join("learn").join("episodes.jsonl"),
+            workdir.join(".roko").join("memory").join("episodes.jsonl"),
+        ],
+    }
 }
 
 fn playbook_text(playbook: &roko_learn::playbook::Playbook) -> String {

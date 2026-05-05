@@ -511,6 +511,31 @@ fn project_roko_toml_loads_through_unified_loader() {
     );
 }
 
+// ── Root roko.toml roundtrip ─────────────────────────────────────────────
+
+#[test]
+fn root_roko_toml_roundtrip_preserves_model_registry() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let roko_toml = workspace_root.join("roko.toml");
+    if !roko_toml.exists() {
+        // Skip when running outside the workspace (e.g. in a minimal CI container).
+        return;
+    }
+    let raw = std::fs::read_to_string(&roko_toml).unwrap();
+    let config = RokoConfig::from_toml(&raw).unwrap();
+
+    let serialized = config.to_toml_pretty().unwrap();
+    let reparsed = RokoConfig::from_toml(&serialized).unwrap();
+
+    assert_eq!(config.providers, reparsed.providers);
+    assert_eq!(config.models, reparsed.models);
+    assert_eq!(config.server, reparsed.server);
+    assert_eq!(config.serve, reparsed.serve);
+}
+
 // ── RetryPolicy (existing module, verify integration) ───────────────────
 
 #[test]

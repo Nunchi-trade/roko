@@ -1176,14 +1176,29 @@ impl DashboardSnapshot {
 
     pub fn load_from_workdir(workdir: &Path) -> Result<Self, io::Error> {
         let root = resolve_snapshot_root(workdir);
-        let roko_dir = root.join(".roko");
-        let state_dir = roko_dir.join("state");
-        let learn_dir = roko_dir.join("learn");
+
+        // Derive paths through Workspace accessors when the workspace is
+        // openable; fall back to raw path construction otherwise.
+        let (roko_dir, state_dir, learn_dir, engrams_path) =
+            if let Ok(ws) = crate::workspace::Workspace::open(&root) {
+                (
+                    ws.roko_dir(),
+                    ws.state_dir(),
+                    ws.learn_dir(),
+                    ws.engrams_path(),
+                )
+            } else {
+                let rd = root.join(".roko");
+                let sd = rd.join("state");
+                let ld = rd.join("learn");
+                let ep = rd.join("engrams.jsonl");
+                (rd, sd, ld, ep)
+            };
 
         let state =
             read_json_value(&state_dir.join("executor.json"))?.unwrap_or(serde_json::Value::Null);
         let task_trackers = read_task_trackers(&state_dir.join("task-trackers.json"))?;
-        let signal_gates = read_signal_gates(&roko_dir.join("engrams.jsonl"))?;
+        let signal_gates = read_signal_gates(&engrams_path)?;
         let event_entries = read_event_entries(&state_dir.join("events.json"))?;
         let experiment_winners = read_experiment_winners(&learn_dir.join("experiments.json"))?;
         let cfactor_trend = read_cfactor_trend(&learn_dir.join("c-factor.jsonl"))?;
@@ -2417,17 +2432,31 @@ fn entry_timestamp_ms(entry: &serde_json::Value) -> Option<u64> {
         })
 }
 
-/// Bootstrap episodes from `.roko/episodes.jsonl` into the snapshot.
+/// Bootstrap episodes from known episode JSONL locations into the snapshot.
+///
+/// Reads canonical paths first (root episodes, learn dir), then falls back to
+/// legacy `.roko/memory/episodes.jsonl` only if canonical locations are empty.
 fn bootstrap_episodes(snapshot: &mut DashboardSnapshot, roko_dir: &Path) {
-    let episodes_path = roko_dir.join("episodes.jsonl");
-    let content = match std::fs::read_to_string(&episodes_path) {
-        Ok(text) => text,
-        Err(_) => {
-            // Also try the memory directory.
-            match std::fs::read_to_string(roko_dir.join("memory").join("episodes.jsonl")) {
-                Ok(text) => text,
-                Err(_) => return,
+    // Canonical: .roko/episodes.jsonl
+    let candidates = [
+        roko_dir.join("episodes.jsonl"),
+        roko_dir.join("learn").join("episodes.jsonl"),
+        // Legacy fallback — only tried if canonical paths have no data.
+        roko_dir.join("memory").join("episodes.jsonl"),
+    ];
+    let content = {
+        let mut found = None;
+        for path in &candidates {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if !text.trim().is_empty() {
+                    found = Some(text);
+                    break;
+                }
             }
+        }
+        match found {
+            Some(text) => text,
+            None => return,
         }
     };
 

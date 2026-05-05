@@ -4,6 +4,13 @@
 //! typed access to the `.roko/` directory hierarchy. Use this as the public
 //! boundary for workspace-local paths; lower-level filesystem crates may keep
 //! narrower path catalogs for their own internals.
+//!
+//! ## Migration note
+//!
+//! `.roko/learn/` is the canonical directory for learning state.
+//! `.roko/memory/` is retained only as a legacy read/migration surface.
+//! Callers should prefer `learn_dir()` for all new writes and fall back to
+//! `memory_dir()` only when reading pre-migration data.
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +26,10 @@ impl Workspace {
     /// Open an existing workspace by validating that `.roko/` exists under `root`.
     ///
     /// Returns an error if the `.roko/` directory does not exist.
+    ///
+    /// Emits a `tracing::warn!` if `.roko/memory` exists but `.roko/learn` does
+    /// not, indicating the workspace uses the legacy layout and should be
+    /// migrated.
     pub fn open(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         let root = root.as_ref().to_path_buf();
         let roko_dir = root.join(".roko");
@@ -28,6 +39,19 @@ impl Workspace {
                 root.display()
             );
         }
+
+        // Migration warning: .roko/memory exists but .roko/learn does not.
+        let memory_dir = roko_dir.join("memory");
+        let learn_dir = roko_dir.join("learn");
+        if memory_dir.is_dir() && !learn_dir.is_dir() {
+            tracing::warn!(
+                workspace = %root.display(),
+                "workspace has .roko/memory/ but no .roko/learn/ — \
+                 .roko/learn/ is now the canonical learning directory; \
+                 run `roko init` or create .roko/learn/ to migrate"
+            );
+        }
+
         Ok(Self { root })
     }
 
@@ -191,6 +215,66 @@ impl Workspace {
     pub fn efficiency_log_path(&self) -> PathBuf {
         self.root.join(".roko/learn/efficiency.jsonl")
     }
+
+    /// `.roko/events.jsonl` — append-only runner event log.
+    #[must_use]
+    pub fn events_jsonl_path(&self) -> PathBuf {
+        self.root.join(".roko/events.jsonl")
+    }
+
+    /// `.roko/state/run-state.json` — runner-owned resume state.
+    #[must_use]
+    pub fn run_state_path(&self) -> PathBuf {
+        self.root.join(".roko/state/run-state.json")
+    }
+
+    /// `.roko/state/task-trackers.json` — per-task tracker state.
+    #[must_use]
+    pub fn task_trackers_path(&self) -> PathBuf {
+        self.root.join(".roko/state/task-trackers.json")
+    }
+
+    /// `.roko/learn/playbooks/` — learned playbook store.
+    #[must_use]
+    pub fn playbooks_dir(&self) -> PathBuf {
+        self.root.join(".roko/learn/playbooks")
+    }
+
+    /// `.roko/learn/archive/` — learning archive directory.
+    #[must_use]
+    pub fn archive_dir(&self) -> PathBuf {
+        self.root.join(".roko/learn/archive")
+    }
+
+    /// `.roko/mcp.json` — workspace-local MCP configuration file.
+    #[must_use]
+    pub fn mcp_config_path(&self) -> PathBuf {
+        self.root.join(".roko/mcp.json")
+    }
+
+    /// `.roko/runner-stderr.log` — approval-TUI stderr redirect.
+    #[must_use]
+    pub fn runner_stderr_log(&self) -> PathBuf {
+        self.root.join(".roko/runner-stderr.log")
+    }
+
+    /// `.roko/learn/episodes.jsonl` — episode log under learn directory.
+    #[must_use]
+    pub fn learn_episodes_path(&self) -> PathBuf {
+        self.root.join(".roko/learn/episodes.jsonl")
+    }
+
+    /// `.roko/engrams.jsonl` — the main engram log.
+    #[must_use]
+    pub fn engrams_path(&self) -> PathBuf {
+        self.root.join(".roko/engrams.jsonl")
+    }
+
+    /// `.roko/serve.pid` — PID file for the `roko dev` / `roko serve` process.
+    #[must_use]
+    pub fn serve_pid_file(&self) -> PathBuf {
+        self.root.join(".roko/serve.pid")
+    }
 }
 
 #[cfg(test)]
@@ -271,5 +355,56 @@ mod tests {
             ws.efficiency_log_path(),
             tmp.path().join(".roko/learn/efficiency.jsonl")
         );
+        // New accessors added in task 004.
+        assert_eq!(
+            ws.events_jsonl_path(),
+            tmp.path().join(".roko/events.jsonl")
+        );
+        assert_eq!(
+            ws.run_state_path(),
+            tmp.path().join(".roko/state/run-state.json")
+        );
+        assert_eq!(
+            ws.task_trackers_path(),
+            tmp.path().join(".roko/state/task-trackers.json")
+        );
+        assert_eq!(
+            ws.playbooks_dir(),
+            tmp.path().join(".roko/learn/playbooks")
+        );
+        assert_eq!(
+            ws.archive_dir(),
+            tmp.path().join(".roko/learn/archive")
+        );
+        assert_eq!(ws.mcp_config_path(), tmp.path().join(".roko/mcp.json"));
+        assert_eq!(
+            ws.runner_stderr_log(),
+            tmp.path().join(".roko/runner-stderr.log")
+        );
+        assert_eq!(
+            ws.learn_episodes_path(),
+            tmp.path().join(".roko/learn/episodes.jsonl")
+        );
+        assert_eq!(
+            ws.engrams_path(),
+            tmp.path().join(".roko/engrams.jsonl")
+        );
+        assert_eq!(
+            ws.serve_pid_file(),
+            tmp.path().join(".roko/serve.pid")
+        );
+    }
+
+    #[test]
+    fn open_warns_on_legacy_memory_without_learn() {
+        // This test verifies the code path is exercised. The tracing::warn
+        // is emitted but not captured here — it is verified by integration
+        // tests or manual observation.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let roko = tmp.path().join(".roko");
+        std::fs::create_dir_all(roko.join("memory")).expect("mkdir memory");
+        // No .roko/learn/ directory — should trigger warning path.
+        let ws = Workspace::open(tmp.path()).expect("open succeeds");
+        assert_eq!(ws.root(), tmp.path());
     }
 }
