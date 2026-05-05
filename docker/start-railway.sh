@@ -230,13 +230,23 @@ if [ "${MIRAGE_NO_PERSIST:-}" = "1" ]; then
   mirage_args+=(--no-persist)
 fi
 
+MIRAGE_OK=0
 start_child mirage mirage-rs "${mirage_args[@]}"
 mirage_pid="${CHILD_PIDS[-1]}"
-wait_http mirage "http://${MIRAGE_HEALTH_HOST}:${MIRAGE_PORT}/health" "${mirage_pid}" 60
-
-if command -v forge &>/dev/null && [ -d "$WORKDIR/contracts" ]; then
-    log "Building ISFR contracts..."
-    (cd "$WORKDIR/contracts" && forge build) || log "WARN: forge build failed, contract deployment may fail"
+if wait_http mirage "http://${MIRAGE_HEALTH_HOST}:${MIRAGE_PORT}/health" "${mirage_pid}" 60; then
+  MIRAGE_OK=1
+  if command -v forge &>/dev/null && [ -d "$WORKDIR/contracts" ]; then
+      log "Building ISFR contracts..."
+      (cd "$WORKDIR/contracts" && forge build) || log "WARN: forge build failed, contract deployment may fail"
+  fi
+else
+  log "WARN: mirage failed to start — continuing without chain backend"
+  # Remove mirage from CORE_PIDS so its exit doesn't bring down the service
+  NEW_CORE_PIDS=()
+  for cpid in "${CORE_PIDS[@]}"; do
+    [ "${cpid}" != "${mirage_pid}" ] && NEW_CORE_PIDS+=("${cpid}")
+  done
+  CORE_PIDS=("${NEW_CORE_PIDS[@]}")
 fi
 
 start_child roko roko serve \
