@@ -220,7 +220,7 @@ COMMAND GROUPS:
   Core workflow:     init, do, run, status, doctor
   Planning:          plan, prd
   Agents:            agent (create, start, stop, chat, serve)
-  Research:          research, think
+  Research:          research, think, note
   Knowledge:         knowledge (query, dream, custody, archive)
   Learning:          learn (router, experiments, efficiency, tune)
   Jobs:              job
@@ -497,6 +497,22 @@ Examples:
         /// Working directory (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
+    },
+    /// Capture a quick note (no LLM, instant).
+    #[command(after_help = "\
+Examples:
+  roko note \"my thought here\"
+  roko note --tag feature \"add cursor support\"
+  roko note --tag bug --tag urgent \"login is broken\"")]
+    Note {
+        /// Tag(s) to attach to the note.
+        #[arg(long = "tag", short = 't')]
+        tags: Vec<String>,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Note text.
+        text: Vec<String>,
     },
     /// Adjust behavior by writing roko.toml.
     #[command(
@@ -2357,6 +2373,10 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         }
         Command::Think { question, workdir } => {
             commands::think::cmd_think(cli, question, workdir).await
+        }
+        Command::Note { tags, workdir, text } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            commands::note::cmd_note(&wd, text, tags, cli.json)
         }
         Command::Tune(cmd) => commands::tune::cmd_tune(cli, cmd).await,
         Command::Knowledge { cmd } => commands::knowledge::dispatch_knowledge(cli, cmd).await,

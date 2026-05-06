@@ -30,6 +30,21 @@ pub(crate) fn task_crate_name(task_def: Option<&crate::task_parser::TaskDef>) ->
         .find(|crate_name| seen.insert(crate_name.clone()))
 }
 
+/// Collect all distinct crate names from a task's modified files.
+///
+/// Used by gate dispatch to scope `cargo check` / `cargo clippy` to only
+/// the crates a task touches, avoiding false failures from pre-existing
+/// errors in unrelated crates.
+pub(crate) fn task_target_crates(task_def: Option<&crate::task_parser::TaskDef>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    task_def
+        .into_iter()
+        .flat_map(|task| task.files.iter())
+        .filter_map(|file| crate_name_for_path(file))
+        .filter(|name| seen.insert(name.clone()))
+        .collect()
+}
+
 /// Best-effort crate key derivation from a repository-relative file path.
 pub(crate) fn crate_name_for_path(path: &str) -> Option<String> {
     let normalized = path.replace('\\', "/");

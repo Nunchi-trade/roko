@@ -465,7 +465,14 @@ impl App {
         if let Some(page) = initial_page {
             let _ = scaffold.set_active_page(page);
         }
-        let data = DashboardData::load_best_effort(&workdir);
+        // When connected to a live StateHub, skip disk loading — the hub is
+        // the source of truth and will populate state via snapshot events.
+        // Only fall back to disk for the standalone `roko dashboard` command.
+        let data = if state_hub.is_some() {
+            DashboardData::default()
+        } else {
+            DashboardData::load_best_effort(&workdir)
+        };
         let last_data_gen = data.generation;
         let mut tui_state = TuiState::new();
         tui_state.update_from_snapshot(&data);

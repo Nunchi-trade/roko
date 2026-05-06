@@ -15,6 +15,7 @@ pub mod isfr;
 pub mod job;
 pub mod knowledge;
 pub mod learn;
+pub mod note;
 pub mod plan;
 pub mod prd;
 pub mod research;

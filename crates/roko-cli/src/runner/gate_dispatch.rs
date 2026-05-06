@@ -36,6 +36,7 @@ pub fn spawn_gate(
     timeout_secs: u64,
     gate_tx: mpsc::Sender<GateCompletion>,
     gate_sem: Arc<Semaphore>,
+    target_crates: Vec<String>,
 ) {
     tokio::spawn(async move {
         let t_wait = Instant::now();
@@ -53,7 +54,7 @@ pub fn spawn_gate(
             );
         }
         let start = Instant::now();
-        let signal = gate_signal(&plan_id, &task_id, rung, &workdir);
+        let signal = gate_signal(&plan_id, &task_id, rung, &workdir, &target_crates);
         let ctx = roko_core::Context::now();
         let limit = Duration::from_secs(timeout_secs.max(1));
 
@@ -189,6 +190,7 @@ pub fn spawn_plan_verify(
                     &task_id,
                     RUNG_PLAN_VERIFY,
                     &workdir_for_run,
+                    &[], // plan-level verify runs workspace-wide
                 );
                 all.extend(run_verify_steps(&signal, &ctx, &task_id, steps).await);
             }
@@ -246,7 +248,13 @@ pub fn spawn_plan_verify(
     });
 }
 
-fn gate_signal(plan_id: &str, task_id: &str, rung: u32, workdir: &std::path::Path) -> Engram {
+fn gate_signal(
+    plan_id: &str,
+    task_id: &str,
+    rung: u32,
+    workdir: &std::path::Path,
+    target_crates: &[String],
+) -> Engram {
     let attempt_sentinel = RokoLayout::for_project(workdir)
         .gate_attempts_dir()
         .join(format!(
@@ -256,6 +264,7 @@ fn gate_signal(plan_id: &str, task_id: &str, rung: u32, workdir: &std::path::Pat
         ));
     let payload = GatePayload::in_dir(workdir)
         .with_label(format!("{plan_id}:{task_id}:rung-{rung}"))
+        .with_target_crates(target_crates.to_vec())
         .with_env("ROKO_GATE_PLAN_ID", plan_id)
         .with_env("ROKO_GATE_TASK_ID", task_id)
         .with_env("ROKO_GATE_RUNG", rung.to_string())

@@ -41,6 +41,7 @@ use crate::dispatch::{
 };
 use crate::inline::DiffEntry;
 use crate::knowledge_helpers::{build_knowledge_routing_advice, neuro_prompt_task_category};
+use crate::task_helpers::task_target_crates;
 use crate::task_parser::TaskDef;
 use roko_learn::playbook::PlaybookStore;
 use roko_learn::post_gate_reflection::{PostGateReflectionStore, ReflectionGateOutcome};
@@ -3926,6 +3927,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             } else {
                 let verify_steps = task_def.map(|task| task.verify.clone()).unwrap_or_default();
                 let complexity = gate_plan_complexity_for_task(task_def);
+                let target_crates = task_target_crates(task_def);
                 gate_dispatch::spawn_gate(
                     plan_id.clone(),
                     task_id,
@@ -3937,6 +3939,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     duration_secs(gate_timeout(ctx.config, *rung)),
                     ctx.gate_tx.clone(),
                     ctx.gate_sem.clone(),
+                    target_crates,
                 );
             }
         }

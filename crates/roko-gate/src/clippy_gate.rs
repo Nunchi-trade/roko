@@ -113,12 +113,16 @@ impl Verify for ClippyGate {
             }
         };
 
-        // For cargo, `lint_args` already embeds `-- -D warnings`; splice
+        // Use scoped lint args when the payload specifies target crates,
+        // falling back to workspace-wide when no crates are specified.
+        // For cargo, the args already embed `-- -D warnings`; splice
         // extra_args before the `--` sentinel so they apply to the
         // invocation, not to clippy itself.
-        let base: Vec<&str> = self.build_system.lint_args().to_vec();
+        let base = self
+            .build_system
+            .scoped_lint_args(&payload.target_crates);
         let mut cmd = Command::new(self.build_system.program());
-        let dash_idx = base.iter().position(|a| *a == "--");
+        let dash_idx = base.iter().position(|a| a == "--");
         if let Some(idx) = dash_idx {
             for arg in &base[..idx] {
                 cmd.arg(arg);

@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 ///     target_dir: None,
 ///     extra_env: vec![],
 ///     label: Some("check-login-module".into()),
+///     target_crates: vec!["roko-agent".into()],
 /// };
 /// let sig = Signal::builder(Kind::Task)
 ///     .body(Body::from_json(&payload).expect("example payload should serialize"))
@@ -43,6 +44,12 @@ pub struct GatePayload {
 
     /// Optional identifying label for logging (e.g. plan/task id).
     pub label: Option<String>,
+
+    /// Crates modified by the task. When non-empty, compile and lint gates
+    /// use `-p <crate>` instead of `--workspace` so pre-existing errors in
+    /// unrelated crates don't cause false gate failures.
+    #[serde(default)]
+    pub target_crates: Vec<String>,
 }
 
 impl GatePayload {
@@ -54,6 +61,7 @@ impl GatePayload {
             target_dir: None,
             extra_env: Vec::new(),
             label: None,
+            target_crates: Vec::new(),
         }
     }
 
@@ -75,6 +83,13 @@ impl GatePayload {
     #[must_use]
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Scope compile/lint gates to specific crates (uses `-p` instead of `--workspace`).
+    #[must_use]
+    pub fn with_target_crates(mut self, crates: Vec<String>) -> Self {
+        self.target_crates = crates;
         self
     }
 }
@@ -121,17 +136,40 @@ impl BuildSystem {
     }
 
     /// The default "check" command for this build system (args after the program).
+    ///
+    /// For Cargo, uses `--workspace --lib` (no `--all-targets`) so test-only
+    /// compilation errors do not block the compile gate. Test compilation is
+    /// handled by [`TestGate`] instead.
     #[must_use]
     #[allow(clippy::match_same_arms)]
     pub const fn check_args(self) -> &'static [&'static str] {
         match self {
-            Self::Cargo => &["check", "--workspace", "--all-targets"],
+            Self::Cargo => &["check", "--workspace", "--lib"],
             Self::Npm => &["run", "build"],
             Self::Go => &["build", "./..."],
             Self::Python => &["-c", "import ast; ast.parse(open('.').read())"],
             Self::Forge => &["build"],
             Self::Make => &["build"],
         }
+    }
+
+    /// Build a scoped check command targeting specific crates.
+    ///
+    /// When `crates` is non-empty, emits `-p <name>` for each crate instead
+    /// of `--workspace`. Falls back to [`check_args`](Self::check_args) when
+    /// the list is empty or the build system is not Cargo.
+    #[must_use]
+    pub fn scoped_check_args(self, crates: &[String]) -> Vec<String> {
+        if self != Self::Cargo || crates.is_empty() {
+            return self.check_args().iter().map(|s| (*s).to_owned()).collect();
+        }
+        let mut args = vec!["check".to_owned()];
+        for krate in crates {
+            args.push("-p".to_owned());
+            args.push(krate.clone());
+        }
+        args.push("--lib".to_owned());
+        args
     }
 
     /// The default "test" command for this build system.
@@ -153,16 +191,19 @@ impl BuildSystem {
 
     /// The default "lint" command for this build system.
     ///
-    /// For Cargo this is `cargo clippy --workspace --all-targets
-    /// -- -D warnings`. Callers that want a softer lint (warnings → warnings)
-    /// can append their own args via the gate's `with_extra_args`.
+    /// For Cargo this is `cargo clippy --workspace --lib --no-deps -- -D warnings`.
+    /// Uses `--lib` (not `--all-targets`) so test-only lint errors do not
+    /// block the gate, and `--no-deps` to skip linting third-party code.
+    /// Callers that want a softer lint can append their own args via the
+    /// gate's `with_extra_args`.
     #[must_use]
     pub const fn lint_args(self) -> &'static [&'static str] {
         match self {
             Self::Cargo => &[
                 "clippy",
                 "--workspace",
-                "--all-targets",
+                "--lib",
+                "--no-deps",
                 "--",
                 "-D",
                 "warnings",
@@ -173,6 +214,29 @@ impl BuildSystem {
             Self::Forge => &["fmt", "--check"],
             Self::Make => &["lint"],
         }
+    }
+
+    /// Build a scoped lint command targeting specific crates.
+    ///
+    /// When `crates` is non-empty, emits `-p <name>` for each crate instead
+    /// of `--workspace`. Falls back to [`lint_args`](Self::lint_args) when
+    /// the list is empty or the build system is not Cargo.
+    #[must_use]
+    pub fn scoped_lint_args(self, crates: &[String]) -> Vec<String> {
+        if self != Self::Cargo || crates.is_empty() {
+            return self.lint_args().iter().map(|s| (*s).to_owned()).collect();
+        }
+        let mut args = vec!["clippy".to_owned()];
+        for krate in crates {
+            args.push("-p".to_owned());
+            args.push(krate.clone());
+        }
+        args.push("--lib".to_owned());
+        args.push("--no-deps".to_owned());
+        args.push("--".to_owned());
+        args.push("-D".to_owned());
+        args.push("warnings".to_owned());
+        args
     }
 
     /// The program (binary) invoked for this build system.

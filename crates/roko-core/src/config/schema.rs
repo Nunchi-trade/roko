@@ -205,6 +205,49 @@ impl Default for RokoConfig {
     }
 }
 
+// ---- standard provider synthesis -----------------------------------------
+
+/// Check well-known API-key env vars and synthesize provider entries.
+///
+/// Each env var is checked independently — setting only `OPENAI_API_KEY` will
+/// produce a single `"openai"` entry while the others are skipped.
+///
+/// Callers should merge these *under* user-defined providers so that explicit
+/// `[providers.*]` config always takes precedence.
+#[must_use]
+pub fn synthesize_standard_providers() -> HashMap<String, ProviderConfig> {
+    use super::provider::{default_provider_timeout_ms, default_provider_ttft_timeout_ms, default_provider_connect_timeout_ms};
+
+    let specs: &[(&str, &str, ProviderKind, Option<&str>)] = &[
+        ("anthropic", "ANTHROPIC_API_KEY", ProviderKind::AnthropicApi, Some("https://api.anthropic.com")),
+        ("openai",    "OPENAI_API_KEY",    ProviderKind::OpenAiCompat, Some("https://api.openai.com")),
+        ("gemini",    "GEMINI_API_KEY",    ProviderKind::GeminiApi,    Some("https://generativelanguage.googleapis.com")),
+        ("perplexity","PERPLEXITY_API_KEY", ProviderKind::PerplexityApi, None),
+    ];
+
+    let mut providers = HashMap::new();
+    for &(name, env_var, kind, base_url) in specs {
+        if std::env::var(env_var).ok().filter(|v| !v.is_empty()).is_some() {
+            providers.insert(
+                name.to_string(),
+                ProviderConfig {
+                    kind,
+                    base_url: base_url.map(String::from),
+                    api_key_env: Some(env_var.to_string()),
+                    command: None,
+                    args: None,
+                    timeout_ms: default_provider_timeout_ms(),
+                    ttft_timeout_ms: default_provider_ttft_timeout_ms(),
+                    connect_timeout_ms: default_provider_connect_timeout_ms(),
+                    extra_headers: None,
+                    max_concurrent: None,
+                },
+            );
+        }
+    }
+    providers
+}
+
 // ---- RokoConfig impl -----------------------------------------------------
 
 impl RokoConfig {
@@ -271,29 +314,36 @@ impl RokoConfig {
 
     /// Return the explicit provider registry that should be used at runtime.
     ///
-    /// Empty configs do not receive a synthetic provider. Callers that need
-    /// legacy command-backed behavior must materialize a transient provider at
-    /// their boundary before dispatch.
+    /// Synthesized standard providers (from env vars) are merged first, then
+    /// user-defined providers override them. This ensures that setting e.g.
+    /// `ANTHROPIC_API_KEY` is enough to get an "anthropic" provider without
+    /// any TOML config, while explicit `[providers.*]` entries always win.
     #[must_use]
     pub fn effective_providers(&self) -> IndexMap<String, ProviderConfig> {
-        if !self.providers.is_empty() {
-            let mut providers = self.providers.clone();
-            // Ensure ClaudeCli providers always have a command — the adapter
-            // requires it and users commonly omit it from config.
-            let claude_command = self
-                .agent
-                .command
-                .clone()
-                .unwrap_or_else(|| "claude".to_string());
-            for pc in providers.values_mut() {
-                if pc.kind == ProviderKind::ClaudeCli && pc.command.is_none() {
-                    pc.command = Some(claude_command.clone());
-                }
-            }
-            return providers;
+        // Start with env-synthesized providers as the base layer.
+        let mut providers: IndexMap<String, ProviderConfig> = synthesize_standard_providers()
+            .into_iter()
+            .collect();
+
+        // User-defined providers override synthesized ones.
+        for (name, pc) in &self.providers {
+            providers.insert(name.clone(), pc.clone());
         }
 
-        IndexMap::new()
+        // Ensure ClaudeCli providers always have a command — the adapter
+        // requires it and users commonly omit it from config.
+        let claude_command = self
+            .agent
+            .command
+            .clone()
+            .unwrap_or_else(|| "claude".to_string());
+        for pc in providers.values_mut() {
+            if pc.kind == ProviderKind::ClaudeCli && pc.command.is_none() {
+                pc.command = Some(claude_command.clone());
+            }
+        }
+
+        providers
     }
 
     /// Return the explicit model registry that should be used at runtime.

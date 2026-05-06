@@ -435,6 +435,84 @@ async fn append_acp_episode(
     let distill_caller: Arc<dyn roko_core::foundation::ModelCaller> =
         Arc::new(ModelCallService::new(distill_model).with_config(roko_config.clone()));
     roko_neuro::spawn_episode_distillation(distill_workdir, episode, Some(distill_caller));
+
+    // Auto-dream consolidation: after enough episodes accumulate, spawn a
+    // background dream cycle so patterns are extracted into `.roko/dreams/`.
+    maybe_spawn_dream_consolidation(workdir, roko_config);
+}
+
+/// Default number of episodes that must accumulate since the last dream report
+/// before a background dream consolidation is triggered.
+const DREAM_EPISODE_THRESHOLD: usize = 10;
+
+/// If the number of episodes since the last dream report exceeds
+/// [`DREAM_EPISODE_THRESHOLD`], spawn a background dream consolidation.
+/// This is fire-and-forget: failures are logged but never block the caller.
+fn maybe_spawn_dream_consolidation(workdir: &Path, config: &RokoConfig) {
+    let episodes_path = workdir.join(".roko").join("episodes.jsonl");
+    let dream_dir = workdir.join(".roko").join("dreams");
+    let workdir = workdir.to_path_buf();
+
+    // Count episodes since the last dream report.  Both helpers are
+    // cheap (file I/O only, no LLM calls) so running them on the
+    // current thread is acceptable.
+    let last_dream_ts = roko_dreams::runner::load_latest_dream_report(&dream_dir)
+        .ok()
+        .flatten()
+        .map(|r| r.completed_at);
+
+    let text = match std::fs::read_to_string(&episodes_path) {
+        Ok(t) => t,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            debug!(?err, "skipping dream check: could not read episode log");
+            return;
+        }
+    };
+
+    let episodes_since_dream = match last_dream_ts {
+        Some(ts) => text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Episode>(line).ok())
+            .filter(|ep| ep.timestamp > ts)
+            .count(),
+        None => text.lines().filter(|line| !line.trim().is_empty()).count(),
+    };
+
+    if episodes_since_dream < DREAM_EPISODE_THRESHOLD {
+        return;
+    }
+
+    info!(
+        episodes_since_dream,
+        threshold = DREAM_EPISODE_THRESHOLD,
+        "triggering background dream consolidation"
+    );
+
+    let dream_config = roko_dreams::DreamLoopConfig {
+        auto_dream: true,
+        idle_threshold_mins: 0,
+        min_episodes_for_dream: 1,
+        agent: roko_dreams::DreamAgentConfig {
+            command: config.agent.command.clone().unwrap_or_else(|| "claude".into()),
+            args: Vec::new(),
+            model: Some(config.agent.default_model.clone()),
+            bare_mode: true,
+            effort: "medium".to_string(),
+            fallback_model: None,
+            timeout_ms: 120_000,
+            env: Vec::new(),
+        },
+    };
+
+    // `consolidate_now` internally calls `block_on`, so it must run on a
+    // blocking thread rather than the async runtime.
+    tokio::task::spawn_blocking(move || {
+        let mut runner = roko_dreams::DreamRunner::new(&workdir, dream_config);
+        if let Err(err) = runner.consolidate_now() {
+            warn!(?err, "background dream consolidation failed");
+        }
+    });
 }
 
 /// Emit an [`AgentEfficiencyEvent`] to `.roko/learn/efficiency.jsonl`.
