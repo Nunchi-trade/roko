@@ -427,6 +427,13 @@ async fn append_acp_episode(
             "failed to append ACP episode"
         );
     }
+
+    // Spawn background distillation so the knowledge store learns from each ACP interaction.
+    let distill_workdir = workdir.to_path_buf();
+    let distill_model = roko_config.agent.default_model.clone();
+    let distill_caller: Arc<dyn roko_core::foundation::ModelCaller> =
+        Arc::new(ModelCallService::new(distill_model).with_config(roko_config.clone()));
+    roko_neuro::spawn_episode_distillation(distill_workdir, episode, Some(distill_caller));
 }
 
 fn acp_routing_context(mode: &str, prompt: &str, effort: &str) -> RoutingContext {
@@ -1042,8 +1049,13 @@ where
         full_system = append_context(&full_system, &knowledge_context);
         let mut msgs = session.build_messages_array(&full_system, &prompt_text);
         // If the prompt contains Image blocks, replace the last user message's
-        // content with an OpenAI multi-part content array (text + image_url).
-        if let Some(parts) = build_openai_content_parts(&params.prompt) {
+        // content with a multi-part content array in the appropriate format.
+        let image_parts = if resolved.provider_kind == ProviderKind::AnthropicApi {
+            build_anthropic_content_parts(&params.prompt)
+        } else {
+            build_openai_content_parts(&params.prompt)
+        };
+        if let Some(parts) = image_parts {
             if let Some(last) = msgs.last_mut() {
                 if last.get("role").and_then(|v| v.as_str()) == Some("user") {
                     last["content"] = serde_json::Value::Array(parts);
@@ -3611,6 +3623,37 @@ fn build_openai_content_parts(prompt: &[ContentBlock]) -> Option<Vec<serde_json:
                 parts.push(serde_json::json!({
                     "type": "image_url",
                     "image_url": { "url": format!("data:{mime_type};base64,{data}") }
+                }));
+            }
+            _ => {}
+        }
+    }
+    Some(parts)
+}
+
+/// Converts prompt blocks into Anthropic multi-part content (text + base64 image).
+/// Returns `None` when there are no image blocks, so the caller can skip replacement.
+fn build_anthropic_content_parts(prompt: &[ContentBlock]) -> Option<Vec<serde_json::Value>> {
+    let has_image = prompt
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }));
+    if !has_image {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for block in prompt {
+        match block {
+            ContentBlock::Text { text } if !text.is_empty() => {
+                parts.push(serde_json::json!({"type": "text", "text": text}));
+            }
+            ContentBlock::Image { data, mime_type } => {
+                parts.push(serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": data,
+                    }
                 }));
             }
             _ => {}
