@@ -323,7 +323,10 @@ mod tests {
         let token = generate_share_token();
         // Token must be non-empty and contain a hyphen separator.
         assert!(!token.is_empty(), "token should not be empty");
-        assert!(token.contains('-'), "token should contain a hyphen: {token}");
+        assert!(
+            token.contains('-'),
+            "token should contain a hyphen: {token}"
+        );
         // Both parts should be valid hex.
         let parts: Vec<&str> = token.splitn(2, '-').collect();
         assert_eq!(parts.len(), 2, "token should have two parts: {token}");

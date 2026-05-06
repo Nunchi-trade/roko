@@ -26,7 +26,7 @@ use roko_gate::{PlanComplexity, classify_gate_failure, render_failure_classifica
 use roko_orchestrator::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, MergeQueue,
     MergeRequest, OrchestratorSnapshot, ParallelExecutor, PlanState as OrcPlanState,
-    RecoveryEngine,
+    RecoveryEngine, TransitionError,
 };
 use roko_runtime::{HttpEventSink, RunLedger, WorkflowConfig};
 use tokio::sync::mpsc;
@@ -1413,9 +1413,9 @@ pub async fn run(
                             "task passed — advancing to next task"
                         );
                     } else {
-                        // All tasks done — let the plan proceed to completion.
+                        // All tasks done — run the plan-level verify chain.
                         let _ = executor.apply_event(&completion.plan_id, &ExecutorEvent::GatePassed);
-                        info!(plan_id = %completion.plan_id, "all tasks passed — plan completing");
+                        info!(plan_id = %completion.plan_id, "all tasks passed — running plan verify");
 
                         // Queue dream consolidation for the post-run drain.
                         dream_completion_pending = true;
@@ -2152,6 +2152,82 @@ fn handle_agent_failure(
     }
 }
 
+fn complete_plan_after_successful_verify(
+    plan_id: &str,
+    executor: &mut ParallelExecutor,
+) -> Result<PlanPhase, TransitionError> {
+    let mut phase = match executor.plan_state(plan_id) {
+        Some(state) if matches!(state.current_phase, PlanPhase::Complete) => {
+            return Ok(PlanPhase::Complete);
+        }
+        Some(state) if state.current_phase.kind() == PhaseKind::Verifying => {
+            executor.apply_event(plan_id, &ExecutorEvent::VerifyPassed)?
+        }
+        Some(state) if state.current_phase.kind() == PhaseKind::Reviewing => {
+            state.current_phase.clone()
+        }
+        Some(state) if state.current_phase.kind() == PhaseKind::DocRevision => {
+            state.current_phase.clone()
+        }
+        Some(state) if state.current_phase.kind() == PhaseKind::Merging => {
+            state.current_phase.clone()
+        }
+        Some(state) => {
+            let from = state.current_phase.kind();
+            return Err(TransitionError {
+                from,
+                to: PhaseKind::Complete,
+                reason: format!("cannot complete verified plan from unexpected phase {from:?}"),
+            });
+        }
+        None => {
+            return Err(TransitionError {
+                from: PhaseKind::Queued,
+                to: PhaseKind::Complete,
+                reason: format!("plan '{plan_id}' not found"),
+            });
+        }
+    };
+
+    if phase.kind() == PhaseKind::Reviewing {
+        phase = executor.apply_event(plan_id, &ExecutorEvent::ReviewApproved)?;
+    }
+    if phase.kind() == PhaseKind::DocRevision {
+        phase = executor.apply_event(plan_id, &ExecutorEvent::DocRevisionDone)?;
+    }
+    if phase.kind() == PhaseKind::Merging {
+        phase = executor.apply_event(plan_id, &ExecutorEvent::MergeSucceeded)?;
+    }
+
+    Ok(phase)
+}
+
+fn complete_verified_plan_success(
+    plan_id: &str,
+    executor: &mut ParallelExecutor,
+    state: &mut RunState,
+    paths: &PersistPaths,
+    tui: &TuiBridge,
+    config: &RunConfig,
+) -> Result<PlanPhase, TransitionError> {
+    let was_complete = executor
+        .plan_state(plan_id)
+        .is_some_and(|state| matches!(state.current_phase, PlanPhase::Complete));
+    let phase = complete_plan_after_successful_verify(plan_id, executor)?;
+    if !was_complete {
+        tui.plan_completed(plan_id, true);
+        let run_id = state.run_id().to_string();
+        emit_runner_event(
+            paths,
+            state,
+            tui,
+            config,
+            RunnerEvent::plan_completed(&run_id, plan_id, PlanOutcome::Succeeded, None),
+        );
+    }
+    Ok(phase)
+}
+
 fn handle_plan_verify_completion(
     completion: &GateCompletion,
     executor: &mut ParallelExecutor,
@@ -2165,16 +2241,29 @@ fn handle_plan_verify_completion(
 ) {
     if completion.passed {
         state.clear_retry_backoff(&completion.plan_id);
-        match executor.apply_event(&completion.plan_id, &ExecutorEvent::VerifyPassed) {
+        match complete_verified_plan_success(
+            &completion.plan_id,
+            executor,
+            state,
+            paths,
+            tui,
+            config,
+        ) {
             Ok(phase) => {
                 tui.phase_transition(&completion.plan_id, "verifying", &format!("{phase:?}"));
-                info!(plan_id = %completion.plan_id, phase = ?phase, "plan verify passed");
+                info!(plan_id = %completion.plan_id, phase = ?phase, "plan verify passed — plan complete");
             }
-            Err(e) => warn!(
-                plan_id = %completion.plan_id,
-                err = %e,
-                "transition error after plan verify pass"
-            ),
+            Err(e) => {
+                warn!(
+                    plan_id = %completion.plan_id,
+                    err = %e,
+                    "transition error while completing plan after verify pass"
+                );
+                let _ = executor.apply_event(
+                    &completion.plan_id,
+                    &ExecutorEvent::Fatal(format!("plan verify transition failed: {e}")),
+                );
+            }
         }
     } else {
         let failure_kind = completion
@@ -4261,9 +4350,40 @@ async fn dispatch_action(
 
             if verify_steps.is_empty() {
                 info!(plan_id = %plan_id, "no declared plan verify steps — passing verify phase");
-                let _ = ctx
-                    .executor
-                    .apply_event(plan_id, &ExecutorEvent::VerifyPassed);
+                match complete_verified_plan_success(
+                    plan_id,
+                    ctx.executor,
+                    ctx.state,
+                    ctx.paths,
+                    ctx.tui,
+                    ctx.config,
+                ) {
+                    Ok(phase) => {
+                        ctx.tui
+                            .phase_transition(plan_id, "verifying", &format!("{phase:?}"));
+                        info!(plan_id = %plan_id, phase = ?phase, "plan verify passed — plan complete");
+                    }
+                    Err(err) => {
+                        warn!(
+                            plan_id = %plan_id,
+                            error = %err,
+                            "transition error while completing plan with no verify steps"
+                        );
+                        let _ = ctx.executor.apply_event(
+                            plan_id,
+                            &ExecutorEvent::Fatal(format!("plan verify transition failed: {err}")),
+                        );
+                    }
+                }
+                save_snapshot(
+                    ctx.config,
+                    ctx.executor,
+                    ctx.paths,
+                    ctx.state,
+                    ctx.merge_queue,
+                    ctx.gate_thresholds,
+                    ctx.snapshot_writer,
+                );
                 return ActionDispatchOutcome::Handled;
             }
 
@@ -5491,6 +5611,34 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_plan_verify_finalizes_runner_plan() {
+        let mut executor = ParallelExecutor::new(ExecutorConfig::default());
+        executor.add_plan(OrcPlanState::new("plan-verify"));
+
+        executor
+            .apply_event("plan-verify", &ExecutorEvent::Start)
+            .unwrap();
+        executor
+            .apply_event("plan-verify", &ExecutorEvent::EnrichmentDone)
+            .unwrap();
+        executor
+            .apply_event("plan-verify", &ExecutorEvent::ImplementationDone)
+            .unwrap();
+        executor
+            .apply_event("plan-verify", &ExecutorEvent::GatePassed)
+            .unwrap();
+
+        let phase = complete_plan_after_successful_verify("plan-verify", &mut executor).unwrap();
+
+        assert_eq!(phase, PlanPhase::Complete);
+        assert!(executor.plan_state("plan-verify").unwrap().is_terminal());
+        assert!(
+            executor.tick().is_empty(),
+            "completed plan must not request review/doc agents or rerun tasks"
+        );
+    }
 
     #[test]
     fn build_gate_retry_context_compile_error_produces_analysis() {
