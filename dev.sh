@@ -148,11 +148,14 @@ cmd_up() {
     fi
 
     info "Starting mirage-rs (mainnet fork on :8545)..."
-    local rpc_url="${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com}"
+    local rpc_url="${ETH_RPC_URL:-https://cloudflare-eth.com}"
     "$mirage_bin" \
       --host 127.0.0.1 \
       --port 8545 \
-      --rpc-url "$rpc_url" &
+      --rpc-url "$rpc_url" \
+      --enable-hdc \
+      --enable-knowledge \
+      --enable-stigmergy &
     MIRAGE_PID=$!
 
     # Wait for mirage BEFORE building contracts (forge needs the fork running)
@@ -169,6 +172,8 @@ cmd_up() {
       sleep 1
       echo -n "."
     done
+
+    export ROKO_MIRAGE_URL="http://127.0.0.1:8545"
 
     # Build contracts after mirage is up
     if [ -d "contracts" ] && [ ! -d "contracts/out" ]; then

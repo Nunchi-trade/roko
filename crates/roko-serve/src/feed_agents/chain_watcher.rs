@@ -46,31 +46,20 @@ impl FeedAgent for ChainWatcherAgent {
                     _ = ctx.cancel.cancelled() => break,
                     _ = tick.tick() => {
                         let block = ctx.state.chain.latest_block.read().await;
-                        let payload = if let Some(b) = block.as_ref() {
-                            if b.number > last_block {
-                                last_block = b.number;
-                            }
-                            json!({
-                                "number": b.number,
-                                "hash": b.hash,
-                                "timestamp": b.timestamp,
-                                "gas_used": b.gas_used,
-                                "gas_limit": b.gas_limit,
-                                "tx_count": b.tx_count,
-                                "base_fee_per_gas": b.base_fee_per_gas,
-                            })
-                        } else {
-                            json!({
-                                "number": null,
-                                "hash": null,
-                                "timestamp": null,
-                                "gas_used": null,
-                                "gas_limit": null,
-                                "tx_count": null,
-                                "base_fee_per_gas": null,
-                                "status": "waiting",
-                            })
-                        };
+                        // Only publish when we have real block data — skip null ticks
+                        // to avoid polluting the feed log with empty entries.
+                        let Some(b) = block.as_ref() else { continue };
+                        if b.number <= last_block { continue }
+                        last_block = b.number;
+                        let payload = json!({
+                            "number": b.number,
+                            "hash": b.hash,
+                            "timestamp": b.timestamp,
+                            "gas_used": b.gas_used,
+                            "gas_limit": b.gas_limit,
+                            "tx_count": b.tx_count,
+                            "base_fee_per_gas": b.base_fee_per_gas,
+                        });
                         ctx.publish_tick(
                             self.agent_id(),
                             "chain-blocks",

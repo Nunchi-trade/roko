@@ -51,37 +51,29 @@ impl FeedAgent for GasOracleAgent {
                             .iter()
                             .filter_map(|b| b.base_fee_per_gas.map(|f| f as f64))
                             .collect();
-                        let payload = if fees.is_empty() {
-                            json!({
-                                "ema_gwei": null,
-                                "p25_gwei": null,
-                                "p50_gwei": null,
-                                "p75_gwei": null,
-                                "sample_count": 0,
-                                "status": "waiting",
-                            })
-                        } else {
-                            for fee in &fees {
-                                if ema == 0.0 {
-                                    ema = *fee;
-                                } else {
-                                    ema = alpha * fee + (1.0 - alpha) * ema;
-                                }
-                            }
-                            let mut sorted = fees.clone();
-                            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                            let p25 = sorted[sorted.len() / 4];
-                            let p50 = sorted[sorted.len() / 2];
-                            let p75 = sorted[sorted.len() * 3 / 4];
+                        // Skip publishing until we have real gas data.
+                        if fees.is_empty() { continue }
 
-                            json!({
-                                "ema_gwei": ema / 1e9,
-                                "p25_gwei": p25 / 1e9,
-                                "p50_gwei": p50 / 1e9,
-                                "p75_gwei": p75 / 1e9,
-                                "sample_count": fees.len(),
-                            })
-                        };
+                        for fee in &fees {
+                            if ema == 0.0 {
+                                ema = *fee;
+                            } else {
+                                ema = alpha * fee + (1.0 - alpha) * ema;
+                            }
+                        }
+                        let mut sorted = fees.clone();
+                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let p25 = sorted[sorted.len() / 4];
+                        let p50 = sorted[sorted.len() / 2];
+                        let p75 = sorted[sorted.len() * 3 / 4];
+
+                        let payload = json!({
+                            "ema_gwei": ema / 1e9,
+                            "p25_gwei": p25 / 1e9,
+                            "p50_gwei": p50 / 1e9,
+                            "p75_gwei": p75 / 1e9,
+                            "sample_count": fees.len(),
+                        });
                         ctx.publish_tick(
                             self.agent_id(),
                             "chain-gas",

@@ -99,33 +99,46 @@ impl BlockWatcher {
     /// Run the watcher loop until cancelled.
     pub async fn run(self, publish: PublishFn, cancel: CancellationToken) {
         let mut last_block: u64 = 0;
+        let mut seeded = false;
 
-        // Seed with current block number.
-        match self.provider.get_block_number().await {
-            Ok(n) => {
-                last_block = n;
-                debug!(block = n, "block_watcher seeded at block");
+        // Seed with current block number — retry until the chain is reachable.
+        for attempt in 1..=30 {
+            match self.provider.get_block_number().await {
+                Ok(n) => {
+                    last_block = n;
+                    seeded = true;
+                    debug!(block = n, "block_watcher seeded at block");
 
-                // Backfill recent historical blocks (these are real mainnet
-                // blocks behind the fork point with actual tx data).
-                let start = n.saturating_sub(Self::BACKFILL_COUNT);
-                if start < n {
-                    info!(
-                        from = start + 1,
-                        to = n,
-                        "block_watcher backfilling historical blocks"
-                    );
-                    for num in (start + 1)..=n {
-                        if cancel.is_cancelled() {
-                            return;
+                    // Backfill recent historical blocks (these are real mainnet
+                    // blocks behind the fork point with actual tx data).
+                    let start = n.saturating_sub(Self::BACKFILL_COUNT);
+                    if start < n {
+                        info!(
+                            from = start + 1,
+                            to = n,
+                            "block_watcher backfilling historical blocks"
+                        );
+                        for num in (start + 1)..=n {
+                            if cancel.is_cancelled() {
+                                return;
+                            }
+                            self.process_block(num, &publish).await;
                         }
-                        self.process_block(num, &publish).await;
+                        info!(count = n - start, "block_watcher backfill complete");
                     }
-                    info!(count = n - start, "block_watcher backfill complete");
+                    break;
+                }
+                Err(e) => {
+                    if attempt == 30 {
+                        warn!(error = %e, "block_watcher failed to seed after 30 attempts");
+                    } else {
+                        debug!(attempt, error = %e, "block_watcher waiting for chain");
+                    }
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "block_watcher failed to get initial block number");
+            select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
             }
         }
 
@@ -150,8 +163,31 @@ impl BlockWatcher {
                 continue;
             }
 
-            // Process each new block.
-            for num in (last_block + 1)..=current {
+            // If we never seeded, treat the first successful poll as the seed
+            // point and backfill from there (avoids trying to process millions
+            // of blocks from 0).
+            if !seeded {
+                seeded = true;
+                let start = current.saturating_sub(Self::BACKFILL_COUNT);
+                info!(from = start + 1, to = current, "block_watcher late-seed backfill");
+                for num in (start + 1)..=current {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    self.process_block(num, &publish).await;
+                }
+                last_block = current;
+                continue;
+            }
+
+            // Cap catch-up to avoid processing thousands of blocks at once.
+            let effective_start = if current - last_block > Self::BACKFILL_COUNT {
+                current.saturating_sub(Self::BACKFILL_COUNT)
+            } else {
+                last_block
+            };
+
+            for num in (effective_start + 1)..=current {
                 if cancel.is_cancelled() {
                     return;
                 }

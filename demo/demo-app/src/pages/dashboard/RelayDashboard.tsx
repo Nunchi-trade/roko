@@ -74,13 +74,10 @@ function useRelayEvents(onEvent: (ev: RelayEvent) => void) {
 
     function scheduleRetry() {
       retryCount += 1;
-      // Cap at 3 retries to avoid spamming console when relay isn't running.
-      if (retryCount > 3) {
-        setStatus('disconnected');
-        return;
-      }
+      // Retry indefinitely with exponential backoff (capped at 30s).
+      // Relay may take a while to start during dev.
       setStatus('reconnecting');
-      const delay = Math.min(2000 * 2 ** (retryCount - 1), 10_000);
+      const delay = Math.min(2000 * 2 ** Math.min(retryCount - 1, 4), 30_000);
       retryTimer = setTimeout(connect, delay);
     }
 
