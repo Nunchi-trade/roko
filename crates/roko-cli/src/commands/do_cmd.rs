@@ -36,6 +36,25 @@ pub(crate) async fn cmd_do(
         return cmd_do_resume_hint(&workdir);
     }
 
+    // If the prompt is a single word (no spaces), check if it matches an
+    // existing plan slug before treating it as a prompt.
+    if !prompt.contains(' ') {
+        let plan_slug = &prompt;
+        let candidates = [
+            workdir
+                .join(".roko")
+                .join("plans")
+                .join(plan_slug)
+                .join("tasks.toml"),
+            workdir.join("plans").join(plan_slug).join("tasks.toml"),
+        ];
+        if let Some(found) = candidates.iter().find(|p| p.is_file()) {
+            let plan_dir = found.parent().expect("tasks.toml has parent dir");
+            eprintln!("\u{25b8} Found existing plan: {}", plan_dir.display());
+            return run_plan_execution(cli, &workdir, plan_dir, no_cascade, provider).await;
+        }
+    }
+
     let preview_config = load_resolved_config(&workdir)
         .map(|resolved| resolved.config)
         .unwrap_or_default();
