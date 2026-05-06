@@ -629,15 +629,17 @@ mod tests {
     #[test]
     fn cli_override_with_unavailable_provider_returns_error() {
         let mut config = RokoConfig::default();
-        config
-            .models
-            .insert("custom".to_string(), explicit_profile("openai", "gpt-4o"));
+        // Use a provider name that won't be auto-synthesized from env vars.
+        config.models.insert(
+            "custom".to_string(),
+            explicit_profile("custom-provider", "gpt-4o"),
+        );
 
         let err =
             resolve_effective_model(Some("custom".to_string()), None, None, None, &config, None)
                 .expect_err("selection should fail");
 
-        assert!(err.to_string().contains("provider 'openai'"));
+        assert!(err.to_string().contains("provider 'custom-provider'"));
     }
 
     #[test]
