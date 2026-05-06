@@ -313,3 +313,29 @@ pub use traits::{
 pub use verdict::{Outcome, Selection, TestCount, Verdict};
 #[allow(deprecated)]
 pub use workspace::Workspace;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_token_format() {
+        let token = generate_share_token();
+        // Token must be non-empty and contain a hyphen separator.
+        assert!(!token.is_empty(), "token should not be empty");
+        assert!(token.contains('-'), "token should contain a hyphen: {token}");
+        // Both parts should be valid hex.
+        let parts: Vec<&str> = token.splitn(2, '-').collect();
+        assert_eq!(parts.len(), 2, "token should have two parts: {token}");
+        assert!(
+            u128::from_str_radix(parts[0], 16).is_ok(),
+            "first part should be hex: {}",
+            parts[0]
+        );
+        assert!(
+            u16::from_str_radix(parts[1], 16).is_ok(),
+            "second part should be 4-char hex: {}",
+            parts[1]
+        );
+    }
+}

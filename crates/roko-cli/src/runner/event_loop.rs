@@ -4138,13 +4138,6 @@ async fn dispatch_action(
                 return ActionDispatchOutcome::Handled;
             }
 
-            info!(
-                plan_id = %plan_id,
-                requested_rung = *rung,
-                rung = pipeline_rung,
-                custom_rungs = gates_config.has_custom_rungs(),
-                "dispatching gate pipeline"
-            );
             let effect_key =
                 gate_effect_key(plan_id, &task_id, pipeline_rung, GateCompletionKind::Gate);
             if !ctx.state.mark_gate_active(effect_key.clone()) {
@@ -4156,6 +4149,13 @@ async fn dispatch_action(
                 );
                 return ActionDispatchOutcome::Noop;
             }
+            info!(
+                plan_id = %plan_id,
+                requested_rung = *rung,
+                rung = pipeline_rung,
+                custom_rungs = gates_config.has_custom_rungs(),
+                "dispatching gate pipeline"
+            );
             let run_id = ctx.state.run_id().to_string();
             let attempt_ref = TaskAttemptRef::new(
                 plan_id.clone(),
