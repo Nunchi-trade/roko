@@ -152,10 +152,7 @@ cmd_up() {
     "$mirage_bin" \
       --host 127.0.0.1 \
       --port 8545 \
-      --rpc-url "$rpc_url" \
-      --enable-hdc \
-      --enable-knowledge \
-      --enable-stigmergy &
+      --rpc-url "$rpc_url" &
     MIRAGE_PID=$!
 
     # Wait for mirage BEFORE building contracts (forge needs the fork running)
