@@ -10,9 +10,7 @@
 
 use std::time::Duration;
 
-use roko_tempo::{
-    LcError, LightClient, MODERATO_CHAIN_ID, MODERATO_RPC_URL, TempoLightClient,
-};
+use roko_tempo::{LcError, LightClient, MODERATO_CHAIN_ID, MODERATO_RPC_URL, TempoLightClient};
 
 fn rpc_url() -> String {
     std::env::var("ROKO_TEST_RPC_URL").unwrap_or_else(|_| MODERATO_RPC_URL.into())

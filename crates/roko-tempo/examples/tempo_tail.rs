@@ -93,14 +93,20 @@ async fn main() -> Result<()> {
         let proof = match lc.read_account_at(&address, header.height).await {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[tempo-tail] read_account_at failed at {}: {e}", header.height);
+                eprintln!(
+                    "[tempo-tail] read_account_at failed at {}: {e}",
+                    header.height
+                );
                 continue;
             }
         };
         match lc.verify_account(&proof) {
             Ok(()) => {}
             Err(e) => {
-                eprintln!("[tempo-tail] proof did NOT verify at {}: {e}", header.height);
+                eprintln!(
+                    "[tempo-tail] proof did NOT verify at {}: {e}",
+                    header.height
+                );
                 continue;
             }
         }

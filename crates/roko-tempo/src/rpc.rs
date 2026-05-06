@@ -213,11 +213,7 @@ impl LightClient for TempoRpcBackend {
             code_hash: format!("{:#x}", resp.code_hash),
             storage_hash: format!("{:#x}", resp.storage_hash),
             merkle_proof: MerkleProof {
-                nodes: resp
-                    .account_proof
-                    .into_iter()
-                    .map(|b| b.to_vec())
-                    .collect(),
+                nodes: resp.account_proof.into_iter().map(|b| b.to_vec()).collect(),
             },
             against_state_root: header.state_root,
         })

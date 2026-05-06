@@ -44,14 +44,14 @@ const EMPTY_TRIE_ROOT: [u8; 32] = [
 /// proof. Returns [`LcError::Backend`] if any of the hex strings in the proof
 /// are malformed.
 pub fn verify_account_proof(proof: &AccountProof) -> Result<(), LcError> {
-    let address_bytes = parse_hex_to_vec(&proof.address)
-        .map_err(|e| LcError::Backend(format!("address: {e}")))?;
+    let address_bytes =
+        parse_hex_to_vec(&proof.address).map_err(|e| LcError::Backend(format!("address: {e}")))?;
     let state_root = parse_b256(&proof.against_state_root)
         .map_err(|e| LcError::Backend(format!("state_root: {e}")))?;
     let storage_root = parse_b256(&proof.storage_hash)
         .map_err(|e| LcError::Backend(format!("storage_hash: {e}")))?;
-    let code_hash = parse_b256(&proof.code_hash)
-        .map_err(|e| LcError::Backend(format!("code_hash: {e}")))?;
+    let code_hash =
+        parse_b256(&proof.code_hash).map_err(|e| LcError::Backend(format!("code_hash: {e}")))?;
 
     let key = Nibbles::unpack(keccak256(&address_bytes));
 
@@ -81,18 +81,13 @@ pub fn verify_account_proof(proof: &AccountProof) -> Result<(), LcError> {
         .map(|v| Bytes::from(v.clone()))
         .collect();
 
-    verify_proof(state_root, key, expected_value, nodes.iter()).map_err(|_| {
-        LcError::InvalidProof {
-            state_root: proof.against_state_root.clone(),
-        }
+    verify_proof(state_root, key, expected_value, nodes.iter()).map_err(|_| LcError::InvalidProof {
+        state_root: proof.against_state_root.clone(),
     })
 }
 
 fn is_empty_account(nonce: u64, balance: u128, storage_root: &[u8], code_hash: &[u8]) -> bool {
-    nonce == 0
-        && balance == 0
-        && storage_root == EMPTY_TRIE_ROOT
-        && code_hash == EMPTY_CODE_HASH
+    nonce == 0 && balance == 0 && storage_root == EMPTY_TRIE_ROOT && code_hash == EMPTY_CODE_HASH
 }
 
 fn parse_b256(s: &str) -> Result<B256, String> {
@@ -111,24 +106,9 @@ mod tests {
 
     #[test]
     fn empty_account_detection() {
-        assert!(is_empty_account(
-            0,
-            0,
-            &EMPTY_TRIE_ROOT,
-            &EMPTY_CODE_HASH
-        ));
-        assert!(!is_empty_account(
-            1,
-            0,
-            &EMPTY_TRIE_ROOT,
-            &EMPTY_CODE_HASH
-        ));
-        assert!(!is_empty_account(
-            0,
-            1,
-            &EMPTY_TRIE_ROOT,
-            &EMPTY_CODE_HASH
-        ));
+        assert!(is_empty_account(0, 0, &EMPTY_TRIE_ROOT, &EMPTY_CODE_HASH));
+        assert!(!is_empty_account(1, 0, &EMPTY_TRIE_ROOT, &EMPTY_CODE_HASH));
+        assert!(!is_empty_account(0, 1, &EMPTY_TRIE_ROOT, &EMPTY_CODE_HASH));
     }
 
     #[test]
