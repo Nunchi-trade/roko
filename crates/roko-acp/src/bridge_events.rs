@@ -1224,12 +1224,11 @@ where
         } else {
             build_openai_content_parts(&params.prompt)
         };
-        if let Some(parts) = image_parts {
-            if let Some(last) = msgs.last_mut() {
-                if last.get("role").and_then(|v| v.as_str()) == Some("user") {
-                    last["content"] = serde_json::Value::Array(parts);
-                }
-            }
+        if let Some(parts) = image_parts
+            && let Some(last) = msgs.last_mut()
+            && last.get("role").and_then(|v| v.as_str()) == Some("user")
+        {
+            last["content"] = serde_json::Value::Array(parts);
         }
         msgs
     } else {
@@ -1339,7 +1338,7 @@ where
                 &session_id,
                 prompt_text.trim(),
                 &workdir,
-                model_key.clone(),
+                model_key.clone(), // run_slash_command uses model_key, not the resolved slug.
                 cancel_token,
                 event_sender,
                 shared_run,
