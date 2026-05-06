@@ -22,28 +22,33 @@
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: 10px 8px;
+  padding: 12px 10px;
   background: var(--glass-bg);
   border: 1px solid var(--border-soft);
   border-radius: var(--cell-radius);
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .relay__stat-cell:hover {
   border-color: var(--border);
 }
 
+.relay__stat-cell--connected {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--green, #98c379) 20%, transparent);
+  border-color: color-mix(in srgb, var(--green, #98c379) 30%, transparent);
+}
+
 .relay__stat-cell--ws {
   flex: 0 0 auto;
   flex-direction: row;
   gap: 6px;
-  padding: 10px 16px;
+  padding: 12px 16px;
 }
 
 .relay__stat-value {
   font-family: var(--mono);
-  font-size: var(--text-xl);
-  font-weight: 600;
+  font-size: 24px;
+  font-weight: 700;
   color: var(--rose-bright);
   line-height: 1;
 }
@@ -53,7 +58,7 @@
   font-size: var(--text-xs);
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--text-dim);
+  color: var(--text-ghost);
 }
 
 /* ── Main body ───────────────────────────────────────────── */
@@ -76,6 +81,58 @@
   border: 1px solid var(--border-soft);
   border-radius: var(--cell-radius);
   overflow: hidden;
+  position: relative;
+}
+
+.relay__conn-status {
+  position: absolute;
+  top: 6px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  z-index: 1;
+}
+
+.relay__conn-status--connected {
+  color: var(--green, #98c379);
+}
+
+.relay__conn-status--reconnecting {
+  color: var(--yellow, #e5c07b);
+}
+
+.relay__conn-status--disconnected,
+.relay__conn-status--connecting {
+  color: var(--text-ghost);
+}
+
+.relay__conn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.relay__conn-status--connected .relay__conn-dot {
+  background: var(--green, #98c379);
+  box-shadow: 0 0 6px var(--green, #98c379);
+  animation: rdot-pulse 2s ease-in-out infinite;
+}
+
+.relay__conn-status--reconnecting .relay__conn-dot {
+  background: var(--yellow, #e5c07b);
+  box-shadow: 0 0 6px var(--yellow, #e5c07b);
+  animation: rdot-pulse 0.8s ease-in-out infinite;
+}
+
+.relay__conn-status--disconnected .relay__conn-dot,
+.relay__conn-status--connecting .relay__conn-dot {
+  background: var(--text-ghost);
 }
 
 .relay__stream-scroll {
@@ -102,6 +159,7 @@
   flex-direction: column;
   background: var(--glass-bg);
   border: 1px solid var(--border-soft);
+  border-left: 2px solid var(--panel-accent, var(--border-soft));
   border-radius: var(--cell-radius);
   overflow: hidden;
   transition: border-color 0.2s;
@@ -109,7 +167,13 @@
 
 .relay__panel:hover {
   border-color: var(--border);
+  border-left-color: var(--panel-accent, var(--border));
 }
+
+.relay__panel--agents { --panel-accent: var(--green, #98c379); }
+.relay__panel--workspaces { --panel-accent: var(--rose-bright, #c9a0a8); }
+.relay__panel--topics { --panel-accent: var(--bone-bright, #d8c8a0); }
+.relay__panel--feeds { --panel-accent: var(--dream-bright, #61afef); }
 
 .relay__panel-scroll {
   max-height: 220px;
@@ -151,11 +215,27 @@
 /* ── Empty state ─────────────────────────────────────────── */
 
 .relay__empty {
-  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 20px 12px;
   font-family: var(--mono);
   font-size: var(--text-sm);
   color: var(--text-ghost);
   letter-spacing: 0.04em;
+  text-align: center;
+  animation: relay-breathe 3s ease-in-out infinite;
+}
+
+.relay__empty-icon {
+  font-size: 18px;
+  opacity: 0.3;
+}
+
+@keyframes relay-breathe {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
 }
 
 /* ── Status dots ─────────────────────────────────────────── */
@@ -196,12 +276,16 @@
   padding: 4px 12px;
   font-family: var(--mono);
   font-size: var(--text-sm);
-  border-bottom: 1px solid color-mix(in srgb, var(--border-soft) 40%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-soft) 30%, transparent);
   transition: background 0.12s;
 }
 
+.rlog-row:nth-child(even) {
+  background: color-mix(in srgb, var(--glass-bg) 30%, transparent);
+}
+
 .rlog-row:hover {
-  background: var(--glass-bg);
+  background: color-mix(in srgb, var(--glass-bg) 60%, transparent);
 }
 
 .rlog-row__time {
@@ -213,11 +297,14 @@
 
 .rlog-row__badge {
   font-weight: 600;
-  font-size: var(--text-xs);
-  letter-spacing: 0.04em;
+  font-size: 9px;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   flex-shrink: 0;
   min-width: 100px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, currentColor 10%, transparent);
 }
 
 .rlog-row__msg {

@@ -102,6 +102,7 @@
 .feeds__tab--active::after {
   left: 10%;
   right: 10%;
+  background: var(--tab-accent, var(--rose-bright));
 }
 
 .feeds__tab-count {

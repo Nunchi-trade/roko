@@ -99,6 +99,9 @@ export default function IsfrDashboard() {
     useCallback(() => debouncedRefetch(), [debouncedRefetch]),
   );
 
+  // Chain section collapsible
+  const [chainOpen, setChainOpen] = useState(true);
+
   // SSE subscriptions — Chain (activity tracking only; DataHub handles updates)
   const [chainSseActive, setChainSseActive] = useState(false);
   const chainSseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -208,8 +211,14 @@ export default function IsfrDashboard() {
         </div>
       </div>
 
-      {/* ── Row 5: Chain Explorer ────────────────────────── */}
-      <div className="isfr__row5">
+      {/* ── Row 5: Chain Explorer (collapsible) ────────── */}
+      <div className="isfr__chain-section">
+        <button className="isfr__chain-toggle" onClick={() => setChainOpen((o) => !o)}>
+          <span className={`isfr__chain-chevron${chainOpen ? ' isfr__chain-chevron--open' : ''}`}>&#x25B6;</span>
+          CHAIN EXPLORER
+        </button>
+      </div>
+      {chainOpen && <div className="isfr__row5">
         <div className="isfr__panel isfr__chain-blocks">
           <div className="isfr__panel-hdr">
             <span>BLOCK FEED</span>
@@ -249,7 +258,7 @@ export default function IsfrDashboard() {
           </div>
           <ChainEventFeed events={chainEvents} />
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -261,18 +270,22 @@ function HeadlineRate({ bps, delta, loading }: { bps: number; delta: number; loa
   if (loading) {
     return (
       <div className="isfr__headline">
-        <span className="isfr__headline-val isfr__headline-val--loading">&mdash;</span>
-        <span className="isfr__headline-unit">bps</span>
+        <div className="isfr__headline-main">
+          <span className="isfr__headline-val isfr__headline-val--loading">&mdash;</span>
+          <span className="isfr__headline-unit">bps</span>
+        </div>
       </div>
     );
   }
   return (
     <div className="isfr__headline">
-      <span className="isfr__headline-val">{fmtCount(Math.round(anim), 0)}</span>
-      <span className="isfr__headline-unit">bps</span>
+      <div className="isfr__headline-main">
+        <span className="isfr__headline-val">{fmtCount(Math.round(anim), 0)}</span>
+        <span className="isfr__headline-unit">bps</span>
+      </div>
       {delta !== 0 && (
         <span className={`isfr__headline-delta ${delta > 0 ? 'isfr__headline-delta--up' : 'isfr__headline-delta--down'}`}>
-          {delta > 0 ? '\u25B2' : '\u25BC'} {Math.abs(delta)}
+          {delta > 0 ? '\u25B2' : '\u25BC'} {Math.abs(delta)} bps
         </span>
       )}
     </div>
@@ -352,35 +365,39 @@ function SourceTable({ sources, sourceHistory }: {
 
   if (!sorted.length) return <div className="isfr__empty">No sources configured</div>;
 
+  const SRC_ACCENT: Record<string, string> = {
+    lending: 'var(--rose-bright, #c9a0a8)',
+    structured: 'var(--bone-bright, #d8c8a0)',
+    funding: 'var(--dream-bright, #61afef)',
+    staking: 'var(--green, #98c379)',
+  };
+
   return (
     <div className="isfr__src-scroll">
-      <table className="isfr__src-table">
-        <thead>
-          <tr>
-            <th></th>
-            <th>Name</th>
-            <th>Class</th>
-            <th>Weight</th>
-            <th>Rate</th>
-            <th>Trend</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((src) => {
-            const hist = sourceHistory[src.name]?.map((s) => s.bps) ?? [];
-            return (
-              <tr key={src.id}>
-                <td><span className={HEALTH_CLS[src.health] ?? 'isfr-dot'} /></td>
-                <td className="isfr__src-name">{src.name}</td>
-                <td><span className="isfr__src-class" data-class={src.class}>{src.class}</span></td>
-                <td className="isfr__src-num">{(src.weight * 100).toFixed(0)}%</td>
-                <td className="isfr__src-rate">{src.lastRateBps != null ? formatBps(src.lastRateBps) : '\u2014'}</td>
-                <td><MiniSparkline data={hist} color={classColor(src.class)} /></td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+      {sorted.map((src, i) => {
+        const hist = sourceHistory[src.name]?.map((s) => s.bps) ?? [];
+        const accent = SRC_ACCENT[src.class] ?? 'var(--border-soft)';
+        return (
+          <div
+            key={src.id}
+            className="isfr__src-card"
+            style={{ '--i': i, '--src-accent': accent } as React.CSSProperties}
+          >
+            <span className={`isfr__src-card-dot ${HEALTH_CLS[src.health] ?? 'isfr-dot'}`} />
+            <div className="isfr__src-card-info">
+              <div className="isfr__src-card-name">{src.name}</div>
+              <span className="isfr__src-card-class isfr__src-class" data-class={src.class}>{src.class}</span>
+            </div>
+            <span className="isfr__src-card-weight">{(src.weight * 100).toFixed(0)}%</span>
+            <span className="isfr__src-card-rate">
+              {src.lastRateBps != null ? formatBps(src.lastRateBps) : '\u2014'}
+            </span>
+            <span className="isfr__src-card-spark">
+              <MiniSparkline data={hist} color={classColor(src.class)} />
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

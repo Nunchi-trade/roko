@@ -88,6 +88,30 @@ export default function FeedsDashboard() {
   const totalMsgs = useMemo(() => relayFeeds.reduce((sum, f) => sum + f.messageCount, 0), [relayFeeds]);
   const onlineAgents = useMemo(() => relayAgents.filter((a) => a.online).length, [relayAgents]);
 
+  // Kind counts for tab badges.
+  const kindCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: relayFeeds.length };
+    for (const f of relayFeeds) {
+      counts[f.kind] = (counts[f.kind] ?? 0) + 1;
+    }
+    return counts;
+  }, [relayFeeds]);
+
+  // Filtered feeds by kind.
+  const filteredFeeds = useMemo(
+    () => kindFilter === 'all' ? relayFeeds : relayFeeds.filter((f) => f.kind === kindFilter),
+    [relayFeeds, kindFilter],
+  );
+
+  // Group filtered feeds by kind for the all-feeds grid.
+  const feedsByKind = useMemo(() => {
+    const groups: Record<string, RelayFeed[]> = {};
+    for (const f of filteredFeeds) {
+      (groups[f.kind] ??= []).push(f);
+    }
+    return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
+  }, [filteredFeeds]);
+
   // Selected agent's feeds.
   const agentFeeds = useMemo(
     () => selectedAgentId ? relayFeeds.filter((f) => f.agentId === selectedAgentId) : [],
@@ -97,6 +121,13 @@ export default function FeedsDashboard() {
     () => relayAgents.find((a) => a.agentId === selectedAgentId),
     [relayAgents, selectedAgentId],
   );
+
+  // Agent online lookup for log coloring.
+  const agentOnlineMap = useMemo(() => {
+    const map = new Map<string, boolean>();
+    for (const a of relayAgents) map.set(a.agentId, a.online);
+    return map;
+  }, [relayAgents]);
 
   return (
     <div className="feeds">
@@ -118,6 +149,23 @@ export default function FeedsDashboard() {
           <span className="feeds__stat-value">{relayFeeds.length}</span>
           <span className="feeds__stat-label">total feeds</span>
         </div>
+      </div>
+
+      {/* ── Category tabs ────────────────────────────── */}
+      <div className="feeds__tabs">
+        {(['all', 'raw', 'derived', 'composite', 'meta'] as const).map((kind) => (
+          <button
+            key={kind}
+            className={`feeds__tab${kindFilter === kind ? ' feeds__tab--active' : ''}`}
+            style={kindFilter === kind && kind !== 'all'
+              ? { '--tab-accent': KIND_COLOR[kind] } as React.CSSProperties
+              : undefined}
+            onClick={() => setKindFilter(kind)}
+          >
+            {kind.toUpperCase()}
+            <span className="feeds__tab-count">{kindCounts[kind] ?? 0}</span>
+          </button>
+        ))}
       </div>
 
       {/* ── Main body ─────────────────────────────── */}
@@ -160,9 +208,28 @@ export default function FeedsDashboard() {
         {/* Right: detail panel */}
         <div className="feeds__detail">
           {!selectedAgentId ? (
-            <div className="feeds__detail-empty">
-              <span className="feeds__detail-empty-icon">&#x2190;</span>
-              <span>Select an agent to view its feeds</span>
+            <div className="feeds__all-feeds">
+              {feedsByKind.length === 0 ? (
+                <div className="feeds__detail-empty">
+                  <span className="feeds__detail-empty-icon">&#x25CB;</span>
+                  <span>No feeds available</span>
+                </div>
+              ) : (
+                feedsByKind.map(([kind, feeds]) => (
+                  <div key={kind} className="feeds__kind-group">
+                    <div className="feeds__kind-header">
+                      <span className="feeds__kind-dot" style={{ background: KIND_COLOR[kind] ?? 'var(--text-ghost)' }} />
+                      <span>{kind.toUpperCase()}</span>
+                      <span className="feeds__section-count">{feeds.length}</span>
+                    </div>
+                    <div className="feeds__kind-grid">
+                      {feeds.map((feed, i) => (
+                        <FeedCard key={feed.feedId} feed={feed} index={i} />
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           ) : (
             <>
@@ -186,8 +253,8 @@ export default function FeedsDashboard() {
                 </div>
               )}
               <div className="feeds__feed-grid">
-                {agentFeeds.map((feed) => (
-                  <FeedCard key={feed.feedId} feed={feed} />
+                {agentFeeds.map((feed, i) => (
+                  <FeedCard key={feed.feedId} feed={feed} index={i} />
                 ))}
                 {agentFeeds.length === 0 && (
                   <div className="feeds__empty">No feeds for this agent</div>
@@ -211,7 +278,10 @@ export default function FeedsDashboard() {
             feedLog.slice(0, 50).map((entry, i) => (
               <div key={`${entry.ts}-${i}`} className="feeds__log-row">
                 <span className="feeds__log-time">{fmtTime(entry.ts)}</span>
-                <span className="feeds__log-agent">{entry.agentId}</span>
+                <span className="feeds__log-ago">{timeAgo(entry.ts)}</span>
+                <span className={`feeds__log-agent${agentOnlineMap.get(entry.agentId) === false ? ' feeds__log-agent--offline' : ''}`}>
+                  {entry.agentId}
+                </span>
                 <span className="feeds__log-preview">{entry.preview}</span>
               </div>
             ))
@@ -224,15 +294,19 @@ export default function FeedsDashboard() {
 
 // ── Feed card sub-component ──────────────────────────────────
 
-function FeedCard({ feed }: { feed: RelayFeed }) {
+function FeedCard({ feed, index = 0 }: { feed: RelayFeed; index?: number }) {
+  const accent = KIND_COLOR[feed.kind] ?? 'var(--status-active)';
   return (
-    <div className="feeds__feed-card">
+    <div
+      className="feeds__feed-card"
+      style={{ '--i': index, '--feed-accent': accent } as React.CSSProperties}
+    >
       <div className="feeds__feed-header">
         <span className={statusDotClass(feed.status)} />
         <span className="feeds__feed-name">{feed.name}</span>
         <span
           className="feeds__feed-kind"
-          style={{ background: KIND_COLOR[feed.kind] ?? 'var(--status-active)' }}
+          style={{ background: accent }}
         >
           {feed.kind}
         </span>
@@ -240,7 +314,7 @@ function FeedCard({ feed }: { feed: RelayFeed }) {
       <div className="feeds__feed-value">{formatFeedValue(feed)}</div>
       {feed.sparkline.length > 1 && (
         <div className="feeds__feed-sparkline">
-          <Oscilloscope data={feed.sparkline} height={28} color={KIND_COLOR[feed.kind]} />
+          <Oscilloscope data={feed.sparkline} height={28} color={accent} />
         </div>
       )}
       <div className="feeds__feed-footer">
