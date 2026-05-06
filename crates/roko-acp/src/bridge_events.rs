@@ -3992,13 +3992,14 @@ Available commands (organized by Will's core loop):
     Ok(())
 }
 
-/// Runs a raw shell command (for /build, /test, /clippy) and streams output.
+/// Runs a raw shell command (for /build, /test, /clippy) and streams each
+/// stdout line as a TokenChunk immediately via tokio::select with cancel_token.
 async fn run_shell_command(
     session_id: &str,
     shell_cmd: &str,
     workdir: &Path,
     cancel_token: CancelToken,
-    event_sender: mpsc::Sender<CognitiveEvent>,
+    event_sender: mpsc::Sender<CognitiveEvent>, // streams each line as TokenChunk
 ) -> Result<()> {
     info!(session_id, shell_cmd, "executing shell command");
 
@@ -4030,13 +4031,9 @@ async fn run_shell_command(
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut reader = tokio::io::BufReader::new(stdout);
     let mut line = String::new();
-    let mut output = String::new();
+    let mut had_output = false;
 
     loop {
-        if cancel_token.is_cancelled() {
-            let _ = child.kill().await;
-            return Ok(());
-        }
         line.clear();
         let read = tokio::select! {
             biased;
@@ -4048,7 +4045,12 @@ async fn run_shell_command(
         };
         match read {
             Ok(0) => break,
-            Ok(_) => output.push_str(&line),
+            Ok(_) => {
+                had_output = true;
+                let _ = event_sender
+                    .send(CognitiveEvent::TokenChunk(line.clone()))
+                    .await;
+            }
             Err(e) => {
                 warn!(session_id, error = %e, "error reading shell command output");
                 break;
@@ -4066,22 +4068,32 @@ async fn run_shell_command(
         }
         let stderr_trimmed = stderr_buf.trim();
         if !stderr_trimmed.is_empty() {
-            output.push_str("\n--- stderr ---\n");
-            output.push_str(stderr_trimmed);
+            let _ = event_sender
+                .send(CognitiveEvent::TokenChunk(format!(
+                    "\n--- stderr ---\n{stderr_trimmed}"
+                )))
+                .await;
+            had_output = true;
         }
     }
 
     let exit_status = child.wait().await;
     let code = exit_status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
     if code != 0 {
-        output.push_str(&format!("\n\nProcess exited with code {code}"));
+        let _ = event_sender
+            .send(CognitiveEvent::TokenChunk(format!(
+                "\n\nProcess exited with code {code}"
+            )))
+            .await;
     }
 
-    if output.is_empty() {
-        output = format!("`{shell_cmd}` completed (no output)");
+    if !had_output {
+        let _ = event_sender
+            .send(CognitiveEvent::TokenChunk(format!(
+                "`{shell_cmd}` completed (no output)"
+            )))
+            .await;
     }
-
-    let _ = event_sender.send(CognitiveEvent::TokenChunk(output)).await;
     let _ = event_sender
         .send(CognitiveEvent::Complete {
             stop_reason: StopReason::EndTurn,
