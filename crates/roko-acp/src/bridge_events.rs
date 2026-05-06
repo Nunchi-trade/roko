@@ -1448,6 +1448,7 @@ where
                     &model_key,
                     &resolved.slug,
                     &roko_config,
+                    &workdir,
                     &session_effort,
                     session_tools_enabled,
                     cancel_token,
@@ -1668,16 +1669,14 @@ async fn run_anthropic_cognitive_task(
     model_key: &str,
     slug: &str,
     roko_config: &RokoConfig,
+    workdir: &Path,
     effort: &str,
     tools_enabled: bool,
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
-    let Some(model_call_config) = anthropic_model_call_config(
-        &config_with_session_effort(roko_config, effort),
-        model_key,
-        slug,
-    ) else {
+    let config = config_with_session_effort(roko_config, effort);
+    let Some(model_call_config) = anthropic_model_call_config(&config, model_key, slug) else {
         emit_dispatch_failure(
             &event_sender,
             "Error: Anthropic provider is not configured for ACP dispatch.".to_string(),
@@ -1698,11 +1697,203 @@ async fn run_anthropic_cognitive_task(
         return Ok(());
     }
 
-    let caller = ModelCallService::new(model_key.to_string()).with_config(model_call_config);
+    // Builtin tool-loop path: when tools are enabled, run the ToolLoop with
+    // Anthropic translator so the model can invoke read_file, bash, etc. and
+    // receive tool_result content blocks in a loop (up to 25 iterations).
+    if tools_enabled
+        && run_anthropic_builtin_tool_loop(
+            session_id,
+            messages,
+            model_key,
+            slug,
+            &config,
+            workdir,
+            cancel_token.clone(),
+            event_sender.clone(),
+        )
+        .await?
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    // Fallback: plain streaming with no tool execution loop.
+    let caller =
+        ModelCallService::new(model_key.to_string()).with_config(model_call_config.clone());
     let tools = tools_enabled.then(acp_builtin_tools).unwrap_or_default();
     let request = model_call_request_from_acp_messages(model_key, messages, tools);
     stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)
         .await
+}
+
+/// Anthropic-native builtin tool loop.
+///
+/// Uses the Anthropic Messages API tool format (`tool_use` / `tool_result` content
+/// blocks) and the shared [`ToolLoop`] infrastructure. When the model emits
+/// `tool_use` blocks the loop executes them via [`execute_acp_builtin_tool`],
+/// appends `tool_result` blocks, and re-calls the model until it produces a
+/// text-only response (or hits the 25-iteration cap).
+///
+/// Returns `Ok(Some(true))` if the loop handled the request, `Ok(Some(false))`
+/// if the caller should fall through to the plain streaming path, and `Ok(None)`
+/// if the Anthropic API key is not available.
+#[allow(clippy::too_many_arguments)]
+async fn run_anthropic_builtin_tool_loop(
+    session_id: &str,
+    messages: &[serde_json::Value],
+    model_key: &str,
+    slug: &str,
+    roko_config: &RokoConfig,
+    workdir: &Path,
+    cancel_token: CancelToken,
+    event_sender: mpsc::Sender<CognitiveEvent>,
+) -> Result<Option<bool>> {
+    // Resolve the Anthropic provider to get the API key.
+    let api_key = roko_config
+        .providers
+        .iter()
+        .find(|(_, p)| p.kind == ProviderKind::AnthropicApi)
+        .and_then(|(_, p)| p.resolve_api_key());
+
+    let Some(api_key) = api_key else {
+        debug!(
+            session_id,
+            model_key, "Anthropic builtin tool loop skipped: no API key"
+        );
+        return Ok(None);
+    };
+
+    let timeout_ms = roko_config
+        .providers
+        .iter()
+        .find(|(_, p)| p.kind == ProviderKind::AnthropicApi)
+        .and_then(|(_, p)| p.timeout_ms)
+        .unwrap_or(roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS);
+
+    // Build builtin tool definitions and handler map.
+    let tools = acp_builtin_tools();
+    if tools.is_empty() {
+        return Ok(Some(false));
+    }
+
+    let mut handlers: HashMap<String, Arc<dyn ToolHandler>> = HashMap::new();
+    for tool in &tools {
+        handlers.insert(
+            tool.name.clone(),
+            Arc::new(AcpBuiltinToolHandler {
+                tool_name: tool.name.clone(),
+                workdir: workdir.to_path_buf(),
+                event_sender: event_sender.clone(),
+            }),
+        );
+    }
+
+    let (backend, translator) =
+        roko_agent::provider::anthropic_api::tool_loop::create_anthropic_backend_simple(
+            api_key, slug, timeout_ms,
+        );
+
+    let registry = Arc::new(VecToolRegistry::from_tools(tools.clone()));
+    let resolver: Arc<dyn HandlerResolver> = Arc::new(AcpBuiltinHandlerResolver { handlers });
+    let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
+
+    let model_profile = roko_config
+        .effective_models()
+        .get(model_key)
+        .cloned()
+        .unwrap_or_else(|| ModelProfile {
+            slug: slug.to_string(),
+            context_window: 200_000,
+            ..Default::default()
+        });
+    let context_limit = usize::try_from(model_profile.context_window).unwrap_or(usize::MAX);
+
+    let tool_loop = ToolLoop::new(translator, dispatcher, backend)
+        .with_max_iterations(DEFAULT_MAX_TOOL_ITERATIONS)
+        .with_context_token_limit(context_limit);
+
+    let (chunk_sender, chunk_receiver) = mpsc::channel(256);
+    let forwarder = tokio::spawn(forward_tool_loop_stream_chunks(
+        chunk_receiver,
+        event_sender.clone(),
+    ));
+
+    let tool_context = ToolContext::testing(workdir)
+        .with_cancel_token(Arc::new(AcpToolCancelToken(cancel_token.clone())));
+    let mut tool_context = tool_context;
+    tool_context.capabilities = ToolPermission {
+        read: true,
+        write: true,
+        exec: true,
+        git: true,
+        network: true,
+    };
+
+    let output = tool_loop
+        .run_messages_streaming(messages.to_vec(), &tools, &tool_context, chunk_sender)
+        .await;
+    let _ = forwarder.await;
+
+    let usage = usage_info_from_tool_loop_usage(&output.total_usage);
+    match output.stop_reason {
+        ToolLoopStopReason::Stop => {
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage,
+                },
+            )
+            .await;
+        }
+        ToolLoopStopReason::MaxIterations => {
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::TokenChunk(format!(
+                    "\n[stopped after {} tool rounds because the model kept requesting tools]",
+                    DEFAULT_MAX_TOOL_ITERATIONS
+                )),
+            )
+            .await;
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::MaxTokens,
+                    usage,
+                },
+            )
+            .await;
+        }
+        ToolLoopStopReason::Cancelled => {
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::Cancelled,
+                    usage,
+                },
+            )
+            .await;
+        }
+        ToolLoopStopReason::BudgetExhausted => {
+            emit_dispatch_failure(
+                &event_sender,
+                "Error: Anthropic builtin tool loop stopped because the model-call budget was exhausted."
+                    .to_string(),
+            )
+            .await;
+            return Err(anyhow::anyhow!("ACP Anthropic builtin tool loop budget exhausted").into());
+        }
+        ToolLoopStopReason::BackendError(error) => {
+            warn!(
+                session_id,
+                error = %error,
+                "Anthropic builtin tool loop backend error, falling through to plain streaming"
+            );
+            return Ok(Some(false));
+        }
+    }
+
+    Ok(Some(true))
 }
 
 fn anthropic_model_call_config(
