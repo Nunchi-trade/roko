@@ -1265,6 +1265,7 @@ async fn generate_plan_from_prd_with_outcome(
         if validated_toml.is_err() {
             let max_retries = 2u32;
             let mut escalated_model: Option<String> = None;
+            let mut last_output = output.clone();
             for attempt in 1..=max_retries {
                 let t_retry = Instant::now();
 
@@ -1303,8 +1304,16 @@ async fn generate_plan_from_prd_with_outcome(
                     attempt,
                     max_retries + 1,
                 );
+                let error = validated_toml.as_ref().unwrap_err();
+                let truncated_output = if last_output.len() > 2000 {
+                    format!("{}…(truncated)", &last_output[..2000])
+                } else {
+                    last_output.clone()
+                };
                 let retry_prompt = format!(
-                    "Your previous output could not be parsed as valid TOML. \
+                    "Previous attempt produced invalid TOML. Error: {error}\n\n\
+                     Invalid output:\n```\n{truncated_output}\n```\n\n\
+                     Please fix and regenerate a valid tasks.toml.\n\n\
                      Output ONLY the ```toml fenced block with no other text.\n\n\
                      The plan must start with a [meta] section followed by [[task]] entries.\n\n\
                      PRD slug: {slug}"
@@ -1324,6 +1333,7 @@ async fn generate_plan_from_prd_with_outcome(
 
                 match retry_result {
                     Ok((0, retry_output)) if !retry_output.trim().is_empty() => {
+                        last_output = retry_output.clone();
                         validated_toml = try_extract_and_validate(&retry_output);
                         if validated_toml.is_ok() {
                             tracing::info!(
