@@ -216,6 +216,7 @@ impl LightClient for MockLightClient {
             balance_wei: acct.balance_wei,
             nonce: acct.nonce,
             code_hash: acct.code_hash,
+            storage_hash: String::new(),
             merkle_proof: MerkleProof { nodes: vec![node] },
             against_state_root: state_root,
         })
@@ -258,6 +259,7 @@ impl LightClient for MockLightClient {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

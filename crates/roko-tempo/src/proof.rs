@@ -62,11 +62,21 @@ pub struct AccountProof {
     /// Block this state was read at.
     pub block: BlockNumber,
     /// Native-token balance in wei (or chain-native smallest unit).
+    ///
+    /// On Tempo this is always 0 — the chain has no native gas token, all
+    /// value lives in TIP-20 stablecoin contracts. The field is kept for
+    /// compatibility with the EIP-1186 account record shape.
     pub balance_wei: u128,
     /// Account nonce.
     pub nonce: u64,
     /// Hex-encoded `0x`-prefixed code hash (zero for EOAs).
     pub code_hash: String,
+    /// Hex-encoded `0x`-prefixed storage trie root for this account.
+    /// Required to recompute the canonical Ethereum account RLP record
+    /// (`[nonce, balance, storage_root, code_hash]`) when verifying the
+    /// proof against the state root.
+    #[serde(default)]
+    pub storage_hash: String,
     /// Merkle proof committing the account record into the state trie.
     pub merkle_proof: MerkleProof,
     /// State root the proof must verify against.

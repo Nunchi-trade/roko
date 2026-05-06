@@ -1,55 +1,71 @@
 //! [`TempoLightClient`] — the Tempo-shaped façade over a [`LightClient`]
 //! backend.
 //!
-//! Phase 0 (this PR) wraps a [`crate::mock::MockLightClient`] so the trait
-//! surface, the agent integration, and the demo flow can be exercised
-//! end-to-end without requiring a Tempo network connection. Phase 1 swaps
-//! the inner backend for a real commonware-p2p subscription to a Tempo
-//! follower-node behind the `commonware-backend` cargo feature.
-//!
-//! The struct itself does not change between phases — only the inner
-//! `Box<dyn LightClient>` does. That stability is the point: agent code
-//! written today against `TempoLightClient` will not need a rewrite when
-//! the real network backing lands.
+//! The default constructor [`TempoLightClient::testnet`] connects to the
+//! Tempo "Moderato" testnet via JSON-RPC and verifies state proofs locally.
+//! [`TempoLightClient::with_rpc`] pins a custom endpoint (devnet, alternate
+//! provider, future mainnet). [`TempoLightClient::with_backend`] accepts any
+//! [`LightClient`] impl — used by tests with the optional `mock` feature.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::error::LcError;
-use crate::mock::MockLightClient;
 use crate::proof::{AccountProof, VerifiedHeader};
+use crate::rpc::TempoRpcBackend;
 use crate::traits::{BlockNumber, LightClient};
+use crate::{MODERATO_CHAIN_ID, MODERATO_RPC_URL};
 
-/// A [`LightClient`] specialised to Tempo's chain. Wraps an inner backend
-/// (mock today; commonware-p2p in Phase 1) and tags it with a Tempo-specific
-/// name for telemetry.
+/// A [`LightClient`] specialised to Tempo's chain.
 #[derive(Clone)]
 pub struct TempoLightClient {
     inner: Arc<dyn LightClient>,
 }
 
 impl TempoLightClient {
-    /// Construct over an explicit inner backend. Tests use this with a
-    /// `MockLightClient`; production code (Phase 1+) will use it with a
-    /// commonware-p2p backend.
+    /// Connect to the Tempo "Moderato" public testnet (chain id 42431,
+    /// `https://rpc.moderato.tempo.xyz`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LcError::Backend`] if the testnet is unreachable or returns
+    /// an unexpected chain id.
+    pub async fn testnet() -> Result<Self, LcError> {
+        Self::with_rpc(MODERATO_RPC_URL, MODERATO_CHAIN_ID).await
+    }
+
+    /// Connect to a Tempo-compatible RPC endpoint with an explicit expected
+    /// chain id. Use this for dev / staging / mainnet (once published).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LcError::Backend`] if the URL is malformed, the endpoint is
+    /// unreachable, or its chain id differs from `expected_chain_id`.
+    pub async fn with_rpc(rpc_url: &str, expected_chain_id: u64) -> Result<Self, LcError> {
+        let backend = TempoRpcBackend::connect(rpc_url, expected_chain_id).await?;
+        Ok(Self::with_backend(Arc::new(backend)))
+    }
+
+    /// Construct over an explicit inner backend. Useful for tests with the
+    /// `mock` feature, or future commonware-p2p backends.
     pub fn with_backend(inner: Arc<dyn LightClient>) -> Self {
         Self { inner }
     }
 
-    /// Construct a Tempo light-client over the canned demo chain shipped in
-    /// [`MockLightClient::tempo_demo`]. Suitable for `examples/tempo_tail.rs`
-    /// and integration tests that should run with no network.
-    pub fn demo() -> Self {
-        Self::with_backend(Arc::new(MockLightClient::tempo_demo()))
+    /// Build a Tempo light-client over the in-memory mock chain. Available
+    /// only when the `mock` cargo feature is enabled — exposed for tests
+    /// and offline demos that must run with no network.
+    #[cfg(feature = "mock")]
+    pub fn mock() -> Self {
+        Self::with_backend(Arc::new(crate::mock::MockLightClient::tempo_demo()))
     }
 }
 
 #[async_trait]
 impl LightClient for TempoLightClient {
-    #[allow(clippy::unnecessary_literal_bound)]
     fn name(&self) -> &str {
-        "tempo"
+        self.inner.name()
     }
 
     fn latest_verified(&self) -> Option<VerifiedHeader> {
@@ -73,16 +89,14 @@ impl LightClient for TempoLightClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mock"))]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn demo_round_trip() {
-        let lc = TempoLightClient::demo();
-        assert_eq!(lc.name(), "tempo");
-        // Mock ships with a 200ms tick by default; for the test we don't
-        // care about timing — just that the seeded chain advances.
+    async fn mock_round_trip() {
+        let lc = TempoLightClient::mock();
         let h = lc.await_next_header().await.unwrap();
         let proof = lc
             .read_account_at("0x000000000000000000000000000000000000A55E", h.height)

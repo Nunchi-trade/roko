@@ -1,15 +1,15 @@
 # 25 — Tempo Light Client (agent-side)
 
-> **Status:** draft (Phase 0 — mock backend shipping in this PR)
+> **Status:** real-testnet (Phase 1-RPC) — default backend connects to Tempo "Moderato" testnet
 > **Owner:** jl
-> **Date:** 2026-05-05
+> **Date:** 2026-05-06
 > **Scope:** agent-side trait + Tempo-shaped façade. Producer chain (Tempo / Daeji) is out of scope — those live in `Nunchi-trade/collaboration` PRs #143 / #144 / #145.
 
 ## TL;DR
 
 Roko agents need a way to consume external chain state with cryptographic verification — no RPC trust, no oracle relayer, no bridge. The Workstream A artifact from the 2026-05-01 Jacob × Jae × JD Tempo+Oracle call ([call analysis](https://github.com/Nunchi-trade/collaboration/pull/144)) is exactly that: an agent acting as a light client of an external chain, rendering verified state inside the Nunchi UI / agent command center.
 
-This doc specifies the agent-side surface: a chain-agnostic `LightClient` trait + a Tempo-shaped `TempoLightClient` façade, both now living in `crates/roko-tempo`. The crate ships with a deterministic mock backend so tests and demos run with no network, plus a runnable example (`cargo run -p roko-tempo --example tempo_tail`). Real network backings (commonware-p2p follower-node anchor → LC peer) swap in behind a feature flag in later phases without changing the trait surface.
+This doc specifies the agent-side surface: a chain-agnostic `LightClient` trait + a Tempo-shaped `TempoLightClient` façade, both living in `crates/roko-tempo`. The default backend connects to the Tempo public testnet "Moderato" (`https://rpc.moderato.tempo.xyz`, chain id 42431) and verifies state via EIP-1186 Merkle Patricia trie proofs against each block's `stateRoot`. A `mock` cargo feature offers an in-memory backend for unit tests; a future `commonware-backend` feature will swap in full BLS-attested consensus verification once Tempo opens its consensus-peer surface.
 
 ## Why this is the right artifact
 
@@ -17,8 +17,8 @@ From the call (verbatim, JD): *"if we're saying it's like 50 milliseconds and su
 
 The light-client agent is:
 
-- **Cheapest, highest-signal partnership artifact.** No bridge to build. No contract on Tempo. No permission required from Tempo (consumes public Tempo state — same as any block explorer).
-- **Cryptographically grounded.** Provability replaces RPC trust. The agent verifies headers against the producer chain's BLS quorum and walks Merkle proofs against the verified state root.
+- **Cheapest, highest-signal partnership artifact.** No bridge to build. No contract on Tempo. No permission required (consumes public Tempo state — same as any block explorer, but provably).
+- **Cryptographically grounded for state.** EIP-1186 proofs walk locally against the block's `stateRoot`. The RPC operator cannot lie about an account's balance / nonce / storage / code without producing an invalid proof.
 - **A user before being a partner.** The conversation-opener that does not look like a BD email.
 - **Reusable.** The same trait surface works for Daeji (Nunchi's L1) and any other commonware-based chain. We are writing one LC primitive, not a Tempo-specific one.
 
@@ -27,21 +27,21 @@ The light-client agent is:
 ```mermaid
 %%{init: {'theme': 'base'}}%%
 flowchart LR
-    subgraph PROD["Producer chain (Tempo today; Daeji & others by extension)"]
+    subgraph PROD["Tempo testnet (Moderato)"]
         direction LR
         V[Validators<br/>BLS quorum]
         S[(State trie)]
-        H[Header stream]
+        H[Block headers]
         V --> H
         V --> S
     end
     subgraph BACK["roko-tempo backends"]
         direction LR
-        MOCK[MockLightClient<br/>Phase 0 — this PR]
-        FOLLOW[Follower-node anchor<br/>Phase 1 — gated]
-        LCP[LC peer protocol<br/>Phase 2 — gated]
+        RPC[TempoRpcBackend<br/>JSON-RPC + EIP-1186<br/>**default, this PR**]
+        MOCK[MockLightClient<br/>feature mock]
+        CW[commonware follower<br/>feature commonware-backend<br/>Phase 2]
     end
-    subgraph LC["TempoLightClient trait surface"]
+    subgraph LC["LightClient trait"]
         direction LR
         AWAIT[await_next_header]
         READ[read_account_at]
@@ -53,19 +53,17 @@ flowchart LR
         UI[Nunchi UI / command center<br/>'verified-against-block-N']
     end
 
-    H --> MOCK
-    H --> FOLLOW
-    H --> LCP
-    S --> MOCK
-    S --> FOLLOW
-    S --> LCP
+    H --> RPC
+    S --> RPC
+    H -.-> MOCK
+    H -.-> CW
+    S -.-> CW
 
-    MOCK --> AWAIT
-    FOLLOW --> AWAIT
-    LCP --> AWAIT
-    MOCK --> READ
-    FOLLOW --> READ
-    LCP --> READ
+    RPC --> AWAIT
+    RPC --> READ
+    MOCK -.-> AWAIT
+    CW -.-> AWAIT
+    CW -.-> READ
 
     AWAIT --> SUB
     READ --> SUB
@@ -77,12 +75,20 @@ flowchart LR
     classDef trait fill:#ddf4ff,stroke:#0969da
     classDef agent fill:#f5f5f5,stroke:#999
     class V,S,H prod
-    class MOCK,FOLLOW,LCP back
+    class RPC,MOCK,CW back
     class AWAIT,READ,VERIFY trait
     class SUB,UI agent
 ```
 
-The trait surface is stable across phases. Only the backend changes.
+The trait surface is stable across backends. Only the backend changes.
+
+## Trust model (RPC + TOFU, current default)
+
+State reads are cryptographically verified — `eth_getProof` returns an MPT proof and `mpt::verify_account_proof` walks it locally against the block's `stateRoot`. This is end-to-end provable: the RPC operator cannot lie about the on-chain account record without producing a hash-mismatched proof.
+
+The header chain is anchored at trust-on-first-use (TOFU) at construction time. Subsequent headers must parent-hash-chain back to the anchor; mismatches are rejected. The remaining gap is the consensus signature on each header — verifying the validator BLS aggregate over the canonical header bytes — which requires a consensus-peer surface that Tempo does not currently expose.
+
+The backend marks itself with `attestation.quorum_id == "tempo-rpc-tofu"` so downstream consumers can tell it apart from a fully-consensus-verified backend.
 
 ## Trait surface
 
@@ -104,24 +110,26 @@ Five methods. Intentionally narrow — the demo only needs subscribe + read + ve
 
 | Phase | Backend | Network dep | Cargo feature | Status |
 |---|---|---|---|---|
-| **0** | `MockLightClient` (deterministic, canned) | none | default | **shipped this PR** |
-| 1 | commonware-p2p follower-node anchor | follower socket | `commonware-backend` | not yet wired |
-| 2 | commonware-p2p LC peer protocol | LC peer | `commonware-backend` | gated on Tempo's LC protocol shipping |
+| 1-RPC | `TempoRpcBackend` (JSON-RPC + EIP-1186 proofs + TOFU header chain) | Tempo testnet | default | **shipped this PR** |
+| 1-mock | `MockLightClient` (deterministic in-memory) | none | `mock` | shipped this PR (tests + offline demos only) |
+| 2 | commonware-p2p follower-node anchor with full BLS aggregate-sig verification | Tempo consensus peer | `commonware-backend` | gated on Tempo opening its surface |
 
-Per the 2026-05-01 call ("no follower nodes — at least not yet — but we can do the light client proofs"), Phase 1 is the realistic next step once Tempo opens its surface. Phase 2 lands when Tempo ships an LC protocol.
+Per the 2026-05-01 call ("no follower nodes — at least not yet — but we can do the light client proofs"), Phase 2 is the realistic next step once Tempo opens its consensus-peer surface.
 
 ## What this PR is *not*
 
-- **Not** a real Tempo network connection. The mock is structural; it proves the trait surface works end-to-end without misleading consumers about real Tempo state.
+- **Not** consensus-attested. State proofs are real; header attestations are RPC-anchored. Phase 2 closes this.
 - **Not** a bridge. Per `Nunchi-trade/collaboration` PR #144 §7, no bridge until a second live commonware destination beyond Tempo + Noble exists.
 - **Not** a contract deployment on Tempo. Workstream A by design bypasses Tempo's enterprise-gated partner form.
-- **Not** wired into `roko-cli`. The example binary is the only entry point in v1; `roko tempo-tail` as a first-class subcommand is a follow-up.
+- **Not** wired into `roko-cli`. The example binary is the only entry point in v1; `roko tempo-tail` as a first-class subcommand is a follow-up (~50 LOC of clap-derive boilerplate against the existing 8000-line `main.rs`).
 
 ## Verification
 
-- 5 unit tests covering: chain advances, proof verifies, unknown account errors clearly, tampered proofs fail, latest-verified tracks the cursor (`cargo test -p roko-tempo`).
-- Runnable example produces 5 verified-header lines + clean exit (`cargo run -p roko-tempo --example tempo_tail`).
-- `cargo clippy -p roko-tempo --no-deps -- -D warnings` clean.
+- Unit tests on the mock backend: `cargo test -p roko-tempo --features mock` (5/5 pass; chain advances, proof verifies, unknown account errors clearly, tampered proofs fail, latest-verified tracks the cursor).
+- Unit tests on the MPT verifier: `cargo test -p roko-tempo` (empty-account detection, b256 round-trip).
+- Live integration tests against Tempo testnet: `ROKO_TEST_RPC_URL=https://rpc.moderato.tempo.xyz cargo test -p roko-tempo --test tempo_live`. Three tests: `live_header_chain_advances`, `live_account_proof_verifies_for_block_miner`, `live_proof_against_wrong_state_root_fails`. Skip-on-unreachable so CI without network egress stays green.
+- End-to-end demo: `cargo run -p roko-tempo --example tempo_tail` produces 5 verified-header lines against real Moderato state.
+- `cargo clippy -p roko-tempo --all-features --no-deps -- -D warnings` clean.
 
 ## Relationship to the Daeji-side architecture
 
@@ -131,7 +139,7 @@ The chain-agnostic trait is intentional. The same write/read separation that #14
 |---|---|
 | Native chain state in `crates/node/domain/` | `LightClient::read_account_at` returns `AccountProof` |
 | Validator end-of-block write to `OracleState` | `LightClient::await_next_header` yields a `VerifiedHeader` whose `state_root` commits the post-block state |
-| BLS quorum attestation (`OracleEvent::Attest`) | `VerifiedHeader::attestation: AttestationSig` |
+| BLS quorum attestation (`OracleEvent::Attest`) | `VerifiedHeader::attestation: AttestationSig` (Phase 2 fills the bytes; Phase 1-RPC marks `quorum_id = "tempo-rpc-tofu"` so the gap is visible) |
 | EVM read via precompile `0xA0D` | not on the LC surface — the LC is the chain-native subscriber path |
 
 So a Roko agent that consumes Daeji state is a `LightClient` over Daeji; a Roko agent that consumes Tempo state is a `LightClient` over Tempo. One trait, two backends.
