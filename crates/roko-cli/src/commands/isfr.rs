@@ -318,9 +318,7 @@ pub(crate) async fn cmd_isfr(cli: &Cli, cmd: IsfrCmd) -> Result<i32> {
                                     src.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                 // No consecutive_failures field; show 0 when healthy
                                 let failures: u64 = if status == "live" { 0 } else { 1 };
-                                let rate_bps = src
-                                    .get("last_rate_bps")
-                                    .and_then(|v| v.as_u64());
+                                let rate_bps = src.get("last_rate_bps").and_then(|v| v.as_u64());
                                 let rate_str = rate_bps
                                     .map(|b| b.to_string())
                                     .unwrap_or_else(|| "-".to_string());

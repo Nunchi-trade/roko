@@ -24,8 +24,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::ServerEvent;
-use crate::state::{FeedCatalogAgent, FeedCatalogEntry};
 use crate::state::AppState;
+use crate::state::{FeedCatalogAgent, FeedCatalogEntry};
 
 // ---------------------------------------------------------------------------
 // FeedDescriptor — compatible with the relay protocol type

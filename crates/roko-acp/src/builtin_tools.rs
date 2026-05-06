@@ -3,9 +3,7 @@
 //! Returns [`ToolDef`] entries for the 8 core tools exposed to ACP sessions.
 //! These are schema-only definitions — execution is handled elsewhere.
 
-use roko_core::tool::{
-    ToolCategory, ToolConcurrency, ToolDef, ToolPermission, ToolSchema,
-};
+use roko_core::tool::{ToolCategory, ToolConcurrency, ToolDef, ToolPermission, ToolSchema};
 
 /// Returns the 8 builtin tool definitions for ACP sessions.
 #[must_use]
@@ -23,50 +21,65 @@ pub fn acp_builtin_tools() -> Vec<ToolDef> {
 }
 
 fn read_file() -> ToolDef {
-    ToolDef::new("read_file", "Read the contents of a UTF-8 file.", ToolCategory::Read, ToolPermission::read_only())
-        .with_parameters(ToolSchema::from_value(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Absolute or relative file path to read." },
-                "lines": { "type": "integer", "description": "Maximum number of lines to return." }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        })))
-        .with_concurrency(ToolConcurrency::Parallel)
-        .with_idempotent(true)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        "read_file",
+        "Read the contents of a UTF-8 file.",
+        ToolCategory::Read,
+        ToolPermission::read_only(),
+    )
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string", "description": "Absolute or relative file path to read." },
+            "lines": { "type": "integer", "description": "Maximum number of lines to return." }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    })))
+    .with_concurrency(ToolConcurrency::Parallel)
+    .with_idempotent(true)
+    .with_timeout_ms(30_000)
 }
 
 fn write_file() -> ToolDef {
-    ToolDef::new("write_file", "Write content to a file, creating or overwriting it.", ToolCategory::Write, ToolPermission::writes())
-        .with_parameters(ToolSchema::from_value(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Absolute or relative file path to write." },
-                "content": { "type": "string", "description": "Full file content to write." }
-            },
-            "required": ["path", "content"],
-            "additionalProperties": false
-        })))
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        "write_file",
+        "Write content to a file, creating or overwriting it.",
+        ToolCategory::Write,
+        ToolPermission::writes(),
+    )
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string", "description": "Absolute or relative file path to write." },
+            "content": { "type": "string", "description": "Full file content to write." }
+        },
+        "required": ["path", "content"],
+        "additionalProperties": false
+    })))
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_timeout_ms(30_000)
 }
 
 fn edit_file() -> ToolDef {
-    ToolDef::new("edit_file", "Perform a surgical string replacement in a file.", ToolCategory::Write, ToolPermission::writes())
-        .with_parameters(ToolSchema::from_value(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "File path to edit." },
-                "old_string": { "type": "string", "description": "Exact text to find and replace." },
-                "new_string": { "type": "string", "description": "Replacement text." }
-            },
-            "required": ["path", "old_string", "new_string"],
-            "additionalProperties": false
-        })))
-        .with_concurrency(ToolConcurrency::Serial)
-        .with_timeout_ms(30_000)
+    ToolDef::new(
+        "edit_file",
+        "Perform a surgical string replacement in a file.",
+        ToolCategory::Write,
+        ToolPermission::writes(),
+    )
+    .with_parameters(ToolSchema::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string", "description": "File path to edit." },
+            "old_string": { "type": "string", "description": "Exact text to find and replace." },
+            "new_string": { "type": "string", "description": "Replacement text." }
+        },
+        "required": ["path", "old_string", "new_string"],
+        "additionalProperties": false
+    })))
+    .with_concurrency(ToolConcurrency::Serial)
+    .with_timeout_ms(30_000)
 }
 
 fn glob() -> ToolDef {

@@ -371,9 +371,7 @@ fn git_command(workdir: &Path, args: &[&str]) -> Option<String> {
     // Use wait_with_output with a background thread to enforce a timeout.
     let handle = std::thread::spawn(move || output.wait_with_output());
     match handle.join() {
-        Ok(Ok(output)) if output.status.success() => {
-            String::from_utf8(output.stdout).ok()
-        }
+        Ok(Ok(output)) if output.status.success() => String::from_utf8(output.stdout).ok(),
         _ => None,
     }
 }
@@ -491,8 +489,16 @@ fn generate_cfactor_context(workdir: &Path) -> String {
             .then(a.agent_id.cmp(&b.agent_id))
     });
 
-    let top_positive: Vec<String> = positive.iter().take(3).map(|c| c.agent_id.clone()).collect();
-    let top_negative: Vec<String> = negative.iter().take(3).map(|c| c.agent_id.clone()).collect();
+    let top_positive: Vec<String> = positive
+        .iter()
+        .take(3)
+        .map(|c| c.agent_id.clone())
+        .collect();
+    let top_negative: Vec<String> = negative
+        .iter()
+        .take(3)
+        .map(|c| c.agent_id.clone())
+        .collect();
 
     let summary = roko_core::CFactorSummary {
         overall: current.overall,
@@ -1784,11 +1790,16 @@ mod tests {
     fn workspace_context_included_when_present() {
         let assembler = PromptAssembler::minimal();
         let mut pctx = PromptContext::from_task(&task(), &ctx());
-        pctx.workspace_context = "# Workspace context\nBranch: `main`\n- roko-core: Core types\n".to_string();
+        pctx.workspace_context =
+            "# Workspace context\nBranch: `main`\n- roko-core: Core types\n".to_string();
         let p = assembler.assemble(&task(), &pctx).unwrap();
         assert!(p.system_prompt.contains("# Workspace context"));
         assert!(p.system_prompt.contains("Branch: `main`"));
-        assert!(p.diagnostics.included_sections.contains(&"workspace_context".to_string()));
+        assert!(
+            p.diagnostics
+                .included_sections
+                .contains(&"workspace_context".to_string())
+        );
     }
 
     #[test]
@@ -1805,7 +1816,11 @@ mod tests {
         pctx.cfactor_context = "# Collective calibration\nC-Factor 0.72\n".to_string();
         let p = assembler.assemble(&task(), &pctx).unwrap();
         assert!(p.system_prompt.contains("# Collective calibration"));
-        assert!(p.diagnostics.included_sections.contains(&"cfactor_context".to_string()));
+        assert!(
+            p.diagnostics
+                .included_sections
+                .contains(&"cfactor_context".to_string())
+        );
     }
 
     #[test]

@@ -76,6 +76,13 @@ impl RunnerFailureKind {
             || lower.contains("timeout")
             || lower.contains("connection reset")
             || lower.contains("connection refused")
+            || lower.contains("overloaded")
+            || lower.contains("rate_limit")
+            || lower.contains("rate limit")
+            || lower.contains("api error: 529")
+            || lower.contains(" 529 ")
+            || lower.contains("\"529\"")
+            || lower.contains("429")
             || lower.contains("intermittent")
             || lower.contains("flaky")
         {

@@ -337,7 +337,9 @@ pub struct TurnConfig {
 
 impl Default for TurnConfig {
     fn default() -> Self {
-        use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS};
+        use roko_core::defaults::{
+            DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS,
+        };
         Self {
             max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             temperature: None,
@@ -407,8 +409,7 @@ pub async fn collect_stream_to_response(
         let args = if args_str.trim().is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_str(&args_str)
-                .unwrap_or_else(|_| serde_json::Value::String(args_str))
+            serde_json::from_str(&args_str).unwrap_or_else(|_| serde_json::Value::String(args_str))
         };
         tool_calls.push(roko_core::tool::ToolCall::new(id, name, args));
     }
@@ -728,7 +729,9 @@ impl ToolLoop {
     /// threaded individually. Backends receive this via `stream_turn`.
     #[must_use]
     pub fn turn_config(&self) -> TurnConfig {
-        use roko_core::defaults::{DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS};
+        use roko_core::defaults::{
+            DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TTFT_TIMEOUT_MS,
+        };
 
         let max_tokens = self
             .model_profile
@@ -2519,8 +2522,12 @@ mod tests {
     async fn collect_stream_text_deltas_concatenate() {
         use futures::stream;
         let events = vec![
-            Ok(StreamEvent::now(StreamEventKind::TextDelta("Hello".to_string()))),
-            Ok(StreamEvent::now(StreamEventKind::TextDelta(", world!".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::TextDelta(
+                "Hello".to_string(),
+            ))),
+            Ok(StreamEvent::now(StreamEventKind::TextDelta(
+                ", world!".to_string(),
+            ))),
             Ok(StreamEvent::now(StreamEventKind::Done {
                 finish_reason: "stop".to_string(),
             })),
@@ -2572,7 +2579,9 @@ mod tests {
             .expect("expected tool_calls array");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(
-            tool_calls[0].pointer("/function/name").and_then(|n| n.as_str()),
+            tool_calls[0]
+                .pointer("/function/name")
+                .and_then(|n| n.as_str()),
             Some("read_file")
         );
     }
@@ -2587,7 +2596,9 @@ mod tests {
             ..Default::default()
         };
         let events = vec![
-            Ok(StreamEvent::now(StreamEventKind::TextDelta("ok".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::TextDelta(
+                "ok".to_string(),
+            ))),
             Ok(StreamEvent::now(StreamEventKind::Usage(usage))),
             Ok(StreamEvent::now(StreamEventKind::Done {
                 finish_reason: "stop".to_string(),
@@ -2600,11 +2611,13 @@ mod tests {
             panic!("expected Json response");
         };
         assert_eq!(
-            json.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64()),
+            json.pointer("/usage/prompt_tokens")
+                .and_then(|v| v.as_u64()),
             Some(100)
         );
         assert_eq!(
-            json.pointer("/usage/completion_tokens").and_then(|v| v.as_u64()),
+            json.pointer("/usage/completion_tokens")
+                .and_then(|v| v.as_u64()),
             Some(50)
         );
     }
@@ -2613,7 +2626,9 @@ mod tests {
     async fn collect_stream_ttft_is_measured() {
         use futures::stream;
         let events = vec![
-            Ok(StreamEvent::now(StreamEventKind::TextDelta("hi".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::TextDelta(
+                "hi".to_string(),
+            ))),
             Ok(StreamEvent::now(StreamEventKind::Done {
                 finish_reason: "stop".to_string(),
             })),
@@ -2629,14 +2644,19 @@ mod tests {
         assert!(ttft.is_some(), "expected provider_ttft_ms in metadata");
         // The TTFT value should be a non-negative number.
         let ttft_val = ttft.and_then(|v| v.as_u64()).unwrap_or(0);
-        assert!(ttft_val < 5_000, "TTFT should be small in test: {ttft_val}ms");
+        assert!(
+            ttft_val < 5_000,
+            "TTFT should be small in test: {ttft_val}ms"
+        );
     }
 
     #[tokio::test]
     async fn collect_stream_error_propagates() {
         use futures::stream;
         let events = vec![
-            Ok(StreamEvent::now(StreamEventKind::TextDelta("partial".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::TextDelta(
+                "partial".to_string(),
+            ))),
             Err(LlmError::Network("connection reset".to_string())),
         ];
         let stream = Box::pin(stream::iter(events));
@@ -2681,7 +2701,10 @@ mod tests {
     #[test]
     fn turn_config_default_uses_roko_defaults() {
         let config = TurnConfig::default();
-        assert_eq!(config.max_tokens, roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS);
+        assert_eq!(
+            config.max_tokens,
+            roko_core::defaults::DEFAULT_MAX_OUTPUT_TOKENS
+        );
         assert!(config.temperature.is_none());
         assert_eq!(
             config.ttft_timeout.as_millis() as u64,
@@ -2715,7 +2738,9 @@ mod tests {
     fn stream_event_from_stream_chunk_done() {
         let chunk = StreamChunk::Done(crate::translate::FinishReason::ToolCalls);
         let event: StreamEvent = chunk.into();
-        assert!(matches!(event.kind, StreamEventKind::Done { ref finish_reason } if finish_reason.contains("ToolCalls")));
+        assert!(
+            matches!(event.kind, StreamEventKind::Done { ref finish_reason } if finish_reason.contains("ToolCalls"))
+        );
     }
 
     #[tokio::test]
@@ -2749,9 +2774,15 @@ mod tests {
     async fn collect_stream_reasoning_delta_captured() {
         use futures::stream;
         let events = vec![
-            Ok(StreamEvent::now(StreamEventKind::ReasoningDelta("step 1".to_string()))),
-            Ok(StreamEvent::now(StreamEventKind::ReasoningDelta(" step 2".to_string()))),
-            Ok(StreamEvent::now(StreamEventKind::TextDelta("answer".to_string()))),
+            Ok(StreamEvent::now(StreamEventKind::ReasoningDelta(
+                "step 1".to_string(),
+            ))),
+            Ok(StreamEvent::now(StreamEventKind::ReasoningDelta(
+                " step 2".to_string(),
+            ))),
+            Ok(StreamEvent::now(StreamEventKind::TextDelta(
+                "answer".to_string(),
+            ))),
             Ok(StreamEvent::now(StreamEventKind::Done {
                 finish_reason: "stop".to_string(),
             })),
@@ -2781,20 +2812,20 @@ mod tests {
 
         let registry: Arc<dyn roko_core::tool::ToolRegistry> =
             Arc::new(VecToolRegistry::from_tools(test_tools()));
-        let resolver: Arc<dyn crate::dispatcher::HandlerResolver> =
-            Arc::new(|name: &str| -> Option<Arc<dyn roko_core::tool::ToolHandler>> {
+        let resolver: Arc<dyn crate::dispatcher::HandlerResolver> = Arc::new(
+            |name: &str| -> Option<Arc<dyn roko_core::tool::ToolHandler>> {
                 if name == "echo" {
                     Some(Arc::new(EchoHandler) as Arc<dyn roko_core::tool::ToolHandler>)
                 } else {
                     None
                 }
-            });
+            },
+        );
         let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
         let translator: Arc<dyn Translator> = Arc::new(MockTranslator);
         let backend: Arc<dyn LlmBackend> = Arc::new(FinalAnswerBackend { text: "x".into() });
 
-        let tl = ToolLoop::new(translator, dispatcher, backend)
-            .with_model_profile(profile);
+        let tl = ToolLoop::new(translator, dispatcher, backend).with_model_profile(profile);
 
         let config = tl.turn_config();
         assert_eq!(config.max_tokens, 8192);

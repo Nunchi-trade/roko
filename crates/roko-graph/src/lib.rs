@@ -59,8 +59,8 @@ pub use cell::{Cell, CellContext, CellVersion};
 pub use engine::{GraphEngine, GraphOutput, NodeResult, NodeStatus, default_registry};
 pub use registry::{CellFactory, CellRegistry};
 pub use types::{
-    Edge, EdgeCondition, Graph, GraphConfig, GraphError, GraphMetadata, GraphNodeIdx, Node,
-    NodeId, NodeOutput, NodeOutputStatus,
+    Edge, EdgeCondition, Graph, GraphConfig, GraphError, GraphMetadata, GraphNodeIdx, Node, NodeId,
+    NodeOutput, NodeOutputStatus,
 };
 
 // Re-export from new modules.

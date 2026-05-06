@@ -23,8 +23,8 @@
 //! [`crate::event_bus::EventBus`] while implementing the `Bus` trait from
 //! `roko-core`.  This is the same pattern as [`crate::state_hub::StateHub`].
 
-use roko_core::{Bus, Pulse, TopicFilter, error::Result};
 use crate::event_bus::{Envelope, EventBus};
+use roko_core::{Bus, Pulse, TopicFilter, error::Result};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 

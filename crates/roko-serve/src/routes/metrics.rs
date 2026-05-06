@@ -38,7 +38,10 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
     // These use metric names distinct from those in MetricRegistry to avoid
     // duplicate HELP/TYPE lines in the output.
     let uptime_secs = state.started_at.elapsed().as_secs();
-    let _ = writeln!(output, "# HELP roko_uptime_seconds Server uptime in seconds");
+    let _ = writeln!(
+        output,
+        "# HELP roko_uptime_seconds Server uptime in seconds"
+    );
     let _ = writeln!(output, "# TYPE roko_uptime_seconds gauge");
     let _ = writeln!(output, "roko_uptime_seconds {uptime_secs}");
 
@@ -98,10 +101,7 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(
-            axum::http::header::CONTENT_TYPE,
-            PROMETHEUS_CONTENT_TYPE,
-        )
+        .header(axum::http::header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)
         .body(axum::body::Body::from(output))
         .unwrap_or_else(|_| {
             Response::builder()
@@ -130,8 +130,7 @@ mod tests {
         config: RokoConfig,
     ) -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
         let dir = tempdir().expect("tempdir");
-        let deploy =
-            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let state = Arc::new(
             AppState::new(
                 dir.path().to_path_buf(),
@@ -251,8 +250,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_sink_returns_same_registry() {
         let dir = tempdir().expect("tempdir");
-        let deploy =
-            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
         let state = AppState::new(
             dir.path().to_path_buf(),
             Arc::new(NoOpRuntime),

@@ -58,16 +58,19 @@ async fn cmd_list(cli: &Cli) -> Result<i32> {
             let feeds: Vec<FeedSummary> = resp.json().await.unwrap_or_default();
 
             if cli.json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                    "feeds": feeds.iter().map(|f| serde_json::json!({
-                        "id": f.id,
-                        "topic": f.topic,
-                        "kind": f.kind,
-                        "connected": f.connected,
-                        "pulses_produced": f.pulses_produced,
-                    })).collect::<Vec<_>>(),
-                    "total": feeds.len(),
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "feeds": feeds.iter().map(|f| serde_json::json!({
+                            "id": f.id,
+                            "topic": f.topic,
+                            "kind": f.kind,
+                            "connected": f.connected,
+                            "pulses_produced": f.pulses_produced,
+                        })).collect::<Vec<_>>(),
+                        "total": feeds.len(),
+                    }))?
+                );
             } else {
                 println!(
                     "{:<24} {:<32} {:<10} {}",

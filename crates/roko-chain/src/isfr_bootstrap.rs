@@ -220,18 +220,12 @@ mod alloy_bootstrap {
 
         // Fund the deployer on dev chains (Anvil/mirage-rs forks don't auto-fund
         // the default key with ETH). 10_000 ETH is plenty for contract deploys.
-        let balance: U256 = provider
-            .get_balance(deployer)
-            .await
-            .unwrap_or(U256::ZERO);
+        let balance: U256 = provider.get_balance(deployer).await.unwrap_or(U256::ZERO);
         if balance < U256::from(1_000_000_000_000_000_000u128) {
             info!("deployer balance too low ({balance}), funding via anvil_setBalance");
             let fund_amount = U256::from(10_000u64) * U256::from(10u64).pow(U256::from(18));
             let _: bool = provider
-                .raw_request(
-                    "anvil_setBalance".into(),
-                    (deployer, fund_amount),
-                )
+                .raw_request("anvil_setBalance".into(), (deployer, fund_amount))
                 .await
                 .context("anvil_setBalance to fund deployer")?;
             info!("deployer funded with 10,000 ETH");

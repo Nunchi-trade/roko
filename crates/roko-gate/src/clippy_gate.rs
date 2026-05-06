@@ -118,9 +118,7 @@ impl Verify for ClippyGate {
         // For cargo, the args already embed `-- -D warnings`; splice
         // extra_args before the `--` sentinel so they apply to the
         // invocation, not to clippy itself.
-        let base = self
-            .build_system
-            .scoped_lint_args(&payload.target_crates);
+        let base = self.build_system.scoped_lint_args(&payload.target_crates);
         let mut cmd = Command::new(self.build_system.program());
         let dash_idx = base.iter().position(|a| a == "--");
         if let Some(idx) = dash_idx {

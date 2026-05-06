@@ -82,7 +82,35 @@ macro_rules! scout_agent {
     };
 }
 
-scout_agent!(AaveScoutAgent, "isfr-scout-aave", "Aave Scout", "aave", "isfr-aave", "feed:isfr:aave");
-scout_agent!(CompoundScoutAgent, "isfr-scout-compound", "Compound Scout", "compound", "isfr-compound", "feed:isfr:compound");
-scout_agent!(EthenaScoutAgent, "isfr-scout-ethena", "Ethena Scout", "ethena", "isfr-ethena", "feed:isfr:ethena");
-scout_agent!(LidoScoutAgent, "isfr-scout-lido", "Lido Scout", "lido", "isfr-lido", "feed:isfr:lido");
+scout_agent!(
+    AaveScoutAgent,
+    "isfr-scout-aave",
+    "Aave Scout",
+    "aave",
+    "isfr-aave",
+    "feed:isfr:aave"
+);
+scout_agent!(
+    CompoundScoutAgent,
+    "isfr-scout-compound",
+    "Compound Scout",
+    "compound",
+    "isfr-compound",
+    "feed:isfr:compound"
+);
+scout_agent!(
+    EthenaScoutAgent,
+    "isfr-scout-ethena",
+    "Ethena Scout",
+    "ethena",
+    "isfr-ethena",
+    "feed:isfr:ethena"
+);
+scout_agent!(
+    LidoScoutAgent,
+    "isfr-scout-lido",
+    "Lido Scout",
+    "lido",
+    "isfr-lido",
+    "feed:isfr:lido"
+);

@@ -2172,7 +2172,11 @@ impl LearningRuntime {
         if let Err(e) = self.cascade_router.save(&self.paths.cascade_router_json) {
             tracing::warn!(error = %e, "[wal] cascade-router snapshot failed during compaction");
         }
-        if let Err(e) = self.experiment_store.lock().save(&self.paths.experiments_json) {
+        if let Err(e) = self
+            .experiment_store
+            .lock()
+            .save(&self.paths.experiments_json)
+        {
             tracing::warn!(error = %e, "[wal] experiment snapshot failed during compaction");
         }
         if let Err(e) = wal.truncate() {
@@ -2193,7 +2197,11 @@ impl LearningRuntime {
             let mut w = wal.lock();
             // Also save experiment store so we don't lose experiment entries
             // when truncating the WAL after a cascade-only snapshot.
-            if let Err(e) = self.experiment_store.lock().save(&self.paths.experiments_json) {
+            if let Err(e) = self
+                .experiment_store
+                .lock()
+                .save(&self.paths.experiments_json)
+            {
                 tracing::warn!(error = %e, "[wal] experiment snapshot failed during cascade-router save");
             }
             if let Err(e) = w.truncate() {
@@ -2678,10 +2686,7 @@ impl LearningRuntime {
             &provider,
         );
         let context_features = ctx.to_features();
-        let model_idx = self
-            .cascade_router
-            .model_index_for_slug(&slug)
-            .unwrap_or(0);
+        let model_idx = self.cascade_router.model_index_for_slug(&slug).unwrap_or(0);
         self.cascade_router
             .record_observation(&ctx, &slug, reward, episode.success);
         self.wal_append(WalEntry::CascadeObservation {

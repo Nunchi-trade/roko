@@ -10,8 +10,8 @@
 //! These tests serve as the reference for how Phase 2 (Graph engine) will
 //! compose these abstractions.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -188,11 +188,13 @@ impl Cell for StoreCountObserver {
 impl Observe for StoreCountObserver {
     fn observe(&self) -> Vec<Engram> {
         let count = *self.count.lock().unwrap();
-        vec![Engram::builder(Kind::Metric)
-            .body(Body::text(format!("signal_count={count}")))
-            .tag("source", "store_observer")
-            .tag("count", count.to_string())
-            .build()]
+        vec![
+            Engram::builder(Kind::Metric)
+                .body(Body::text(format!("signal_count={count}")))
+                .tag("source", "store_observer")
+                .tag("count", count.to_string())
+                .build(),
+        ]
     }
 }
 
@@ -335,10 +337,7 @@ async fn cell_execute_preserves_signal_identity() {
         .build();
     let original_id = signal.id;
 
-    let output = PassthroughCell
-        .execute(vec![signal], &ctx)
-        .await
-        .unwrap();
+    let output = PassthroughCell.execute(vec![signal], &ctx).await.unwrap();
     assert_eq!(output.len(), 1);
     assert_eq!(output[0].id, original_id);
 }
@@ -360,9 +359,7 @@ fn type_schema_of_kind_compatible_with_any() {
 
 #[test]
 fn type_schema_same_kind_compatible() {
-    assert!(
-        TypeSchema::OfKind(Kind::Metric).is_compatible_with(&TypeSchema::OfKind(Kind::Metric))
-    );
+    assert!(TypeSchema::OfKind(Kind::Metric).is_compatible_with(&TypeSchema::OfKind(Kind::Metric)));
 }
 
 #[test]
@@ -552,7 +549,9 @@ async fn bus_connects_observer_to_trigger_to_cell() {
     let bus = MemoryBus::new(64);
 
     // Subscribe before publishing.
-    let mut rx = bus.subscribe(TopicFilter::Prefix("observe.".into())).unwrap();
+    let mut rx = bus
+        .subscribe(TopicFilter::Prefix("observe.".into()))
+        .unwrap();
 
     // Observer produces observations.
     let observer = StoreCountObserver::new();

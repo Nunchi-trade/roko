@@ -867,7 +867,8 @@ mod tests {
     fn render_prometheus_appends_registered_metrics() {
         let reg = MetricRegistry::new();
         let labels = LabelSet::from_pairs(&[("gate", "compile"), ("verdict", "pass")]);
-        let counter = reg.register_counter("roko_gate_verdicts_total", "Total gate verdicts", labels);
+        let counter =
+            reg.register_counter("roko_gate_verdicts_total", "Total gate verdicts", labels);
         counter.inc_by(3);
 
         let output = reg.render_prometheus();
@@ -883,9 +884,6 @@ mod tests {
             output.contains("verdict=\"pass\""),
             "rendered output should contain verdict label: {output}"
         );
-        assert!(
-            output.contains(" 3"),
-            "counter value should be 3: {output}"
-        );
+        assert!(output.contains(" 3"), "counter value should be 3: {output}");
     }
 }

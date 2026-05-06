@@ -247,7 +247,9 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             if matches!(engine, PlanEngine::Graph) {
                 // Warn about unsupported flags on the Graph Engine path.
                 if resume_plan.is_some() {
-                    eprintln!("Note: --resume-plan is not yet supported by the Graph Engine; snapshots will be ignored.");
+                    eprintln!(
+                        "Note: --resume-plan is not yet supported by the Graph Engine; snapshots will be ignored."
+                    );
                 }
 
                 return cmd_plan_run_engine(&resolved_plans_dir, &wd, cli).await;
@@ -260,486 +262,510 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             // is unreachable without the feature.
             #[cfg(not(feature = "legacy-runner-v2"))]
             {
-                let _ = (&resume_plan, &approval, &max_retries, &max_tasks, &fresh, &force_resume,
-                          &layout, &t_setup, &t_total);
-                bail!("Runner v2 is not available; enable the `legacy-runner-v2` feature to use --engine runner-v2");
+                let _ = (
+                    &resume_plan,
+                    &approval,
+                    &max_retries,
+                    &max_tasks,
+                    &fresh,
+                    &force_resume,
+                    &layout,
+                    &t_setup,
+                    &t_total,
+                );
+                bail!(
+                    "Runner v2 is not available; enable the `legacy-runner-v2` feature to use --engine runner-v2"
+                );
             }
 
             #[cfg(feature = "legacy-runner-v2")]
             {
-            // Acquire exclusive workspace lock before mutating state.
-            let _lock = roko_cli::workspace_lock::acquire_workspace_lock(layout.root())?;
+                // Acquire exclusive workspace lock before mutating state.
+                let _lock = roko_cli::workspace_lock::acquire_workspace_lock(layout.root())?;
 
-            if fresh {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis();
-                let state_dir = layout.state_dir();
-                for filename in &["executor.json", "orchestrator.json", "run-state.json", "state-snapshot.json"] {
-                    let state_path = state_dir.join(filename);
-                    if state_path.exists() {
-                        let backup_path = state_path.with_extension(format!("json.bak.{ts}"));
-                        match std::fs::rename(&state_path, &backup_path) {
-                            Ok(()) => {
-                                if !cli.quiet {
+                if fresh {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    let state_dir = layout.state_dir();
+                    for filename in &[
+                        "executor.json",
+                        "orchestrator.json",
+                        "run-state.json",
+                        "state-snapshot.json",
+                    ] {
+                        let state_path = state_dir.join(filename);
+                        if state_path.exists() {
+                            let backup_path = state_path.with_extension(format!("json.bak.{ts}"));
+                            match std::fs::rename(&state_path, &backup_path) {
+                                Ok(()) => {
+                                    if !cli.quiet {
+                                        eprintln!(
+                                            "▸ --fresh: archived old state to {}",
+                                            backup_path.display()
+                                        );
+                                    }
+                                }
+                                Err(err) => {
                                     eprintln!(
-                                        "▸ --fresh: archived old state to {}",
-                                        backup_path.display()
+                                        "warning: --fresh: could not archive {}: {err}",
+                                        state_path.display()
                                     );
                                 }
                             }
-                            Err(err) => {
-                                eprintln!(
-                                    "warning: --fresh: could not archive {}: {err}",
-                                    state_path.display()
-                                );
-                            }
                         }
                     }
                 }
-            }
 
-            prepare_runtime_hooks(&wd, cli.quiet);
-            let config = load_resolved_config(&wd)?.config;
+                prepare_runtime_hooks(&wd, cli.quiet);
+                let config = load_resolved_config(&wd)?.config;
 
-            // Bootstrap: workspace check + unified config load.
-            let boot = roko_cli::bootstrap::RokoBootstrap::new(
-                &wd,
-                roko_cli::bootstrap::BootOpts {
-                    require_workspace: true,
-                    require_provider: false, // explicit preflight below is more detailed
-                    acquire_lock: false,
-                },
-            )?;
-            let early_roko_config = boot.config;
-
-            // Pre-flight: fail fast if the default model's provider is misconfigured.
-            {
-                let dm = &early_roko_config.agent.default_model;
-                if !dm.trim().is_empty() {
-                    crate::commands::util::preflight_provider_for_model(&early_roko_config, dm)?;
-                }
-            }
-
-            // Aggregate provider readiness: warn/abort if no providers are usable.
-            crate::commands::util::preflight_providers_aggregate(&early_roko_config)?;
-
-            // Pre-flight: warn if gate tools are missing.
-            let missing_gate_tools = crate::commands::util::preflight_gate_deps();
-            if !missing_gate_tools.is_empty() {
-                eprintln!(
-                    "warning: missing gate tools: {}. Some gates may fail.",
-                    missing_gate_tools.join(", ")
-                );
-            }
-            let max_concurrent_tasks = if max_tasks > 0 {
-                max_tasks
-            } else {
-                early_roko_config
-                    .runner
-                    .max_concurrent_tasks
-                    .or_else(|| {
-                        (config.executor.max_concurrent_tasks
-                            != roko_orchestrator::ExecutorConfig::default().max_concurrent_tasks)
-                            .then_some(config.executor.max_concurrent_tasks)
-                    })
-                    .unwrap_or(4)
-            }
-            .max(1);
-            let state_hub = roko_cli::state_hub::shared_state_hub();
-
-            // Runner v2 auto-resumes from .roko/state/executor.json if it exists.
-            // Explicit --resume-plan paths are honored by copying to the standard location.
-            if !fresh {
-                if let Some(ref snap_path) = resume_plan {
-                    let snap_path = if snap_path.is_relative() {
-                        wd.join(snap_path)
-                    } else {
-                        snap_path.clone()
-                    };
-                    let standard = layout.executor_snapshot();
-                    if snap_path != standard && snap_path.exists() {
-                        if let Some(parent) = standard.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let _ = std::fs::copy(&snap_path, &standard);
-                    }
-                }
-            }
-
-            // Create the shared metric registry and register standard metrics.
-            let metrics = std::sync::Arc::new(roko_core::obs::MetricRegistry::new());
-            roko_core::obs::register_standard_metrics(&metrics);
-
-            // ── Runner v2 for all plan run modes ────────────────────
-            // Ensure git repo exists — agents need git tools to work.
-            if !wd.join(".git").exists() {
-                eprintln!("▸ No git repo found — initializing for agent tooling");
-                let _ = std::process::Command::new("git")
-                    .args(["init"])
-                    .current_dir(&wd)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                let _ = std::process::Command::new("git")
-                    .args(["add", "-A"])
-                    .current_dir(&wd)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                let _ = std::process::Command::new("git")
-                    .args([
-                        "commit",
-                        "-m",
-                        "init (auto-created by roko)",
-                        "--allow-empty",
-                    ])
-                    .current_dir(&wd)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
-
-            let plans = roko_cli::runner::plan_loader::load_plans(&resolved_plans_dir)?;
-
-            // Scaffold any crates referenced by tasks that don't exist yet.
-            // Plans that create new crates need a minimal Cargo.toml + src/lib.rs
-            // so the gate pipeline (`cargo check`) can succeed.
-            let scaffolded = roko_cli::runner::plan_loader::scaffold_missing_crates(&wd, &plans)?;
-            if !scaffolded.is_empty() && !cli.quiet {
-                eprintln!(
-                    "▸ Scaffolded {} new crate(s): {}",
-                    scaffolded.len(),
-                    scaffolded.join(", ")
-                );
-            }
-
-            let roko_config = early_roko_config;
-
-            // Initialize Phase 0 subsystems.
-            let router_path = layout.cascade_router_path();
-            let mut model_slugs = roko_config
-                .effective_models()
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            model_slugs.sort();
-            model_slugs.dedup();
-            if model_slugs.is_empty() && !roko_config.agent.default_model.trim().is_empty() {
-                model_slugs.push(roko_config.agent.default_model.clone());
-            }
-            let cascade_router = std::sync::Arc::new(
-                roko_learn::cascade_router::CascadeRouter::load_or_new(&router_path, model_slugs),
-            );
-            let extension_chain = std::sync::Arc::new(tokio::sync::Mutex::new(
-                roko_core::extension::ExtensionChain::new(),
-            ));
-            let connector_registry =
-                std::sync::Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
-            let feed_registry =
-                std::sync::Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
-
-            // ── Wire dispatch / feedback / projection facades ──────────────
-            //
-            // The new module families are activated alongside the legacy
-            // emit paths: every runner event also lands on the projection
-            // broadcast and (when applicable) on the feedback fan-out.
-            // Sinks write into `.roko/`, mirroring what the legacy helper
-            // path does so resume / dashboard data stays consistent.
-            let run_uuid = uuid::Uuid::new_v4().to_string();
-            let projection = std::sync::Arc::new(roko_cli::runner::projection::Projection::new(
-                run_uuid.clone(),
-            ));
-            let episodes_path = layout.root_episodes_path();
-            let knowledge_path = layout
-                .learn_dir()
-                .join(roko_neuro::admission::DEFAULT_KNOWLEDGE_CANDIDATES_FILE);
-            // Best-effort directory creation — the sinks' own
-            // `create_dir_all` will retry on first append.
-            let _ = std::fs::create_dir_all(layout.learn_dir());
-            let feedback_facade = std::sync::Arc::new(
-                roko_cli::runtime_feedback::FeedbackFacade::new()
-                    .with_sink(std::sync::Arc::new(
-                        roko_cli::runtime_feedback::EpisodeSink::at(&episodes_path),
-                    ))
-                    .with_sink(std::sync::Arc::new(
-                        roko_cli::runtime_feedback::RoutingObservationSink::new(
-                            cascade_router.clone(),
-                        ),
-                    ))
-                    .with_sink(std::sync::Arc::new(
-                        roko_cli::runtime_feedback::KnowledgeIngestionSink::at(&knowledge_path)
-                            .with_ingestor(std::sync::Arc::new(
-                                roko_cli::runtime_feedback::NeuroKnowledgeIngestor::new(
-                                    roko_neuro::KnowledgeStore::for_workdir(&wd),
-                                ),
-                            )),
-                    )),
-            );
-
-            let run_config = roko_cli::runner::RunConfig {
-                layout: layout.clone(),
-                workdir: wd.clone(),
-                plan_dir: resolved_plans_dir.clone(),
-                model: roko_config.agent.default_model.clone(),
-                cli_model_override: cli.model.clone(),
-                timeout_secs: roko_config.timeouts.agent_dispatch_secs,
-                plan_timeout_secs: roko_config.timeouts.plan_total_secs,
-                max_retries: max_retries.unwrap_or(2),
-                max_concurrent_tasks,
-                gate_concurrency: max_concurrent_tasks,
-                approval,
-                dangerously_skip_permissions: true,
-                force_resume,
-                mcp_config: {
-                    // Resolve MCP config: .roko/mcp.json > auto-discovery
-                    let mcp = {
-                        let roko_local = layout.mcp_config_path();
-                        if roko_local.is_file() {
-                            Some(roko_local)
-                        } else {
-                            roko_agent::mcp::find_mcp_config(&wd)
-                                .and_then(|r| r.ok())
-                                .map(|(p, _)| p)
-                        }
-                    };
-                    if let Some(ref path) = mcp {
-                        tracing::info!(path = ?path, "MCP config resolved for plan run");
-                    } else {
-                        tracing::debug!("no MCP config found for plan run");
-                    }
-                    mcp
-                },
-                resume_session: cli.resume.clone(),
-                max_gate_rung: if roko_config.gates.skip_tests {
-                    u32::from(roko_config.gates.clippy_enabled)
-                } else {
-                    2
-                },
-                claude_program: roko_config
-                    .agent
-                    .command
-                    .clone()
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| std::path::PathBuf::from("claude")),
-                max_plan_usd: f64::from(roko_config.budget.max_plan_usd),
-                max_turn_usd: f64::from(roko_config.budget.max_turn_usd),
-                clippy_enabled: roko_config.gates.clippy_enabled,
-                skip_tests: roko_config.gates.skip_tests,
-                roko_config: Some(std::sync::Arc::new(roko_config.clone())),
-                extension_chain: Some(extension_chain),
-                cascade_router: Some(cascade_router),
-                daimon_state: Some(roko_cli::runner::RunConfig::daimon_state_with_strategy(
+                // Bootstrap: workspace check + unified config load.
+                let boot = roko_cli::bootstrap::RokoBootstrap::new(
                     &wd,
-                    config.daimon.strategy_space.clone(),
-                )),
-                connector_registry: Some(connector_registry),
-                feed_registry: Some(feed_registry),
-                feedback_facade: Some(feedback_facade),
-                projection: Some(projection),
-                http_event_sink: None,
-                output_sink: if !approval && !cli.quiet && !cli.json {
-                    std::sync::Arc::new(
-                        roko_cli::runner::output_sink::FormattedStderrSink::new(
-                            cli.color.should_color(),
-                        ),
-                    )
-                        as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+                    roko_cli::bootstrap::BootOpts {
+                        require_workspace: true,
+                        require_provider: false, // explicit preflight below is more detailed
+                        acquire_lock: false,
+                    },
+                )?;
+                let early_roko_config = boot.config;
+
+                // Pre-flight: fail fast if the default model's provider is misconfigured.
+                {
+                    let dm = &early_roko_config.agent.default_model;
+                    if !dm.trim().is_empty() {
+                        crate::commands::util::preflight_provider_for_model(
+                            &early_roko_config,
+                            dm,
+                        )?;
+                    }
+                }
+
+                // Aggregate provider readiness: warn/abort if no providers are usable.
+                crate::commands::util::preflight_providers_aggregate(&early_roko_config)?;
+
+                // Pre-flight: warn if gate tools are missing.
+                let missing_gate_tools = crate::commands::util::preflight_gate_deps();
+                if !missing_gate_tools.is_empty() {
+                    eprintln!(
+                        "warning: missing gate tools: {}. Some gates may fail.",
+                        missing_gate_tools.join(", ")
+                    );
+                }
+                let max_concurrent_tasks = if max_tasks > 0 {
+                    max_tasks
                 } else {
-                    std::sync::Arc::new(roko_cli::runner::output_sink::NoopSink)
-                        as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
-                },
-                warm_cache: true,
-                metrics: None,
-            };
-
-            // Optionally spawn the approval TUI.
-            if approval {
-                if !std::io::stdout().is_terminal() {
-                    anyhow::bail!("approval mode requires an interactive terminal");
+                    early_roko_config
+                        .runner
+                        .max_concurrent_tasks
+                        .or_else(|| {
+                            (config.executor.max_concurrent_tasks
+                                != roko_orchestrator::ExecutorConfig::default()
+                                    .max_concurrent_tasks)
+                                .then_some(config.executor.max_concurrent_tasks)
+                        })
+                        .unwrap_or(4)
                 }
+                .max(1);
+                let state_hub = roko_cli::state_hub::shared_state_hub();
 
-                // Redirect stderr to a log file so the runner's tracing output
-                // doesn't corrupt the TUI's raw terminal display.
-                let stderr_log_path = layout.runner_stderr_log();
-                let _ = std::fs::create_dir_all(stderr_log_path.parent().unwrap_or(&wd));
-                #[cfg(unix)]
-                if let Ok(log_file) = std::fs::File::create(&stderr_log_path) {
-                    use std::os::unix::io::AsRawFd;
-                    #[allow(unsafe_code)]
-                    unsafe {
-                        libc::dup2(log_file.as_raw_fd(), 2);
-                    }
-                }
-
-                let state_hub_for_tui = state_hub.clone();
-                let workdir_for_tui = wd.clone();
-                std::thread::Builder::new()
-                    .name("roko-plan-approval-tui".to_string())
-                    .spawn(move || {
-                        let app = App::new_connected_with_page(
-                            &workdir_for_tui,
-                            None,
-                            &state_hub_for_tui,
-                        );
-                        if let Err(err) = app.run() {
-                            tracing::error!(error = %err, "approval TUI exited with error");
-                        }
-                    })
-                    .context("spawn approval TUI thread")?;
-            }
-
-            let cancel = tokio_util::sync::CancellationToken::new();
-            let cancel_for_signal = cancel.clone();
-            tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
-                cancel_for_signal.cancel();
-            });
-
-            let total_tasks: usize = plans.iter().map(|p| p.tasks.tasks.len()).sum();
-            let plan_count = plans.len();
-
-            // Print a header line instead of a spinner — real-time streaming
-            // output from agent events replaces the old static spinner.
-            if !approval && !cli.quiet && !cli.json {
-                let plan_names: Vec<&str> = plans.iter().map(|p| p.id.as_str()).collect();
-                eprintln!(
-                    "\u{25b8} Running plan{} ({} task{}): {}",
-                    if plan_count == 1 { "" } else { "s" },
-                    total_tasks,
-                    if total_tasks == 1 { "" } else { "s" },
-                    plan_names.join(", "),
-                );
-            }
-
-            let setup_ms = t_setup.elapsed().as_millis();
-            tracing::info!(
-                setup_ms,
-                plan_count,
-                total_tasks,
-                default_model = %roko_config.agent.default_model,
-                max_concurrent_tasks,
-                max_retries = run_config.max_retries,
-                max_gate_rung = run_config.max_gate_rung,
-                max_plan_usd = %format!("{:.2}", run_config.max_plan_usd),
-                max_turn_usd = %format!("{:.2}", run_config.max_turn_usd),
-                clippy_enabled = run_config.clippy_enabled,
-                skip_tests = run_config.skip_tests,
-                plans_dir = %resolved_plans_dir.display(),
-                "plan run: setup complete, entering event loop"
-            );
-            let v2_report =
-                roko_cli::runner::event_loop::run(plans, &run_config, &state_hub, cancel).await?;
-
-            if cli.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "succeeded": v2_report.all_succeeded(),
-                        "total_tasks": v2_report.total_tasks,
-                        "tasks_completed": v2_report.tasks_completed,
-                        "tasks_failed": v2_report.tasks_failed,
-                        "total_cost_usd": v2_report.total_cost_usd,
-                        "total_agent_calls": v2_report.total_agent_calls,
-                        "duration_secs": v2_report.duration.as_secs(),
-                        "plans": v2_report.plans.iter().map(|p| serde_json::json!({
-                            "plan_id": p.plan_id,
-                            "completed": p.completed,
-                            "tasks_completed": p.tasks_completed,
-                            "tasks_failed": p.tasks_failed,
-                        })).collect::<Vec<_>>(),
-                        "task_costs": v2_report.task_costs.iter().map(|tc| serde_json::json!({
-                            "plan_id": tc.plan_id,
-                            "task_id": tc.task_id,
-                            "model": tc.model,
-                            "provider": tc.provider,
-                            "tokens_in": tc.tokens_in,
-                            "tokens_out": tc.tokens_out,
-                            "cost_usd": tc.cost_usd,
-                            "agent_calls": tc.agent_calls,
-                            "outcome": tc.outcome,
-                        })).collect::<Vec<_>>(),
-                    }))
-                    .unwrap_or_default()
-                );
-            } else if !cli.quiet {
-                eprintln!(
-                    "\n▸ Plan complete: {}/{} tasks, ${:.2}, {}s",
-                    v2_report.tasks_completed,
-                    v2_report.total_tasks,
-                    v2_report.total_cost_usd,
-                    v2_report.duration.as_secs()
-                );
-                for p in &v2_report.plans {
-                    let status = if p.completed { "✓" } else { "✗" };
-                    eprintln!(
-                        "  {status} {} — {}/{} tasks",
-                        p.plan_id, p.tasks_completed, p.tasks_total,
-                    );
-                }
-                // Per-task cost breakdown.
-                if !v2_report.task_costs.is_empty() {
-                    eprintln!("\n  Task costs:");
-                    eprintln!(
-                        "  {:.<24} {:>8} {:>8} {:>9} {:>6} {:>6}",
-                        "task", "tok_in", "tok_out", "cost", "calls", "result"
-                    );
-                    for tc in &v2_report.task_costs {
-                        eprintln!(
-                            "  {:.<24} {:>8} {:>8} ${:>7.4} {:>6} {:>6}",
-                            tc.task_id,
-                            tc.tokens_in,
-                            tc.tokens_out,
-                            tc.cost_usd,
-                            tc.agent_calls,
-                            tc.outcome,
-                        );
-                    }
-                }
-            }
-
-            if v2_report.tasks_failed > 0 && !cli.quiet {
-                if !v2_report.failure_reasons.is_empty() {
-                    eprintln!("\nFailure details:");
-                    for (key, reason) in &v2_report.failure_reasons {
-                        if reason.contains('\n') {
-                            eprintln!("  ✗ {key}:");
-                            for line in reason.lines() {
-                                eprintln!("    {line}");
-                            }
+                // Runner v2 auto-resumes from .roko/state/executor.json if it exists.
+                // Explicit --resume-plan paths are honored by copying to the standard location.
+                if !fresh {
+                    if let Some(ref snap_path) = resume_plan {
+                        let snap_path = if snap_path.is_relative() {
+                            wd.join(snap_path)
                         } else {
-                            eprintln!("  ✗ {key}: {reason}");
+                            snap_path.clone()
+                        };
+                        let standard = layout.executor_snapshot();
+                        if snap_path != standard && snap_path.exists() {
+                            if let Some(parent) = standard.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::copy(&snap_path, &standard);
                         }
                     }
-                    eprintln!("\nhint: check .roko/roko.log for full failure output");
                 }
-                let state_path = layout.executor_snapshot();
-                if state_path.exists() {
+
+                // Create the shared metric registry and register standard metrics.
+                let metrics = std::sync::Arc::new(roko_core::obs::MetricRegistry::new());
+                roko_core::obs::register_standard_metrics(&metrics);
+
+                // ── Runner v2 for all plan run modes ────────────────────
+                // Ensure git repo exists — agents need git tools to work.
+                if !wd.join(".git").exists() {
+                    eprintln!("▸ No git repo found — initializing for agent tooling");
+                    let _ = std::process::Command::new("git")
+                        .args(["init"])
+                        .current_dir(&wd)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    let _ = std::process::Command::new("git")
+                        .args(["add", "-A"])
+                        .current_dir(&wd)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    let _ = std::process::Command::new("git")
+                        .args([
+                            "commit",
+                            "-m",
+                            "init (auto-created by roko)",
+                            "--allow-empty",
+                        ])
+                        .current_dir(&wd)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+
+                let plans = roko_cli::runner::plan_loader::load_plans(&resolved_plans_dir)?;
+
+                // Scaffold any crates referenced by tasks that don't exist yet.
+                // Plans that create new crates need a minimal Cargo.toml + src/lib.rs
+                // so the gate pipeline (`cargo check`) can succeed.
+                let scaffolded =
+                    roko_cli::runner::plan_loader::scaffold_missing_crates(&wd, &plans)?;
+                if !scaffolded.is_empty() && !cli.quiet {
                     eprintln!(
-                        "hint: if tasks appear stuck or state looks wrong, try: roko plan run {} --fresh",
-                        resolved_plans_dir.display()
+                        "▸ Scaffolded {} new crate(s): {}",
+                        scaffolded.len(),
+                        scaffolded.join(", ")
                     );
                 }
-            }
 
-            if !cli.quiet && !cli.json {
-                let loop_ms = v2_report.duration.as_millis();
-                let report_ms = t_total
-                    .elapsed()
-                    .as_millis()
-                    .saturating_sub(setup_ms + loop_ms);
-                let total_ms = t_total.elapsed().as_millis();
-                eprintln!(
-                    "  Timing: setup={setup_ms}ms loop={loop_ms}ms report={report_ms}ms total={total_ms}ms"
+                let roko_config = early_roko_config;
+
+                // Initialize Phase 0 subsystems.
+                let router_path = layout.cascade_router_path();
+                let mut model_slugs = roko_config
+                    .effective_models()
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                model_slugs.sort();
+                model_slugs.dedup();
+                if model_slugs.is_empty() && !roko_config.agent.default_model.trim().is_empty() {
+                    model_slugs.push(roko_config.agent.default_model.clone());
+                }
+                let cascade_router =
+                    std::sync::Arc::new(roko_learn::cascade_router::CascadeRouter::load_or_new(
+                        &router_path,
+                        model_slugs,
+                    ));
+                let extension_chain = std::sync::Arc::new(tokio::sync::Mutex::new(
+                    roko_core::extension::ExtensionChain::new(),
+                ));
+                let connector_registry =
+                    std::sync::Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
+                let feed_registry =
+                    std::sync::Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
+
+                // ── Wire dispatch / feedback / projection facades ──────────────
+                //
+                // The new module families are activated alongside the legacy
+                // emit paths: every runner event also lands on the projection
+                // broadcast and (when applicable) on the feedback fan-out.
+                // Sinks write into `.roko/`, mirroring what the legacy helper
+                // path does so resume / dashboard data stays consistent.
+                let run_uuid = uuid::Uuid::new_v4().to_string();
+                let projection = std::sync::Arc::new(
+                    roko_cli::runner::projection::Projection::new(run_uuid.clone()),
                 );
-            }
+                let episodes_path = layout.root_episodes_path();
+                let knowledge_path = layout
+                    .learn_dir()
+                    .join(roko_neuro::admission::DEFAULT_KNOWLEDGE_CANDIDATES_FILE);
+                // Best-effort directory creation — the sinks' own
+                // `create_dir_all` will retry on first append.
+                let _ = std::fs::create_dir_all(layout.learn_dir());
+                let feedback_facade = std::sync::Arc::new(
+                    roko_cli::runtime_feedback::FeedbackFacade::new()
+                        .with_sink(std::sync::Arc::new(
+                            roko_cli::runtime_feedback::EpisodeSink::at(&episodes_path),
+                        ))
+                        .with_sink(std::sync::Arc::new(
+                            roko_cli::runtime_feedback::RoutingObservationSink::new(
+                                cascade_router.clone(),
+                            ),
+                        ))
+                        .with_sink(std::sync::Arc::new(
+                            roko_cli::runtime_feedback::KnowledgeIngestionSink::at(&knowledge_path)
+                                .with_ingestor(std::sync::Arc::new(
+                                    roko_cli::runtime_feedback::NeuroKnowledgeIngestor::new(
+                                        roko_neuro::KnowledgeStore::for_workdir(&wd),
+                                    ),
+                                )),
+                        )),
+                );
 
-            Ok(if v2_report.all_succeeded() {
-                EXIT_SUCCESS
-            } else {
-                EXIT_FAILURE
-            })
+                let run_config = roko_cli::runner::RunConfig {
+                    layout: layout.clone(),
+                    workdir: wd.clone(),
+                    plan_dir: resolved_plans_dir.clone(),
+                    model: roko_config.agent.default_model.clone(),
+                    cli_model_override: cli.model.clone(),
+                    timeout_secs: roko_config.timeouts.agent_dispatch_secs,
+                    plan_timeout_secs: roko_config.timeouts.plan_total_secs,
+                    max_retries: max_retries.unwrap_or(2),
+                    max_concurrent_tasks,
+                    gate_concurrency: max_concurrent_tasks,
+                    approval,
+                    dangerously_skip_permissions: true,
+                    force_resume,
+                    mcp_config: {
+                        // Resolve MCP config: .roko/mcp.json > auto-discovery
+                        let mcp = {
+                            let roko_local = layout.mcp_config_path();
+                            if roko_local.is_file() {
+                                Some(roko_local)
+                            } else {
+                                roko_agent::mcp::find_mcp_config(&wd)
+                                    .and_then(|r| r.ok())
+                                    .map(|(p, _)| p)
+                            }
+                        };
+                        if let Some(ref path) = mcp {
+                            tracing::info!(path = ?path, "MCP config resolved for plan run");
+                        } else {
+                            tracing::debug!("no MCP config found for plan run");
+                        }
+                        mcp
+                    },
+                    resume_session: cli.resume.clone(),
+                    max_gate_rung: if roko_config.gates.skip_tests {
+                        u32::from(roko_config.gates.clippy_enabled)
+                    } else {
+                        2
+                    },
+                    claude_program: roko_config
+                        .agent
+                        .command
+                        .clone()
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| std::path::PathBuf::from("claude")),
+                    max_plan_usd: f64::from(roko_config.budget.max_plan_usd),
+                    max_turn_usd: f64::from(roko_config.budget.max_turn_usd),
+                    clippy_enabled: roko_config.gates.clippy_enabled,
+                    skip_tests: roko_config.gates.skip_tests,
+                    roko_config: Some(std::sync::Arc::new(roko_config.clone())),
+                    extension_chain: Some(extension_chain),
+                    cascade_router: Some(cascade_router),
+                    daimon_state: Some(roko_cli::runner::RunConfig::daimon_state_with_strategy(
+                        &wd,
+                        config.daimon.strategy_space.clone(),
+                    )),
+                    connector_registry: Some(connector_registry),
+                    feed_registry: Some(feed_registry),
+                    feedback_facade: Some(feedback_facade),
+                    projection: Some(projection),
+                    http_event_sink: None,
+                    output_sink: if !approval && !cli.quiet && !cli.json {
+                        std::sync::Arc::new(
+                            roko_cli::runner::output_sink::FormattedStderrSink::new(
+                                cli.color.should_color(),
+                            ),
+                        )
+                            as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+                    } else {
+                        std::sync::Arc::new(roko_cli::runner::output_sink::NoopSink)
+                            as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+                    },
+                    warm_cache: true,
+                    metrics: None,
+                };
+
+                // Optionally spawn the approval TUI.
+                if approval {
+                    if !std::io::stdout().is_terminal() {
+                        anyhow::bail!("approval mode requires an interactive terminal");
+                    }
+
+                    // Redirect stderr to a log file so the runner's tracing output
+                    // doesn't corrupt the TUI's raw terminal display.
+                    let stderr_log_path = layout.runner_stderr_log();
+                    let _ = std::fs::create_dir_all(stderr_log_path.parent().unwrap_or(&wd));
+                    #[cfg(unix)]
+                    if let Ok(log_file) = std::fs::File::create(&stderr_log_path) {
+                        use std::os::unix::io::AsRawFd;
+                        #[allow(unsafe_code)]
+                        unsafe {
+                            libc::dup2(log_file.as_raw_fd(), 2);
+                        }
+                    }
+
+                    let state_hub_for_tui = state_hub.clone();
+                    let workdir_for_tui = wd.clone();
+                    std::thread::Builder::new()
+                        .name("roko-plan-approval-tui".to_string())
+                        .spawn(move || {
+                            let app = App::new_connected_with_page(
+                                &workdir_for_tui,
+                                None,
+                                &state_hub_for_tui,
+                            );
+                            if let Err(err) = app.run() {
+                                tracing::error!(error = %err, "approval TUI exited with error");
+                            }
+                        })
+                        .context("spawn approval TUI thread")?;
+                }
+
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel_for_signal = cancel.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::signal::ctrl_c().await;
+                    cancel_for_signal.cancel();
+                });
+
+                let total_tasks: usize = plans.iter().map(|p| p.tasks.tasks.len()).sum();
+                let plan_count = plans.len();
+
+                // Print a header line instead of a spinner — real-time streaming
+                // output from agent events replaces the old static spinner.
+                if !approval && !cli.quiet && !cli.json {
+                    let plan_names: Vec<&str> = plans.iter().map(|p| p.id.as_str()).collect();
+                    eprintln!(
+                        "\u{25b8} Running plan{} ({} task{}): {}",
+                        if plan_count == 1 { "" } else { "s" },
+                        total_tasks,
+                        if total_tasks == 1 { "" } else { "s" },
+                        plan_names.join(", "),
+                    );
+                }
+
+                let setup_ms = t_setup.elapsed().as_millis();
+                tracing::info!(
+                    setup_ms,
+                    plan_count,
+                    total_tasks,
+                    default_model = %roko_config.agent.default_model,
+                    max_concurrent_tasks,
+                    max_retries = run_config.max_retries,
+                    max_gate_rung = run_config.max_gate_rung,
+                    max_plan_usd = %format!("{:.2}", run_config.max_plan_usd),
+                    max_turn_usd = %format!("{:.2}", run_config.max_turn_usd),
+                    clippy_enabled = run_config.clippy_enabled,
+                    skip_tests = run_config.skip_tests,
+                    plans_dir = %resolved_plans_dir.display(),
+                    "plan run: setup complete, entering event loop"
+                );
+                let v2_report =
+                    roko_cli::runner::event_loop::run(plans, &run_config, &state_hub, cancel)
+                        .await?;
+
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "succeeded": v2_report.all_succeeded(),
+                            "total_tasks": v2_report.total_tasks,
+                            "tasks_completed": v2_report.tasks_completed,
+                            "tasks_failed": v2_report.tasks_failed,
+                            "total_cost_usd": v2_report.total_cost_usd,
+                            "total_agent_calls": v2_report.total_agent_calls,
+                            "duration_secs": v2_report.duration.as_secs(),
+                            "plans": v2_report.plans.iter().map(|p| serde_json::json!({
+                                "plan_id": p.plan_id,
+                                "completed": p.completed,
+                                "tasks_completed": p.tasks_completed,
+                                "tasks_failed": p.tasks_failed,
+                            })).collect::<Vec<_>>(),
+                            "task_costs": v2_report.task_costs.iter().map(|tc| serde_json::json!({
+                                "plan_id": tc.plan_id,
+                                "task_id": tc.task_id,
+                                "model": tc.model,
+                                "provider": tc.provider,
+                                "tokens_in": tc.tokens_in,
+                                "tokens_out": tc.tokens_out,
+                                "cost_usd": tc.cost_usd,
+                                "agent_calls": tc.agent_calls,
+                                "outcome": tc.outcome,
+                            })).collect::<Vec<_>>(),
+                        }))
+                        .unwrap_or_default()
+                    );
+                } else if !cli.quiet {
+                    eprintln!(
+                        "\n▸ Plan complete: {}/{} tasks, ${:.2}, {}s",
+                        v2_report.tasks_completed,
+                        v2_report.total_tasks,
+                        v2_report.total_cost_usd,
+                        v2_report.duration.as_secs()
+                    );
+                    for p in &v2_report.plans {
+                        let status = if p.completed { "✓" } else { "✗" };
+                        eprintln!(
+                            "  {status} {} — {}/{} tasks",
+                            p.plan_id, p.tasks_completed, p.tasks_total,
+                        );
+                    }
+                    // Per-task cost breakdown.
+                    if !v2_report.task_costs.is_empty() {
+                        eprintln!("\n  Task costs:");
+                        eprintln!(
+                            "  {:.<24} {:>8} {:>8} {:>9} {:>6} {:>6}",
+                            "task", "tok_in", "tok_out", "cost", "calls", "result"
+                        );
+                        for tc in &v2_report.task_costs {
+                            eprintln!(
+                                "  {:.<24} {:>8} {:>8} ${:>7.4} {:>6} {:>6}",
+                                tc.task_id,
+                                tc.tokens_in,
+                                tc.tokens_out,
+                                tc.cost_usd,
+                                tc.agent_calls,
+                                tc.outcome,
+                            );
+                        }
+                    }
+                }
+
+                if v2_report.tasks_failed > 0 && !cli.quiet {
+                    if !v2_report.failure_reasons.is_empty() {
+                        eprintln!("\nFailure details:");
+                        for (key, reason) in &v2_report.failure_reasons {
+                            if reason.contains('\n') {
+                                eprintln!("  ✗ {key}:");
+                                for line in reason.lines() {
+                                    eprintln!("    {line}");
+                                }
+                            } else {
+                                eprintln!("  ✗ {key}: {reason}");
+                            }
+                        }
+                        eprintln!("\nhint: check .roko/roko.log for full failure output");
+                    }
+                    let state_path = layout.executor_snapshot();
+                    if state_path.exists() {
+                        eprintln!(
+                            "hint: if tasks appear stuck or state looks wrong, try: roko plan run {} --fresh",
+                            resolved_plans_dir.display()
+                        );
+                    }
+                }
+
+                if !cli.quiet && !cli.json {
+                    let loop_ms = v2_report.duration.as_millis();
+                    let report_ms = t_total
+                        .elapsed()
+                        .as_millis()
+                        .saturating_sub(setup_ms + loop_ms);
+                    let total_ms = t_total.elapsed().as_millis();
+                    eprintln!(
+                        "  Timing: setup={setup_ms}ms loop={loop_ms}ms report={report_ms}ms total={total_ms}ms"
+                    );
+                }
+
+                Ok(if v2_report.all_succeeded() {
+                    EXIT_SUCCESS
+                } else {
+                    EXIT_FAILURE
+                })
             } // end #[cfg(feature = "legacy-runner-v2")]
         }
         PlanCmd::Generate { source, from_file } => {
@@ -1518,9 +1544,9 @@ async fn cmd_plan_run_engine(
     _workdir: &std::path::Path,
     cli: &Cli,
 ) -> Result<i32> {
+    use roko_graph::cell::CellContext;
     use roko_graph::convert::{PlanTaskInfo, plan_to_graph};
     use roko_graph::engine::GraphEngine;
-    use roko_graph::cell::CellContext;
 
     let plans = roko_cli::runner::plan_loader::load_plans(plans_dir)?;
 
@@ -1581,7 +1607,10 @@ async fn cmd_plan_run_engine(
         let graph = match plan_to_graph(&plan.id, &plan_dir_str, &tasks, max_parallel) {
             Ok(g) => g,
             Err(e) => {
-                eprintln!("  error: failed to convert plan '{}' to graph: {e}", plan.id);
+                eprintln!(
+                    "  error: failed to convert plan '{}' to graph: {e}",
+                    plan.id
+                );
                 all_succeeded = false;
                 continue;
             }

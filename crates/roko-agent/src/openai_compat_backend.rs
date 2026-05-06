@@ -120,10 +120,7 @@ impl OpenAiCompatLlmBackend {
 
     /// Attach a metric registry for emitting TTFT and request duration histograms.
     #[must_use]
-    pub fn with_metrics(
-        mut self,
-        registry: Arc<roko_core::obs::metrics::MetricRegistry>,
-    ) -> Self {
+    pub fn with_metrics(mut self, registry: Arc<roko_core::obs::metrics::MetricRegistry>) -> Self {
         self.metrics = Some(registry);
         self
     }
@@ -472,10 +469,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         session: &SessionState,
         config: &crate::tool_loop::TurnConfig,
     ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<crate::tool_loop::StreamEvent, LlmError>,
-        >,
+        futures::stream::BoxStream<'static, Result<crate::tool_loop::StreamEvent, LlmError>>,
         LlmError,
     > {
         use crate::tool_loop::{StreamEvent, StreamEventKind};
@@ -486,7 +480,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         let mut req = crate::provider::shared_http_client()
             .post(self.endpoint())
             .timeout(Duration::from_millis(
-                config.request_timeout.as_millis() as u64,
+                config.request_timeout.as_millis() as u64
             ));
         for (key, value) in &self.computed_headers {
             req = req.header(key.as_str(), value.as_str());
@@ -530,7 +524,9 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         // Build the stream: spawn a task that reads HTTP chunks, parses SSE
         // lines, and sends StreamEvent values through a channel.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, LlmError>>(256);
-        let ttft_timeout_ms = self.ttft_timeout_ms.unwrap_or(config.ttft_timeout.as_millis() as u64);
+        let ttft_timeout_ms = self
+            .ttft_timeout_ms
+            .unwrap_or(config.ttft_timeout.as_millis() as u64);
         let endpoint = self.endpoint();
         let metrics_registry = self.metrics.clone();
         let metrics_provider = self.provider_id.clone();
@@ -547,11 +543,8 @@ impl LlmBackend for OpenAiCompatLlmBackend {
                 let chunk_fut = response.chunk();
                 let chunk = if first_chunk {
                     first_chunk = false;
-                    match tokio::time::timeout(
-                        Duration::from_millis(ttft_timeout_ms),
-                        chunk_fut,
-                    )
-                    .await
+                    match tokio::time::timeout(Duration::from_millis(ttft_timeout_ms), chunk_fut)
+                        .await
                     {
                         Ok(inner) => inner,
                         Err(_) => {
@@ -567,7 +560,10 @@ impl LlmBackend for OpenAiCompatLlmBackend {
                             if let Some(ref registry) = metrics_registry {
                                 let dur = request_start.elapsed().as_secs_f64();
                                 let dur_labels = roko_core::obs::metrics::LabelSet::from_pairs(&[
-                                    (roko_core::obs::schema::LABEL_PROVIDER, metrics_provider.as_str()),
+                                    (
+                                        roko_core::obs::schema::LABEL_PROVIDER,
+                                        metrics_provider.as_str(),
+                                    ),
                                     (roko_core::obs::schema::LABEL_MODEL, metrics_model.as_str()),
                                 ]);
                                 registry
@@ -579,9 +575,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
                                     )
                                     .observe(dur);
                             }
-                            let _ = tx
-                                .send(Err(LlmError::Timeout(message)))
-                                .await;
+                            let _ = tx.send(Err(LlmError::Timeout(message))).await;
                             return;
                         }
                     }
@@ -623,15 +617,22 @@ impl LlmBackend for OpenAiCompatLlmBackend {
                                 if let Some(ref registry) = metrics_registry {
                                     let ttft_secs = request_start.elapsed().as_secs_f64();
                                     let labels = roko_core::obs::metrics::LabelSet::from_pairs(&[
-                                        (roko_core::obs::schema::LABEL_PROVIDER, metrics_provider.as_str()),
-                                        (roko_core::obs::schema::LABEL_MODEL, metrics_model.as_str()),
+                                        (
+                                            roko_core::obs::schema::LABEL_PROVIDER,
+                                            metrics_provider.as_str(),
+                                        ),
+                                        (
+                                            roko_core::obs::schema::LABEL_MODEL,
+                                            metrics_model.as_str(),
+                                        ),
                                     ]);
                                     registry
                                         .register_histogram(
                                             roko_core::obs::schema::ROKO_LLM_TTFT_SECONDS,
                                             "LLM time-to-first-token in seconds",
                                             labels,
-                                            roko_core::obs::histograms::LLM_LATENCY_BUCKETS.to_vec(),
+                                            roko_core::obs::histograms::LLM_LATENCY_BUCKETS
+                                                .to_vec(),
                                         )
                                         .observe(ttft_secs);
                                 }
@@ -651,7 +652,10 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             if let Some(ref registry) = metrics_registry {
                 let dur = request_start.elapsed().as_secs_f64();
                 let dur_labels = roko_core::obs::metrics::LabelSet::from_pairs(&[
-                    (roko_core::obs::schema::LABEL_PROVIDER, metrics_provider.as_str()),
+                    (
+                        roko_core::obs::schema::LABEL_PROVIDER,
+                        metrics_provider.as_str(),
+                    ),
                     (roko_core::obs::schema::LABEL_MODEL, metrics_model.as_str()),
                 ]);
                 registry

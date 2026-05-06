@@ -421,8 +421,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .with_timeout_ms(timeout)
             .with_max_tokens(max_tokens)
             .with_use_max_completion_tokens(
-                model.use_max_completion_tokens
-                    || should_use_max_completion_tokens(&model.slug),
+                model.use_max_completion_tokens || should_use_max_completion_tokens(&model.slug),
             )
             .with_extra_headers(extra_headers)
             .with_extra_body_params(extra_body_params)

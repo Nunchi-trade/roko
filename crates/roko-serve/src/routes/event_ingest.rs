@@ -218,8 +218,7 @@ mod tests {
     ) -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deploy = Arc::from(
-            crate::deploy::create_backend("manual", None, None, None)
-                .expect("manual backend"),
+            crate::deploy::create_backend("manual", None, None, None).expect("manual backend"),
         );
         let state = Arc::new(
             AppState::new(
@@ -230,11 +229,7 @@ mod tests {
             )
             .expect("AppState::new"),
         );
-        let router = super::super::build_router(
-            Arc::clone(&state),
-            &[],
-            config.serve.auth.clone(),
-        );
+        let router = super::super::build_router(Arc::clone(&state), &[], config.serve.auth.clone());
         // Wrap with MockConnectInfo so ConnectInfo<SocketAddr> is available.
         let router = router.layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
         (dir, state, router)
@@ -383,8 +378,7 @@ mod tests {
         let (_dir, _state, router) = {
             let dir = tempfile::tempdir().expect("tempdir");
             let deploy = Arc::from(
-                crate::deploy::create_backend("manual", None, None, None)
-                    .expect("manual backend"),
+                crate::deploy::create_backend("manual", None, None, None).expect("manual backend"),
             );
             let state = Arc::new(
                 AppState::new(
@@ -395,15 +389,10 @@ mod tests {
                 )
                 .expect("AppState::new"),
             );
-            let router = super::super::build_router(
-                Arc::clone(&state),
-                &[],
-                config.serve.auth.clone(),
-            );
+            let router =
+                super::super::build_router(Arc::clone(&state), &[], config.serve.auth.clone());
             // Use a non-loopback remote address.
-            let router = router.layer(MockConnectInfo(
-                SocketAddr::from(([10, 0, 0, 5], 54321)),
-            ));
+            let router = router.layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 5], 54321))));
             (dir, state, router)
         };
 

@@ -201,6 +201,7 @@ struct RunContext<'a> {
     sink: &'a dyn RunOutputSink,
     tui: &'a TuiBridge,
     state: &'a mut RunState,
+    active_agent_tasks: &'a mut HashMap<String, String>,
     agent_handles: &'a mut HashMap<String, AgentHandle>,
     agent_tx: &'a mpsc::Sender<AgentEvent>,
     gate_tx: &'a mpsc::Sender<GateCompletion>,
@@ -218,6 +219,15 @@ struct RunContext<'a> {
     /// Playbook IDs per attempt key — populated at dispatch, consumed on gate
     /// terminal to call `PlaybookStore::record_outcome`.
     task_playbook_ids: &'a mut HashMap<String, Vec<String>>,
+}
+
+// Result of dispatching one executor action. Most actions are internal phase
+// advances; the runner ledger only records an agent start when a runtime was
+// actually launched for a concrete task.
+enum ActionDispatchOutcome {
+    Noop,
+    Handled,
+    AgentStarted { plan_id: String, task_id: String },
 }
 
 // ─── Main Entry Point ───────────────────────────────────────────────────
@@ -600,6 +610,7 @@ pub async fn run(
     }
 
     let mut agent_handles: HashMap<String, AgentHandle> = HashMap::new();
+    let mut active_agent_tasks: HashMap<String, String> = HashMap::new();
     let mut feedback_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     // Track prompt section diagnostics per attempt so gate completions can
@@ -780,6 +791,9 @@ pub async fn run(
 
                 handle_agent_event(&event, &mut state, &tui, sink);
                 append_agent_event(&paths, &event, &state);
+                if is_turn_done || is_exited {
+                    active_agent_tasks.remove(&state.plan_id);
+                }
 
                 // ── Forward progress-relevant agent events to RuntimeEvent ──
                 if let Some(http_sink) = config.http_event_sink.as_ref() {
@@ -887,10 +901,19 @@ pub async fn run(
                     let plan_id = state.plan_id.clone();
                     if !plan_id.is_empty() {
                         if turn_error {
-                            let message = "agent reported an error result".to_string();
+                            let message = agent_failure_message(&state.agent_output)
+                                .unwrap_or_else(|| "agent reported an error result".to_string());
                             fire_on_error_hook(config, &message, "agent_turn", &tui, &state.plan_id, &state.current_task).await;
-                            tui.error(&message);
-                            let _ = executor.apply_event(&plan_id, &ExecutorEvent::Fatal(message));
+                            handle_agent_failure(
+                                &mut executor,
+                                &task_index,
+                                &mut state,
+                                &paths,
+                                &tui,
+                                sink,
+                                config,
+                                message,
+                            );
                         } else {
                             apply_agent_completion(&mut executor, &plan_id, &tui);
                         }
@@ -957,8 +980,16 @@ pub async fn run(
                                     },
                                 ),
                             );
-                            tui.error(&message);
-                            let _ = executor.apply_event(&plan_id, &ExecutorEvent::Fatal(message));
+                            handle_agent_failure(
+                                &mut executor,
+                                &task_index,
+                                &mut state,
+                                &paths,
+                                &tui,
+                                sink,
+                                config,
+                                message,
+                            );
                         }
                     }
 
@@ -1674,6 +1705,7 @@ pub async fn run(
                         sink,
                         tui: &tui,
                         state: &mut state,
+                        active_agent_tasks: &mut active_agent_tasks,
                         agent_handles: &mut agent_handles,
                         agent_tx: &agent_tx,
                         gate_tx: &gate_tx,
@@ -1688,34 +1720,35 @@ pub async fn run(
                         section_diagnostics: &mut section_diagnostics,
                         task_playbook_ids: &mut task_playbook_ids,
                     };
-                    dispatch_action(&action, &mut ctx).await;
+                    let dispatch_outcome = dispatch_action(&action, &mut ctx).await;
                     let dispatch_ms = t_dispatch.elapsed().as_millis() as u64;
-                    if matches!(&action, ExecutorAction::SpawnAgent { .. }) {
+                    if let ActionDispatchOutcome::AgentStarted { plan_id, task_id } = dispatch_outcome {
                         ctx.state.last_dispatch_ms = dispatch_ms;
+                        let action_label = format!("{plan_id}/{task_id}");
                         info!(action = %action_label, dispatch_ms, "agent action dispatched");
                         // Record task start in the run ledger.
                         if let Some(ref mut ledger) = run_ledger {
-                            if let ExecutorAction::SpawnAgent { plan_id, task, .. } = &action {
-                                let now_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis() as u64;
-                                ledger.record_phase_transition(
-                                    roko_runtime::Phase::Pending,
-                                    roko_runtime::Phase::Implementing,
-                                    now_ms,
-                                );
-                                append_ledger_entry(
-                                    &paths.run_ledger_jsonl,
-                                    "task_started",
-                                    &serde_json::json!({
-                                        "plan_id": plan_id,
-                                        "task_id": task,
-                                        "timestamp_ms": now_ms,
-                                    }),
-                                );
-                            }
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            ledger.record_phase_transition(
+                                roko_runtime::Phase::Pending,
+                                roko_runtime::Phase::Implementing,
+                                now_ms,
+                            );
+                            append_ledger_entry(
+                                &paths.run_ledger_jsonl,
+                                "task_started",
+                                &serde_json::json!({
+                                    "plan_id": plan_id,
+                                    "task_id": task_id,
+                                    "timestamp_ms": now_ms,
+                                }),
+                            );
                         }
+                    } else if matches!(&action, ExecutorAction::SpawnAgent { .. }) {
+                        debug!(action = %action_label, dispatch_ms, "agent action suppressed or delayed");
                     } else if dispatch_ms > 50 {
                         info!(action = %action_label, dispatch_ms, "action dispatched (slow)");
                     } else {
@@ -1900,6 +1933,225 @@ fn apply_agent_completion(executor: &mut ParallelExecutor, plan_id: &str, tui: &
     }
 }
 
+fn agent_failure_message(agent_output: &str) -> Option<String> {
+    agent_output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && (line.contains("API Error")
+                    || line.to_ascii_lowercase().contains("error")
+                    || line.to_ascii_lowercase().contains("failed"))
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn build_agent_retry_context(message: &str, agent_output: &str, attempt_num: u32) -> String {
+    let agent_excerpt = if agent_output.len() > 3000 {
+        &agent_output[..3000]
+    } else {
+        agent_output
+    };
+    format!(
+        "## IMPORTANT: Your previous agent turn failed\n\n\
+         Attempt {attempt_num} ended with an agent/runtime error.\n\n\
+         ### Error\n```\n{message}\n```\n\n\
+         ### Previous agent output\n```\n{agent_excerpt}\n```"
+    )
+}
+
+fn handle_agent_failure(
+    executor: &mut ParallelExecutor,
+    task_index: &HashMap<String, HashMap<String, TaskDef>>,
+    state: &mut RunState,
+    paths: &PersistPaths,
+    tui: &TuiBridge,
+    sink: &dyn RunOutputSink,
+    config: &RunConfig,
+    message: String,
+) {
+    let plan_id = state.plan_id.clone();
+    let task_id = state.current_task.clone();
+    if plan_id.is_empty() || task_id.is_empty() {
+        tui.error(&message);
+        return;
+    }
+
+    let failure_text = format!("{message}\n{}", state.agent_output);
+    let failure_kind = RunnerFailureKind::from_output(&failure_text);
+    let retry_budget = config.max_retries;
+    let can_retry = executor
+        .plan_state(&plan_id)
+        .map(|ps| ps.iteration <= retry_budget && failure_kind.is_retryable())
+        .unwrap_or(false);
+    let attempt = state.current_attempt_ref();
+    let run_id = state.run_id().to_string();
+
+    if can_retry {
+        let mut next_attempt = None;
+        let mut cooldown_ms = 0;
+        if let Some(ps) = executor.plan_state_mut(&plan_id) {
+            let failed_attempt = ps.iteration;
+            ps.reset_for_retry();
+            ps.current_phase = PlanPhase::Implementing;
+            state.set_retry_backoff(&plan_id, failure_kind, failed_attempt);
+            state.set_iteration(&plan_id, &task_id, ps.iteration);
+            next_attempt = Some(ps.iteration);
+            cooldown_ms = state
+                .retry_cooldown_remaining(&plan_id)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or_default();
+        }
+
+        let retry_attempt = next_attempt.unwrap_or_else(|| {
+            state
+                .iteration_for(&plan_id, &task_id)
+                .saturating_add(1)
+                .max(1)
+        });
+        state.set_replan_context(
+            &plan_id,
+            &task_id,
+            build_agent_retry_context(&message, &state.agent_output, retry_attempt),
+        );
+        emit_runner_event(
+            paths,
+            state,
+            tui,
+            config,
+            RunnerEvent::retry_decision(
+                &run_id,
+                attempt,
+                RetryAction::RetryAfterBackoff,
+                failure_kind,
+                next_attempt,
+                cooldown_ms,
+                "agent turn failed and retry policy allows another attempt".to_string(),
+            ),
+        );
+        warn!(
+            plan_id = %plan_id,
+            task_id = %task_id,
+            failure_kind = ?failure_kind,
+            cooldown_ms,
+            "agent turn failed — retrying task after backoff"
+        );
+        tui.error(&format!(
+            "agent turn failed for {task_id}; retrying after {}s",
+            cooldown_ms / 1000
+        ));
+        return;
+    }
+
+    state.task_failed();
+    let reason = if failure_kind.is_retryable() {
+        format!("agent turn failed and retries exhausted: {message}")
+    } else {
+        format!("agent turn failed with non-retryable {failure_kind:?} failure: {message}")
+    };
+    state.record_task_failure(&plan_id, &task_id, &reason);
+    state.mark_task_failed(&plan_id, &task_id);
+    sink.task_failed(&plan_id, &task_id, &reason);
+    tui.task_completed(&plan_id, &task_id, "failed");
+
+    append_ledger_entry(
+        &paths.run_ledger_jsonl,
+        "task_failed",
+        &serde_json::json!({
+            "plan_id": &plan_id,
+            "task_id": &task_id,
+            "passed": false,
+            "reason": &reason,
+            "timestamp_ms": chrono::Utc::now().timestamp_millis().max(0) as u64,
+        }),
+    );
+
+    emit_runner_event(
+        paths,
+        state,
+        tui,
+        config,
+        RunnerEvent::retry_decision(
+            &run_id,
+            attempt.clone(),
+            if failure_kind.is_retryable() {
+                RetryAction::Exhausted
+            } else {
+                RetryAction::NotRetryable
+            },
+            failure_kind,
+            None,
+            0,
+            reason.clone(),
+        ),
+    );
+    let agent_model = state.agent_model.clone();
+    let agent_provider = state.agent_provider.clone();
+    emit_runner_event(
+        paths,
+        state,
+        tui,
+        config,
+        RunnerEvent::task_attempt_completed(
+            &run_id,
+            attempt,
+            if failure_kind.is_retryable() {
+                TaskAttemptOutcome::Exhausted
+            } else {
+                TaskAttemptOutcome::Failed
+            },
+            Some(failure_kind),
+            state.task_elapsed_ms(),
+            agent_model,
+            agent_provider,
+        ),
+    );
+    record_daimon_task_outcome(
+        config,
+        state.current_daimon_strategy,
+        &plan_id,
+        &task_id,
+        false,
+        &reason,
+    );
+
+    let completed = state.plan_completed_tasks(&plan_id);
+    let failed = state.plan_failed_tasks(&plan_id);
+    let completed_plans = completed_plan_ids(executor, task_index);
+    let has_runnable = task_index
+        .get(plan_id.as_str())
+        .map(|tasks| {
+            tasks.values().any(|t| {
+                !completed.contains(&t.id)
+                    && !failed.contains(&t.id)
+                    && t.is_ready_with_plan_deps(completed, &completed_plans)
+            })
+        })
+        .unwrap_or(false);
+
+    if has_runnable {
+        if let Some(ps) = executor.plan_state_mut(&plan_id) {
+            ps.gate_results.clear();
+            ps.current_phase = PlanPhase::Implementing;
+        }
+        warn!(
+            plan_id = %plan_id,
+            task_id = %task_id,
+            "agent failed task — continuing with remaining independent tasks"
+        );
+        tui.error(&format!(
+            "task {task_id} failed after agent error — continuing with remaining tasks"
+        ));
+    } else if let Err(err) = executor.apply_event(&plan_id, &ExecutorEvent::Fatal(reason.clone())) {
+        error!(plan_id = %plan_id, error = %err, "failed to apply Fatal event after agent failure");
+        state.force_plan_terminal(&plan_id);
+        tui.error(&reason);
+    } else {
+        tui.error(&reason);
+    }
+}
+
 fn handle_plan_verify_completion(
     completion: &GateCompletion,
     executor: &mut ParallelExecutor,
@@ -1979,7 +2231,15 @@ fn handle_plan_verify_completion(
         }
     }
 
-    save_snapshot(config, executor, paths, state, merge_queue, gate_thresholds, writer);
+    save_snapshot(
+        config,
+        executor,
+        paths,
+        state,
+        merge_queue,
+        gate_thresholds,
+        writer,
+    );
 }
 
 fn merge_branch_from_task_id(task_id: &str) -> Option<String> {
@@ -2091,7 +2351,15 @@ fn handle_merge_completion(
     {
         info!(plan_id = %next_plan_id, "started next queued merge");
     }
-    save_snapshot(config, executor, paths, state, merge_queue, gate_thresholds, writer);
+    save_snapshot(
+        config,
+        executor,
+        paths,
+        state,
+        merge_queue,
+        gate_thresholds,
+        writer,
+    );
 }
 
 fn append_agent_event(paths: &PersistPaths, event: &AgentEvent, state: &RunState) {
@@ -3213,7 +3481,10 @@ fn gate_plan_complexity_for_task(task_def: Option<&TaskDef>) -> PlanComplexity {
     }
 }
 
-async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
+async fn dispatch_action(
+    action: &ExecutorAction,
+    ctx: &mut RunContext<'_>,
+) -> ActionDispatchOutcome {
     match action {
         ExecutorAction::DispatchPlan { plan_id } => {
             info!(plan_id = %plan_id, "dispatching plan");
@@ -3221,7 +3492,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
 
             if let Err(e) = ctx.executor.apply_event(plan_id, &ExecutorEvent::Start) {
                 error!(plan_id = %plan_id, err = %e, "failed to start plan");
-                return;
+                return ActionDispatchOutcome::Noop;
             }
             let run_id = ctx.state.run_id().to_string();
             emit_runner_event(
@@ -3247,6 +3518,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.tui
                     .phase_transition(plan_id, "enriching", "implementing");
             }
+            ActionDispatchOutcome::Handled
         }
 
         ExecutorAction::SpawnAgent { plan_id, task, .. } => {
@@ -3291,9 +3563,19 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     let _ = ctx
                         .executor
                         .apply_event(plan_id, &ExecutorEvent::ImplementationDone);
-                    return;
+                    return ActionDispatchOutcome::Noop;
                 }
             };
+
+            if let Some(active_task) = ctx.active_agent_tasks.get(plan_id.as_str()) {
+                debug!(
+                    plan_id = %plan_id,
+                    task = %task_id,
+                    active_task = %active_task,
+                    "agent already active for this plan — suppressing duplicate spawn"
+                );
+                return ActionDispatchOutcome::Noop;
+            }
 
             if ctx.agent_handles.contains_key(plan_id.as_str()) {
                 debug!(
@@ -3301,7 +3583,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     task = %task_id,
                     "agent already active for this plan — suppressing duplicate spawn"
                 );
-                return;
+                return ActionDispatchOutcome::Noop;
             }
 
             if let Some(remaining) = ctx.state.retry_cooldown_remaining(plan_id) {
@@ -3311,7 +3593,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     cooldown_ms = remaining.as_millis(),
                     "retry backoff active — delaying spawn"
                 );
-                return;
+                return ActionDispatchOutcome::Noop;
             }
 
             info!(plan_id = %plan_id, task = %task_id, "spawning agent");
@@ -3339,7 +3621,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         "failed to apply Fatal event -- forcing plan terminal");
                     ctx.state.force_plan_terminal(plan_id);
                 }
-                return;
+                return ActionDispatchOutcome::Noop;
             }
 
             let task_def = match ctx
@@ -3358,7 +3640,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                             "failed to apply Fatal event -- forcing plan terminal");
                         ctx.state.force_plan_terminal(plan_id);
                     }
-                    return;
+                    return ActionDispatchOutcome::Noop;
                 }
             };
 
@@ -3429,7 +3711,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 plan_id: plan_id.clone(),
                 role: role.to_string(),
                 workdir: ctx.config.workdir.clone(),
-                model_hint: Some(ctx.config.model.clone()),
+                model_hint: None,
                 force_backend: ctx.config.cli_model_override.clone(),
                 budget_remaining_usd: if ctx.config.max_plan_usd > 0.0 {
                     (ctx.config.max_plan_usd - ctx.state.plan_cost(plan_id)).max(0.0)
@@ -3458,35 +3740,39 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         ctx.state.force_plan_terminal(plan_id);
                     }
                     ctx.tui.error(&message);
-                    return;
+                    return ActionDispatchOutcome::Noop;
                 }
             };
             let baseline_model = dispatch_plan.model.slug.clone();
             let baseline_score = knowledge_advice.score_for(&baseline_model);
             let mut selected_source = "dispatcher".to_string();
-            if let Some(best_hint) = knowledge_advice
-                .hints
-                .iter()
-                .filter(|hint| hint.model_slug != baseline_model)
-                .max_by(|left, right| {
-                    left.score
-                        .total_cmp(&right.score)
-                        .then_with(|| left.model_slug.cmp(&right.model_slug))
-                })
-            {
-                if best_hint.score + bias_weight > baseline_score {
-                    debug!(
-                        from = %baseline_model,
-                        to = %best_hint.model_slug,
-                        baseline_score,
-                        hint_score = best_hint.score,
-                        bias_weight = bias_weight,
-                        reason = %best_hint.reason,
-                        supporting_entries = best_hint.supporting_entries,
-                        "knowledge store nudged model selection"
-                    );
-                    dispatch_plan.model = ModelSpec::from_slug(best_hint.model_slug.clone());
-                    selected_source = "dispatcher+knowledge".to_string();
+            let allow_learned_model_modulation =
+                task_def.model_hint.is_none() && !dispatch_plan.forced;
+            if allow_learned_model_modulation {
+                if let Some(best_hint) = knowledge_advice
+                    .hints
+                    .iter()
+                    .filter(|hint| hint.model_slug != baseline_model)
+                    .max_by(|left, right| {
+                        left.score
+                            .total_cmp(&right.score)
+                            .then_with(|| left.model_slug.cmp(&right.model_slug))
+                    })
+                {
+                    if best_hint.score + bias_weight > baseline_score {
+                        debug!(
+                            from = %baseline_model,
+                            to = %best_hint.model_slug,
+                            baseline_score,
+                            hint_score = best_hint.score,
+                            bias_weight = bias_weight,
+                            reason = %best_hint.reason,
+                            supporting_entries = best_hint.supporting_entries,
+                            "knowledge store nudged model selection"
+                        );
+                        dispatch_plan.model = ModelSpec::from_slug(best_hint.model_slug.clone());
+                        selected_source = "dispatcher+knowledge".to_string();
+                    }
                 }
             }
             let mut dispatch_turn_limit = DEFAULT_AGENT_TURN_LIMIT;
@@ -3496,7 +3782,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     ctx.config,
                     hook,
                     &dispatch_plan.model.slug,
-                    !dispatch_plan.forced,
+                    allow_learned_model_modulation,
                 )
             });
             if let Some(modulation) = &daimon_modulation {
@@ -3610,7 +3896,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                 ctx.state.force_plan_terminal(plan_id);
                             }
                             ctx.tui.error(&message);
-                            return;
+                            return ActionDispatchOutcome::Noop;
                         }
                     }
                 }
@@ -3712,7 +3998,13 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                 "implementing",
                             );
                             ctx.agent_handles.insert(plan_id.to_string(), handle);
+                            ctx.active_agent_tasks
+                                .insert(plan_id.to_string(), task_id.clone());
                             register_agent_feed(ctx.config, plan_id, &task_id, &agent_id, ctx.tui);
+                            return ActionDispatchOutcome::AgentStarted {
+                                plan_id: plan_id.clone(),
+                                task_id,
+                            };
                         }
                         Err(e) => {
                             error!(err = %e, "failed to spawn agent");
@@ -3765,6 +4057,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                     "failed to apply Fatal event -- forcing plan terminal");
                                 ctx.state.force_plan_terminal(plan_id);
                             }
+                            return ActionDispatchOutcome::Noop;
                         }
                     }
                 }
@@ -3815,7 +4108,13 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         .agent_spawned(&agent_id, role, &format!("{provider_id}:{model}"));
                     ctx.tui
                         .task_started(plan_id, &task_id, &task_def.title, "implementing");
+                    ctx.active_agent_tasks
+                        .insert(plan_id.to_string(), task_id.clone());
                     register_agent_feed(ctx.config, plan_id, &task_id, &agent_id, ctx.tui);
+                    return ActionDispatchOutcome::AgentStarted {
+                        plan_id: plan_id.clone(),
+                        task_id,
+                    };
                 }
             }
         }
@@ -3836,7 +4135,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     "gate-pipeline:default",
                     "skipped: no Cargo.toml in workspace",
                 );
-                return;
+                return ActionDispatchOutcome::Handled;
             }
 
             info!(
@@ -3855,7 +4154,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     rung = pipeline_rung,
                     "gate pipeline already active - suppressing duplicate dispatch"
                 );
-                return;
+                return ActionDispatchOutcome::Noop;
             }
             let run_id = ctx.state.run_id().to_string();
             let attempt_ref = TaskAttemptRef::new(
@@ -3942,6 +4241,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     target_crates,
                 );
             }
+            ActionDispatchOutcome::Handled
         }
 
         ExecutorAction::RunVerify { plan_id } => {
@@ -3964,7 +4264,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 let _ = ctx
                     .executor
                     .apply_event(plan_id, &ExecutorEvent::VerifyPassed);
-                return;
+                return ActionDispatchOutcome::Handled;
             }
 
             let effect_key = gate_effect_key(
@@ -3978,7 +4278,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     plan_id = %plan_id,
                     "plan verify already active — suppressing duplicate dispatch"
                 );
-                return;
+                return ActionDispatchOutcome::Noop;
             }
             let run_id = ctx.state.run_id().to_string();
             let attempt_ref = TaskAttemptRef::new(
@@ -4012,6 +4312,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.gate_tx.clone(),
                 ctx.gate_sem.clone(),
             );
+            ActionDispatchOutcome::Handled
         }
 
         ExecutorAction::CompletePlan { plan_id } => {
@@ -4034,6 +4335,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.gate_thresholds,
                 ctx.snapshot_writer,
             );
+            ActionDispatchOutcome::Handled
         }
 
         ExecutorAction::FailPlan { plan_id, reason } => {
@@ -4056,6 +4358,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     Some(reason.clone()),
                 ),
             );
+            ActionDispatchOutcome::Handled
         }
 
         ExecutorAction::MergeBranch { plan_id } => {
@@ -4111,10 +4414,12 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     );
                 }
             }
+            ActionDispatchOutcome::Handled
         }
 
         _ => {
             info!(action = ?action, "auto-advancing action");
+            ActionDispatchOutcome::Handled
         }
     }
 }
@@ -4515,7 +4820,15 @@ async fn handle_plan_timeout(
         "plan execution exceeded wall-clock timeout"
     );
     stop_all_agents(agent_handles, state, Duration::from_secs(3)).await;
-    save_snapshot(config, executor, paths, state, merge_queue, gate_thresholds, writer);
+    save_snapshot(
+        config,
+        executor,
+        paths,
+        state,
+        merge_queue,
+        gate_thresholds,
+        writer,
+    );
     writer.flush();
     shutdown_subsystems(config, tui).await;
     let event = build_run_completed_event(executor, plans, state, RunOutcome::Failed);

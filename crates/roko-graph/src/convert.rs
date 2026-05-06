@@ -151,25 +151,16 @@ fn build_node_config(plan_id: &str, plan_dir: &str, info: &PlanTaskInfo) -> toml
         "plan_dir".to_string(),
         toml::Value::String(plan_dir.to_string()),
     );
-    table.insert(
-        "title".to_string(),
-        toml::Value::String(info.title.clone()),
-    );
+    table.insert("title".to_string(), toml::Value::String(info.title.clone()));
     if let Some(ref desc) = info.description {
-        table.insert(
-            "description".to_string(),
-            toml::Value::String(desc.clone()),
-        );
+        table.insert("description".to_string(), toml::Value::String(desc.clone()));
     }
     if let Some(ref role) = info.role {
         table.insert("role".to_string(), toml::Value::String(role.clone()));
     }
     table.insert("tier".to_string(), toml::Value::String(info.tier.clone()));
     if let Some(ref hint) = info.model_hint {
-        table.insert(
-            "model_hint".to_string(),
-            toml::Value::String(hint.clone()),
-        );
+        table.insert("model_hint".to_string(), toml::Value::String(hint.clone()));
     }
     if let Some(ref domain) = info.domain {
         table.insert("domain".to_string(), toml::Value::String(domain.clone()));

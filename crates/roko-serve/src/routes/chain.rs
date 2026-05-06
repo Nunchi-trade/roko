@@ -201,9 +201,7 @@ async fn chain_events(
 }
 
 /// `GET /api/chain/watcher` — watcher running status.
-async fn chain_watcher_status(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+async fn chain_watcher_status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let running = state
         .chain
         .watcher_running

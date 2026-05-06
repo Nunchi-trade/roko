@@ -25,9 +25,7 @@ use async_trait::async_trait;
 
 use roko_core::config::graduation::GraduationConfig;
 use roko_core::traits::React;
-use roko_core::{
-    Context, Engram, PolicyOutputs, Provenance, Pulse, Score,
-};
+use roko_core::{Context, Engram, PolicyOutputs, Provenance, Pulse, Score};
 
 use crate::cell::{Cell, CellContext, CellVersion};
 

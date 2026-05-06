@@ -712,10 +712,7 @@ mod graduation_tests {
             .created_at_ms(0)
             .build();
 
-        let graduated = pulse.graduate(
-            Provenance::agent("pulse_promotion"),
-            Score::default(),
-        );
+        let graduated = pulse.graduate(Provenance::agent("pulse_promotion"), Score::default());
         let synthetic = Engram::from_pulse_synthetic(&pulse);
 
         // The graduated engram has extra audit tags (pulse_topic, pulse_seq)

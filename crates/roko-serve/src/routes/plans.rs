@@ -478,7 +478,9 @@ async fn plan_costs(
         .join(".roko")
         .join("learn")
         .join("efficiency.jsonl");
-    let content = tokio::fs::read_to_string(&efficiency_path).await.unwrap_or_default();
+    let content = tokio::fs::read_to_string(&efficiency_path)
+        .await
+        .unwrap_or_default();
 
     #[derive(serde::Deserialize)]
     struct EffRow {
@@ -517,7 +519,9 @@ async fn plan_costs(
         total_cost += row.cost_usd;
         total_input += row.input_tokens;
         total_output += row.output_tokens;
-        let entry = task_costs.entry(row.task_id.clone()).or_insert((0.0, 0, 0, String::new()));
+        let entry = task_costs
+            .entry(row.task_id.clone())
+            .or_insert((0.0, 0, 0, String::new()));
         entry.0 += row.cost_usd;
         entry.1 += row.input_tokens;
         entry.2 += row.output_tokens;

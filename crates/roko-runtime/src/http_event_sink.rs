@@ -162,8 +162,7 @@ mod tests {
             !batches.is_empty(),
             "sink should have posted at least one batch"
         );
-        let all_events: Vec<&RuntimeEvent> =
-            batches.iter().flat_map(|b| b.iter()).collect();
+        let all_events: Vec<&RuntimeEvent> = batches.iter().flat_map(|b| b.iter()).collect();
         assert!(
             all_events.iter().any(|e| matches!(
                 e,
@@ -272,10 +271,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let sizes = batch_sizes.lock().unwrap();
-        assert!(
-            !sizes.is_empty(),
-            "should have received at least one batch"
-        );
+        assert!(!sizes.is_empty(), "should have received at least one batch");
         assert!(
             sizes.iter().all(|&s| s <= BATCH_MAX_EVENTS),
             "no batch should exceed {BATCH_MAX_EVENTS} events: {sizes:?}"

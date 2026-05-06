@@ -29,9 +29,9 @@ use roko_cli::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
 use roko_cli::{
-    Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, PageId,
-    PipeMode, Plan, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs, config_cmd,
-    load_resolved_config, run_init_wizard, run_once,
+    Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, PageId, PipeMode, Plan,
+    ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs, config_cmd, load_resolved_config,
+    run_init_wizard, run_once,
 };
 pub use roko_cli::{model_selection, repo_context};
 use roko_core::agent::{AgentRole, ProviderKind};
@@ -217,7 +217,7 @@ fn long_version() -> &'static str {
     about = "Minimal CLI for the Roko universal loop",
     after_long_help = "\
 COMMAND GROUPS:
-  Core workflow:     init, do, run, status, doctor
+  Core workflow:     init, do, develop, run, status, doctor
   Planning:          plan, prd
   Agents:            agent (create, start, stop, chat, serve)
   Research:          research, think, note
@@ -371,6 +371,33 @@ Examples:
         #[arg(long)]
         no_cascade: bool,
         /// Prompt words. Quoted prompts are recommended.
+        #[arg(value_name = "PROMPT")]
+        prompt: Vec<String>,
+    },
+    /// Plan-first development: generate plan, approve, execute.
+    #[command(after_help = "\
+Examples:
+  roko develop \"Add user auth\"          Generate plan, approve, execute
+  roko develop --dry-run \"Add auth\"     Show plan without executing
+  roko develop --yes \"Quick fix\"        Skip approval, auto-execute
+  roko develop --continue                Resume from last snapshot")]
+    Develop {
+        /// Preview the generated plan without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the approval prompt and execute immediately.
+        #[arg(long)]
+        yes: bool,
+        /// Resume interrupted work from the last snapshot.
+        #[arg(long)]
+        r#continue: bool,
+        /// Working directory (default: cwd or --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Override the provider for this run.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Prompt describing what to develop.
         #[arg(value_name = "PROMPT")]
         prompt: Vec<String>,
     },
@@ -2332,6 +2359,17 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             )
             .await
         }
+        Command::Develop {
+            dry_run,
+            yes,
+            r#continue,
+            workdir,
+            provider,
+            prompt,
+        } => {
+            commands::develop::cmd_develop(cli, workdir, prompt, dry_run, yes, r#continue, provider)
+                .await
+        }
         Command::Status {
             workdir,
             quick,
@@ -2374,7 +2412,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Think { question, workdir } => {
             commands::think::cmd_think(cli, question, workdir).await
         }
-        Command::Note { tags, workdir, text } => {
+        Command::Note {
+            tags,
+            workdir,
+            text,
+        } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             commands::note::cmd_note(&wd, text, tags, cli.json)
         }
@@ -4967,8 +5009,7 @@ mod tests {
 
     #[test]
     fn cli_parses_feed_status() {
-        let cli =
-            Cli::try_parse_from(["roko", "feed", "status", "file-watch-roko-dir"]).unwrap();
+        let cli = Cli::try_parse_from(["roko", "feed", "status", "file-watch-roko-dir"]).unwrap();
         match cli.command {
             Some(Command::Feed {
                 cmd: commands::feed::FeedCmd::Status { id },

@@ -10917,7 +10917,12 @@ impl PlanRunner {
                 format!("Plan: {plan_id}\nTask: {task_id}\n\nImplement the task described above.")
             });
         let failing_command = task_def
-            .and_then(|td| td.verify.iter().find(|v| v.phase == gate).map(|v| v.command.as_str()))
+            .and_then(|td| {
+                td.verify
+                    .iter()
+                    .find(|v| v.phase == gate)
+                    .map(|v| v.command.as_str())
+            })
             .unwrap_or("unknown");
         let prompt = task_def
             .map(|task| task.build_fix_prompt(&base_prompt, gate, failing_command, error_output))
@@ -14201,11 +14206,18 @@ impl PlanRunner {
 
         let mut fix_prompt = if let Some(ref td) = task_def {
             let original_prompt = td.build_prompt(plan_id, &self.workdir);
-            let failing_command = td.verify.iter()
+            let failing_command = td
+                .verify
+                .iter()
                 .find(|v| v.phase == gate_phase)
                 .map(|v| v.command.as_str())
                 .unwrap_or("unknown");
-            td.build_fix_prompt(&original_prompt, &gate_phase, failing_command, &gate_context)
+            td.build_fix_prompt(
+                &original_prompt,
+                &gate_phase,
+                failing_command,
+                &gate_context,
+            )
         } else {
             let truncated = gate_context.chars().take(4000).collect::<String>();
             format!(

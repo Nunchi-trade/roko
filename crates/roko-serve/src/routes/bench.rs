@@ -364,7 +364,11 @@ async fn execute_bench_run(
 
         // Emit per-gate verdicts so the live UI can show gate pass/fail.
         for gv in &task_result.gate_verdicts {
-            let gate_name = gv.get("gate").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let gate_name = gv
+                .get("gate")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let gate_passed = gv.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
             let gate_detail = gv.get("detail").and_then(|v| v.as_str()).map(String::from);
             state.event_bus.publish(ServerEvent::BenchGateVerdict {

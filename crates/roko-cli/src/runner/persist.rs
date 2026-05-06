@@ -339,10 +339,9 @@ pub fn load_state_snapshot(paths: &PersistPaths) -> Result<Option<StateSnapshot>
     if !path.exists() {
         return Ok(None);
     }
-    let json = fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let snapshot: StateSnapshot = serde_json::from_str(&json)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let json = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let snapshot: StateSnapshot =
+        serde_json::from_str(&json).with_context(|| format!("parsing {}", path.display()))?;
     snapshot.verify().map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(Some(snapshot))
 }

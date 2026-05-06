@@ -275,16 +275,15 @@ fn main() {
     fork.db
         .set_balance(ERC8004_BOOTSTRAP_DEPLOYER, U256::from(10_u128.pow(18)));
 
-    let erc8004_contracts = match bootstrap_erc8004_contracts(&mut fork)
-        .context("bootstrap ERC-8004 contracts")
-    {
-        Ok(c) => c,
-        Err(error) => {
-            let exit_code = startup_exit_code(&error).unwrap_or(1);
-            tracing::error!(error = %format!("{error:#}"), exit_code, "mirage startup failed");
-            std::process::exit(exit_code);
-        }
-    };
+    let erc8004_contracts =
+        match bootstrap_erc8004_contracts(&mut fork).context("bootstrap ERC-8004 contracts") {
+            Ok(c) => c,
+            Err(error) => {
+                let exit_code = startup_exit_code(&error).unwrap_or(1);
+                tracing::error!(error = %format!("{error:#}"), exit_code, "mirage startup failed");
+                std::process::exit(exit_code);
+            }
+        };
 
     #[allow(clippy::expect_used)]
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -292,7 +291,15 @@ fn main() {
         .build()
         .expect("failed to build Tokio runtime");
 
-    if let Err(error) = rt.block_on(run(cli, upstream, fork, erc8004_contracts, loaded_snapshot, state_dir, head)) {
+    if let Err(error) = rt.block_on(run(
+        cli,
+        upstream,
+        fork,
+        erc8004_contracts,
+        loaded_snapshot,
+        state_dir,
+        head,
+    )) {
         let exit_code = startup_exit_code(&error).unwrap_or(1);
         tracing::error!(error = %format!("{error:#}"), exit_code, "mirage startup failed");
         std::process::exit(exit_code);

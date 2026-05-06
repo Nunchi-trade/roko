@@ -275,11 +275,7 @@ mod tests {
 
     #[test]
     fn canonical_metrics_count_is_15() {
-        assert_eq!(
-            CANONICAL_METRICS.len(),
-            15,
-            "expected 15 canonical metrics"
-        );
+        assert_eq!(CANONICAL_METRICS.len(), 15, "expected 15 canonical metrics");
     }
 
     #[test]

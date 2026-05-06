@@ -349,14 +349,10 @@ impl ServerBuilder {
                     .rpc_url
                     .as_deref()
                     .unwrap_or("http://127.0.0.1:8545");
-                let key = chain_cfg
-                    .wallet_key
-                    .as_deref()
-                    .unwrap_or("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
-                let contracts_dir = chain_cfg
-                    .contracts_dir
-                    .as_deref()
-                    .unwrap_or("contracts");
+                let key = chain_cfg.wallet_key.as_deref().unwrap_or(
+                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+                );
+                let contracts_dir = chain_cfg.contracts_dir.as_deref().unwrap_or("contracts");
                 let contracts_path = state.workdir.join(contracts_dir);
 
                 match roko_chain::isfr_bootstrap::bootstrap_isfr(rpc, key, &contracts_path).await {
@@ -1523,11 +1519,9 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             name: name.clone(),
             feed_count: *feed_count,
         }),
-        ServerEvent::FeedAgentOffline { agent_id } => {
-            Some(DashboardEvent::FeedAgentOffline {
-                agent_id: agent_id.clone(),
-            })
-        }
+        ServerEvent::FeedAgentOffline { agent_id } => Some(DashboardEvent::FeedAgentOffline {
+            agent_id: agent_id.clone(),
+        }),
         _ => None,
     }
 }
@@ -2173,19 +2167,13 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
                         name: m.name.clone(),
                         class: m.class.as_str().to_string(),
                         weight: m.weight,
-                        last_rate_bps: m
-                            .last_reading
-                            .as_ref()
-                            .map(|r| r.rate_bps),
+                        last_rate_bps: m.last_reading.as_ref().map(|r| r.rate_bps),
                         health: match m.status {
                             SourceStatus::Live => "live".to_string(),
                             SourceStatus::Stale => "stale".to_string(),
                             SourceStatus::Offline => "offline".to_string(),
                         },
-                        last_poll_ms: m
-                            .last_reading
-                            .as_ref()
-                            .map(|r| r.timestamp_ms as i64),
+                        last_poll_ms: m.last_reading.as_ref().map(|r| r.timestamp_ms as i64),
                     })
                     .collect();
 
@@ -2217,16 +2205,18 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
                     *state_async.isfr.sources.write().await = source_snapshots;
 
                     // 4. Emit the rate event to the bus.
-                    state_async.event_bus.publish(ServerEvent::IsfrRateComputed {
-                        composite_bps,
-                        lending_bps,
-                        structured_bps,
-                        funding_bps,
-                        staking_bps,
-                        confidence_bps,
-                        source_count,
-                        timestamp_ms,
-                    });
+                    state_async
+                        .event_bus
+                        .publish(ServerEvent::IsfrRateComputed {
+                            composite_bps,
+                            lending_bps,
+                            structured_bps,
+                            funding_bps,
+                            staking_bps,
+                            confidence_bps,
+                            source_count,
+                            timestamp_ms,
+                        });
 
                     // 5. Submit on-chain if this is a new epoch and chain is configured.
                     if should_submit {
@@ -2245,11 +2235,8 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
                                 .rpc_url
                                 .clone()
                                 .unwrap_or_else(|| "http://127.0.0.1:8545".to_string());
-                            let wallet_key = roko_config
-                                .chain
-                                .wallet_key
-                                .clone()
-                                .unwrap_or_default();
+                            let wallet_key =
+                                roko_config.chain.wallet_key.clone().unwrap_or_default();
 
                             if !wallet_key.is_empty() {
                                 let config = roko_chain::isfr_oracle_submit::OracleSubmitConfig {
@@ -2284,10 +2271,7 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
     }
 
     // Mark keeper as running.
-    state
-        .isfr
-        .keeper_running
-        .store(true, Ordering::Relaxed);
+    state.isfr.keeper_running.store(true, Ordering::Relaxed);
     state
         .event_bus
         .publish(ServerEvent::IsfrKeeperStateChanged { running: true });
@@ -2325,7 +2309,7 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
 /// publishes them to the event bus and updates `state.chain` ring buffers.
 /// Returns a no-op handle if no chain client is configured.
 fn start_block_watcher(state: Arc<AppState>) -> JoinHandle<()> {
-    use roko_chain::block_watcher::{BlockWatcher, BlockInfo, TxInfo, ContractEventInfo};
+    use roko_chain::block_watcher::{BlockInfo, BlockWatcher, ContractEventInfo, TxInfo};
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -2348,64 +2332,68 @@ fn start_block_watcher(state: Arc<AppState>) -> JoinHandle<()> {
     let state_publish = Arc::clone(&state);
     state.chain.watcher_running.store(true, Ordering::Relaxed);
 
-    let publish_fn: roko_chain::block_watcher::PublishFn = Arc::new(move |topic: &str, payload: serde_json::Value| {
-        let state = Arc::clone(&state_publish);
-        match topic {
-            "chain:block" => {
-                if let Ok(block) = serde_json::from_value::<BlockInfo>(payload) {
-                    state.event_bus.publish(ServerEvent::ChainBlock {
-                        number: block.number,
-                        hash: block.hash.clone(),
-                        parent_hash: block.parent_hash.clone(),
-                        timestamp: block.timestamp,
-                        gas_used: block.gas_used,
-                        gas_limit: block.gas_limit,
-                        tx_count: block.tx_count,
-                        base_fee_per_gas: block.base_fee_per_gas,
-                    });
-                    // Spawn async update of ring buffer.
-                    let chain_state = Arc::clone(&state.chain);
-                    tokio::spawn(async move { chain_state.push_block(block).await });
+    let publish_fn: roko_chain::block_watcher::PublishFn =
+        Arc::new(move |topic: &str, payload: serde_json::Value| {
+            let state = Arc::clone(&state_publish);
+            match topic {
+                "chain:block" => {
+                    if let Ok(block) = serde_json::from_value::<BlockInfo>(payload) {
+                        state.event_bus.publish(ServerEvent::ChainBlock {
+                            number: block.number,
+                            hash: block.hash.clone(),
+                            parent_hash: block.parent_hash.clone(),
+                            timestamp: block.timestamp,
+                            gas_used: block.gas_used,
+                            gas_limit: block.gas_limit,
+                            tx_count: block.tx_count,
+                            base_fee_per_gas: block.base_fee_per_gas,
+                        });
+                        // Spawn async update of ring buffer.
+                        let chain_state = Arc::clone(&state.chain);
+                        tokio::spawn(async move { chain_state.push_block(block).await });
+                    }
                 }
-            }
-            "chain:tx" => {
-                if let Ok(tx) = serde_json::from_value::<TxInfo>(payload) {
-                    state.event_bus.publish(ServerEvent::ChainTx {
-                        block_number: tx.block_number,
-                        tx_hash: tx.tx_hash.clone(),
-                        from: tx.from.clone(),
-                        to: tx.to.clone(),
-                        value_wei: tx.value_wei.clone(),
-                        gas_used: tx.gas_used,
-                        method_sig: tx.method_sig.clone(),
-                        success: tx.success,
-                    });
-                    let chain_state = Arc::clone(&state.chain);
-                    tokio::spawn(async move { chain_state.push_tx(tx).await });
+                "chain:tx" => {
+                    if let Ok(tx) = serde_json::from_value::<TxInfo>(payload) {
+                        state.event_bus.publish(ServerEvent::ChainTx {
+                            block_number: tx.block_number,
+                            tx_hash: tx.tx_hash.clone(),
+                            from: tx.from.clone(),
+                            to: tx.to.clone(),
+                            value_wei: tx.value_wei.clone(),
+                            gas_used: tx.gas_used,
+                            method_sig: tx.method_sig.clone(),
+                            success: tx.success,
+                        });
+                        let chain_state = Arc::clone(&state.chain);
+                        tokio::spawn(async move { chain_state.push_tx(tx).await });
+                    }
                 }
-            }
-            "chain:event" => {
-                if let Ok(evt) = serde_json::from_value::<ContractEventInfo>(payload) {
-                    state.event_bus.publish(ServerEvent::ChainContractEvent {
-                        block_number: evt.block_number,
-                        tx_hash: evt.tx_hash.clone(),
-                        log_index: evt.log_index,
-                        contract: evt.contract.clone(),
-                        event_name: evt.event_name.clone(),
-                        decoded: evt.decoded.clone(),
-                    });
-                    let chain_state = Arc::clone(&state.chain);
-                    tokio::spawn(async move { chain_state.push_event(evt).await });
+                "chain:event" => {
+                    if let Ok(evt) = serde_json::from_value::<ContractEventInfo>(payload) {
+                        state.event_bus.publish(ServerEvent::ChainContractEvent {
+                            block_number: evt.block_number,
+                            tx_hash: evt.tx_hash.clone(),
+                            log_index: evt.log_index,
+                            contract: evt.contract.clone(),
+                            event_name: evt.event_name.clone(),
+                            decoded: evt.decoded.clone(),
+                        });
+                        let chain_state = Arc::clone(&state.chain);
+                        tokio::spawn(async move { chain_state.push_event(evt).await });
+                    }
                 }
+                _ => {}
             }
-            _ => {}
-        }
-    });
+        });
 
     let state_outer = Arc::clone(&state);
     tokio::spawn(async move {
         watcher.run(publish_fn, cancel).await;
-        state_outer.chain.watcher_running.store(false, Ordering::Relaxed);
+        state_outer
+            .chain
+            .watcher_running
+            .store(false, Ordering::Relaxed);
     })
 }
 
@@ -2743,11 +2731,7 @@ async fn shutdown_signal(state: Arc<AppState>) {
 /// require the tracing bootstrap to accept an optional OTLP layer at init
 /// time -- that is deferred to a follow-up task.
 #[cfg(feature = "otlp")]
-fn init_otlp_tracing(
-    endpoint: &str,
-    service_name: &str,
-    _sample_rate: f64,
-) {
+fn init_otlp_tracing(endpoint: &str, service_name: &str, _sample_rate: f64) {
     // The tracing subscriber is typically already installed by the CLI entry
     // point before ServerBuilder::start_background is called. Attempting to
     // set a new global default here would panic. Instead, log that the config

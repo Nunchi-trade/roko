@@ -165,7 +165,11 @@ impl SseStreamClient {
                 );
             }
             let backoff = exponential_backoff(attempt);
-            debug!(attempt, backoff_ms = backoff.as_millis(), "reconnecting after stream end");
+            debug!(
+                attempt,
+                backoff_ms = backoff.as_millis(),
+                "reconnecting after stream end"
+            );
             tokio::select! {
                 _ = tokio::time::sleep(backoff) => {},
                 _ = cancel.cancelled() => return Ok(()),

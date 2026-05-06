@@ -10,8 +10,8 @@
 //!   3. A node returns an unrecoverable error (non-retriable failure)
 //!      and the graph policy is `FailFast`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -120,9 +120,7 @@ pub fn start_hot(
     policy: HotPolicy,
     parent_cancel: Option<CancellationToken>,
 ) -> HotGraphHandle {
-    let cancel = parent_cancel
-        .map(|p| p.child_token())
-        .unwrap_or_default();
+    let cancel = parent_cancel.map(|p| p.child_token()).unwrap_or_default();
     let tick = Arc::new(AtomicU64::new(0));
     let last_output: Arc<parking_lot::Mutex<Option<GraphOutput>>> =
         Arc::new(parking_lot::Mutex::new(None));
@@ -283,9 +281,11 @@ cell_type = "noop"
         handle.cancel();
 
         // Wait with a timeout to ensure it doesn't hang.
-        let result =
-            tokio::time::timeout(Duration::from_millis(500), handle.wait()).await;
-        assert!(result.is_ok(), "hot graph should stop within 500ms of cancel");
+        let result = tokio::time::timeout(Duration::from_millis(500), handle.wait()).await;
+        assert!(
+            result.is_ok(),
+            "hot graph should stop within 500ms of cancel"
+        );
     }
 
     #[tokio::test]

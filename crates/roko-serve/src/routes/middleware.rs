@@ -514,7 +514,10 @@ fn is_local_origin(origin: &str) -> bool {
         return false;
     };
     let host = authority.host();
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
 }
 
 /// Returns `true` when the response content-type indicates a text-like body

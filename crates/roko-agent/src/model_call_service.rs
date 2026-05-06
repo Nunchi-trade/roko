@@ -575,7 +575,11 @@ impl ModelCallService {
             (schema::LABEL_STATUS, status),
         ]);
         registry
-            .register_counter(schema::ROKO_LLM_CALLS_TOTAL, "Total LLM calls by provider, model, and status", call_labels)
+            .register_counter(
+                schema::ROKO_LLM_CALLS_TOTAL,
+                "Total LLM calls by provider, model, and status",
+                call_labels,
+            )
             .inc();
 
         // roko_llm_tokens_total{provider, model, direction="input"|"output"}
@@ -586,7 +590,11 @@ impl ModelCallService {
                 (schema::LABEL_DIRECTION, "input"),
             ]);
             registry
-                .register_counter(schema::ROKO_LLM_TOKENS_TOTAL, "LLM tokens consumed/produced, by provider, model, direction", in_labels)
+                .register_counter(
+                    schema::ROKO_LLM_TOKENS_TOTAL,
+                    "LLM tokens consumed/produced, by provider, model, direction",
+                    in_labels,
+                )
                 .inc_by(usage.input_tokens);
         }
         if usage.output_tokens > 0 {
@@ -596,7 +604,11 @@ impl ModelCallService {
                 (schema::LABEL_DIRECTION, "output"),
             ]);
             registry
-                .register_counter(schema::ROKO_LLM_TOKENS_TOTAL, "LLM tokens consumed/produced, by provider, model, direction", out_labels)
+                .register_counter(
+                    schema::ROKO_LLM_TOKENS_TOTAL,
+                    "LLM tokens consumed/produced, by provider, model, direction",
+                    out_labels,
+                )
                 .inc_by(usage.output_tokens);
         }
 
@@ -608,7 +620,11 @@ impl ModelCallService {
             ]);
             let cost_micro = (usage.cost_usd * 1_000_000.0) as u64;
             registry
-                .register_counter(schema::ROKO_LLM_COST_USD_TOTAL, "Cumulative LLM spend in microdollars, by provider and model", cost_labels)
+                .register_counter(
+                    schema::ROKO_LLM_COST_USD_TOTAL,
+                    "Cumulative LLM spend in microdollars, by provider and model",
+                    cost_labels,
+                )
                 .inc_by(cost_micro);
         }
 
@@ -633,11 +649,7 @@ impl ModelCallService {
             let models = self.config.effective_models();
             let context_window = models
                 .get(model)
-                .or_else(|| {
-                    models
-                        .values()
-                        .find(|p| p.slug == model)
-                })
+                .or_else(|| models.values().find(|p| p.slug == model))
                 .map(|p| p.context_window)
                 .unwrap_or(0);
             if context_window > 0 {
@@ -690,7 +702,11 @@ impl ModelCallService {
             (schema::LABEL_ERROR_TYPE, error_type),
         ]);
         registry
-            .register_counter(schema::ROKO_LLM_ERRORS_TOTAL, "Total LLM errors by provider, model, and error type", labels)
+            .register_counter(
+                schema::ROKO_LLM_ERRORS_TOTAL,
+                "Total LLM errors by provider, model, and error type",
+                labels,
+            )
             .inc();
     }
 
@@ -2662,8 +2678,8 @@ mod tests {
         use std::sync::Arc;
 
         let registry = Arc::new(MetricRegistry::new());
-        let svc = ModelCallService::new("test-model".to_string())
-            .with_metrics(Arc::clone(&registry));
+        let svc =
+            ModelCallService::new("test-model".to_string()).with_metrics(Arc::clone(&registry));
 
         let usage = TokenUsage {
             input_tokens: 1000,

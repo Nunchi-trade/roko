@@ -537,14 +537,7 @@ impl fmt::Debug for FormattedStderrSink {
 }
 
 impl RunOutputSink for FormattedStderrSink {
-    fn task_started(
-        &self,
-        plan_id: &str,
-        task_id: &str,
-        role: &str,
-        title: &str,
-        attempt: u32,
-    ) {
+    fn task_started(&self, plan_id: &str, task_id: &str, role: &str, title: &str, attempt: u32) {
         let attempt_str = if attempt > 1 {
             format!(" (attempt {attempt})")
         } else {
@@ -683,10 +676,7 @@ impl RunOutputSink for FormattedStderrSink {
             self.emit_pass(
                 plan_id,
                 task_id,
-                &format!(
-                    "Gate passed: {} ({secs:.1}s)",
-                    result.gate_name
-                ),
+                &format!("Gate passed: {} ({secs:.1}s)", result.gate_name),
             );
         } else {
             let summary_trunc = truncate_chars(&result.summary, 80);
@@ -701,13 +691,7 @@ impl RunOutputSink for FormattedStderrSink {
         }
     }
 
-    fn gate_retry(
-        &self,
-        plan_id: &str,
-        task_id: &str,
-        next_attempt: u32,
-        cooldown_ms: u64,
-    ) {
+    fn gate_retry(&self, plan_id: &str, task_id: &str, next_attempt: u32, cooldown_ms: u64) {
         let secs = cooldown_ms as f64 / 1000.0;
         self.emit_progress(
             plan_id,
@@ -865,29 +849,27 @@ pub fn format_dashboard_event(
             let trunc = truncate_chars(preview, 100);
             (format!("[{agent_id}]"), "|", trunc)
         }
-        DashboardEvent::AgentCompleted { agent_id } => (
-            format!("[{agent_id}]"),
-            "+",
-            format!("Agent completed"),
-        ),
+        DashboardEvent::AgentCompleted { agent_id } => {
+            (format!("[{agent_id}]"), "+", format!("Agent completed"))
+        }
         DashboardEvent::GateResult {
             plan_id,
             task_id,
             gate,
             passed,
         } => {
-            let (icon, word) = if *passed { ("+", "passed") } else { ("x", "failed") };
+            let (icon, word) = if *passed {
+                ("+", "passed")
+            } else {
+                ("x", "failed")
+            };
             (
                 format!("[{plan_id}/{task_id}]"),
                 icon,
                 format!("Gate {word}: {gate}"),
             )
         }
-        DashboardEvent::PhaseTransition {
-            plan_id,
-            from,
-            to,
-        } => (
+        DashboardEvent::PhaseTransition { plan_id, from, to } => (
             format!("[{plan_id}]"),
             ">",
             format!("Phase: {from} -> {to}"),
@@ -1073,7 +1055,13 @@ mod tests {
     fn formatted_sink_in_arc_does_not_panic() {
         let sink: Arc<dyn RunOutputSink> = Arc::new(FormattedStderrSink::new(false));
         sink.task_started("plan-1", "task-1", "implementer", "Build feature X", 1);
-        sink.agent_started("plan-1", "task-1", "claude", "claude-sonnet-4-6", Some(1234));
+        sink.agent_started(
+            "plan-1",
+            "task-1",
+            "claude",
+            "claude-sonnet-4-6",
+            Some(1234),
+        );
         sink.agent_text_delta("plan-1", "task-1", "hello ");
         sink.agent_text_delta("plan-1", "task-1", "world\n");
         sink.flush_agent_text("plan-1", "task-1");
@@ -1140,18 +1128,20 @@ mod tests {
 
     #[test]
     fn truncation_short_input_unchanged() {
-        let lines: Vec<&str> = (0..10).map(|i| match i {
-            0 => "line-0",
-            1 => "line-1",
-            2 => "line-2",
-            3 => "line-3",
-            4 => "line-4",
-            5 => "line-5",
-            6 => "line-6",
-            7 => "line-7",
-            8 => "line-8",
-            _ => "line-9",
-        }).collect();
+        let lines: Vec<&str> = (0..10)
+            .map(|i| match i {
+                0 => "line-0",
+                1 => "line-1",
+                2 => "line-2",
+                3 => "line-3",
+                4 => "line-4",
+                5 => "line-5",
+                6 => "line-6",
+                7 => "line-7",
+                8 => "line-8",
+                _ => "line-9",
+            })
+            .collect();
         let result = format_truncated_lines(&lines);
         assert_eq!(result.len(), 10);
         assert_eq!(result[0], "line-0");

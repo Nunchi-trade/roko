@@ -15,8 +15,8 @@ pub mod budget;
 pub mod cache;
 pub mod chain;
 pub mod compat;
-pub mod graduation;
 pub mod gates;
+pub mod graduation;
 pub mod hot_reload;
 pub mod learning;
 pub mod loader;
@@ -59,15 +59,15 @@ pub use schema::{
     BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig, CompileFailRepeatConfig, ConductorConfig,
     ContextWindowPressureConfig, CoreRunnerConfig, CostOverrunConfig, DataLlmConfig, DeployConfig,
     GateRungConfig, GatesConfig, GeminiConfig, GhostTurnConfig, GithubWebhookConfig,
-    GraduationConfig, GraduationPolicy, ISFRSection,
-    ISFRSourceConfig, IterationLoopConfig, LearningConfig, ModelProfile, PerplexityConfig,
-    PipelineBandConfig, PipelineConfig, PipelineReviewerMode, PrdConfig, ProjectConfig,
-    ProviderConfig, ProviderRouting, RelayConfig, ReviewLoopConfig, RewardWeights, RokoConfig,
-    RoleOverride, RoutingAlgorithm, RoutingConfig, RoutingOverrides, RoutingRewardWeightsConfig,
-    SafetySetting, SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig,
-    ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig, SpecDriftConfig, StuckPatternConfig, TracingConfig,
-    SubscriptionConfig, SubscriptionFilterConfig, SubscriptionTrigger, TestFailureBudgetConfig,
-    TimeOverrunConfig, ToolProfileConfig, ToolsConfig, TuiConfig, ValidationConfig, WatcherConfig,
+    GraduationConfig, GraduationPolicy, ISFRSection, ISFRSourceConfig, IterationLoopConfig,
+    LearningConfig, ModelProfile, PerplexityConfig, PipelineBandConfig, PipelineConfig,
+    PipelineReviewerMode, PrdConfig, ProjectConfig, ProviderConfig, ProviderRouting, RelayConfig,
+    ReviewLoopConfig, RewardWeights, RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig,
+    RoutingOverrides, RoutingRewardWeightsConfig, SafetySetting, SchedulerConfig,
+    SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig,
+    ServerConfig, SpecDriftConfig, StuckPatternConfig, SubscriptionConfig,
+    SubscriptionFilterConfig, SubscriptionTrigger, TestFailureBudgetConfig, TimeOverrunConfig,
+    ToolProfileConfig, ToolsConfig, TracingConfig, TuiConfig, ValidationConfig, WatcherConfig,
     WatcherPathConfig, WatcherThresholds, WebhooksConfig,
 };
 

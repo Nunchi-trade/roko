@@ -116,9 +116,7 @@ impl Verify for CompileGate {
         };
 
         let mut cmd = Command::new(self.build_system.program());
-        let scoped = self
-            .build_system
-            .scoped_check_args(&payload.target_crates);
+        let scoped = self.build_system.scoped_check_args(&payload.target_crates);
         for arg in &scoped {
             cmd.arg(arg);
         }

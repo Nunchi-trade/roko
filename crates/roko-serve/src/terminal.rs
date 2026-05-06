@@ -434,9 +434,7 @@ impl SessionManager {
 
         // Check for persisted state file to restore CWD
         let restored_workdir = self.read_state_file(id).map(|sf| sf.cwd);
-        let effective_workdir = workdir
-            .map(|w| w.to_string())
-            .or(restored_workdir);
+        let effective_workdir = workdir.map(|w| w.to_string()).or(restored_workdir);
 
         // Create a new session
         match self.create_session_with_subscriber(
@@ -555,7 +553,10 @@ impl SessionManager {
         let zdotdir_path = if command.is_none() {
             let zdotdir = std::env::temp_dir().join(format!("roko-zdot-{}", Uuid::new_v4()));
             let _ = std::fs::create_dir_all(&zdotdir);
-            let _ = std::fs::write(zdotdir.join(".zshrc"), "PS1='%F{95}roko%f %F{240}%1~%f %F{95}❯%f '\n");
+            let _ = std::fs::write(
+                zdotdir.join(".zshrc"),
+                "PS1='%F{95}roko%f %F{240}%1~%f %F{95}❯%f '\n",
+            );
             cmd.env("ZDOTDIR", zdotdir.to_string_lossy().as_ref());
             Some(zdotdir)
         } else {
@@ -598,8 +599,7 @@ impl SessionManager {
         // Shared scrollback + subscriber state (per-session, not global lock)
         let scrollback: Arc<Mutex<VecDeque<Vec<u8>>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_CHUNKS)));
-        let subscribers: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let subscribers: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
 
         // First subscriber for the initial attacher
         let (tx, rx) = mpsc::channel(256);
@@ -777,7 +777,10 @@ impl SessionManager {
         let zdotdir_path = if command.is_none() {
             let zdotdir = std::env::temp_dir().join(format!("roko-zdot-{}", Uuid::new_v4()));
             let _ = std::fs::create_dir_all(&zdotdir);
-            let _ = std::fs::write(zdotdir.join(".zshrc"), "PS1='%F{95}roko%f %F{240}%1~%f %F{95}❯%f '\n");
+            let _ = std::fs::write(
+                zdotdir.join(".zshrc"),
+                "PS1='%F{95}roko%f %F{240}%1~%f %F{95}❯%f '\n",
+            );
             cmd.env("ZDOTDIR", zdotdir.to_string_lossy().as_ref());
             Some(zdotdir)
         } else {
@@ -1308,10 +1311,16 @@ mod tests {
 
         // Create a session via attach (creates new)
         let sess_id = "test-reattach-session";
-        let result = manager.attach_session(sess_id, 80, 24, Some("/bin/echo hello-scrollback"), None);
+        let result =
+            manager.attach_session(sess_id, 80, 24, Some("/bin/echo hello-scrollback"), None);
         let generation = match &result {
-            AttachResult::Created { sess_generation, .. } => *sess_generation,
-            other => panic!("expected Created, got {other:?}", other = std::mem::discriminant(other)),
+            AttachResult::Created {
+                sess_generation, ..
+            } => *sess_generation,
+            other => panic!(
+                "expected Created, got {other:?}",
+                other = std::mem::discriminant(other)
+            ),
         };
 
         // Give the echo command time to produce output and fill the scrollback
@@ -1324,7 +1333,10 @@ mod tests {
         {
             let sessions = manager.sessions.lock();
             let session = sessions.get(sess_id).expect("session should still exist");
-            assert!(session.disconnected_at.is_some(), "disconnected_at should be set");
+            assert!(
+                session.disconnected_at.is_some(),
+                "disconnected_at should be set"
+            );
         }
 
         // Reattach within grace period
@@ -1523,10 +1535,7 @@ mod tests {
             AttachResult::Created { .. } => {
                 // Success — new session created with restored CWD
             }
-            other => panic!(
-                "expected Created, got {:?}",
-                std::mem::discriminant(&other)
-            ),
+            other => panic!("expected Created, got {:?}", std::mem::discriminant(&other)),
         }
 
         // Clean up

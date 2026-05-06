@@ -169,7 +169,11 @@ impl BlockWatcher {
             if !seeded {
                 seeded = true;
                 let start = current.saturating_sub(Self::BACKFILL_COUNT);
-                info!(from = start + 1, to = current, "block_watcher late-seed backfill");
+                info!(
+                    from = start + 1,
+                    to = current,
+                    "block_watcher late-seed backfill"
+                );
                 for num in (start + 1)..=current {
                     if cancel.is_cancelled() {
                         return;
@@ -221,7 +225,11 @@ impl BlockWatcher {
         let mut actual_tx_count = 0u32;
         if let Some(transactions) = block.transactions.as_transactions() {
             if !transactions.is_empty() {
-                info!(block = num, tx_count = transactions.len(), "processing full transactions");
+                info!(
+                    block = num,
+                    tx_count = transactions.len(),
+                    "processing full transactions"
+                );
             }
             for tx in transactions {
                 self.process_full_tx(num, tx, publish).await;
@@ -230,7 +238,11 @@ impl BlockWatcher {
         } else if let Some(hashes) = block.transactions.as_hashes() {
             // mirage-rs / some providers return hash-only blocks even with .full().
             // Fetch each transaction individually.
-            info!(block = num, hash_count = hashes.len(), "fetching transactions by hash");
+            info!(
+                block = num,
+                hash_count = hashes.len(),
+                "fetching transactions by hash"
+            );
             for hash in hashes {
                 match self.provider.get_transaction_by_hash(*hash).await {
                     Ok(Some(tx)) => {
@@ -351,7 +363,11 @@ impl BlockWatcher {
             }
         }
         if count > 0 {
-            info!(block = block_number, tx_count = count, "recovered transactions via raw extraction");
+            info!(
+                block = block_number,
+                tx_count = count,
+                "recovered transactions via raw extraction"
+            );
         }
         count
     }
@@ -376,14 +392,14 @@ impl BlockWatcher {
 
         // Fetch receipt for gas_used and logs.
         let hash_b256: B256 = tx.tx_hash();
-        let (gas_used, success, logs) =
-            match self.provider.get_transaction_receipt(hash_b256).await {
-                Ok(Some(receipt)) => {
-                    let logs: Vec<_> = receipt.inner.logs().to_vec();
-                    (receipt.gas_used, receipt.status(), logs)
-                }
-                _ => (0, true, vec![]),
-            };
+        let (gas_used, success, logs) = match self.provider.get_transaction_receipt(hash_b256).await
+        {
+            Ok(Some(receipt)) => {
+                let logs: Vec<_> = receipt.inner.logs().to_vec();
+                (receipt.gas_used, receipt.status(), logs)
+            }
+            _ => (0, true, vec![]),
+        };
 
         let tx_info = TxInfo {
             block_number,
@@ -410,8 +426,7 @@ impl BlockWatcher {
 
             let topic0 = format!("{:#x}", topics[0]);
             let contract = format!("{:#x}", log.inner.address);
-            let (event_name, decoded) =
-                decode_event(&topic0, topics, &log.inner.data.data);
+            let (event_name, decoded) = decode_event(&topic0, topics, &log.inner.data.data);
 
             let event_info = ContractEventInfo {
                 block_number,
@@ -431,11 +446,7 @@ impl BlockWatcher {
 }
 
 /// Decode a known contract event or return the raw topic0.
-fn decode_event(
-    topic0: &str,
-    topics: &[B256],
-    data: &[u8],
-) -> (String, serde_json::Value) {
+fn decode_event(topic0: &str, topics: &[B256], data: &[u8]) -> (String, serde_json::Value) {
     match topic0 {
         s if s == signatures::RATE_SUBMITTED => {
             let epoch_id = topics.get(1).map(|t| format!("{t:#x}")).unwrap_or_default();

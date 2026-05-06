@@ -558,8 +558,7 @@ async fn run_plan_execution(
         output_sink: if !cli.quiet && !cli.json {
             std::sync::Arc::new(roko_cli::runner::output_sink::FormattedStderrSink::new(
                 cli.color.should_color(),
-            ))
-                as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+            )) as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
         } else {
             std::sync::Arc::new(roko_cli::runner::output_sink::NoopSink)
                 as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>

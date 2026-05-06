@@ -47,6 +47,7 @@
 )]
 
 /// Generate a short share token: `<unix_millis_hex>-<rand_hex>`.
+#[must_use]
 pub fn generate_share_token() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -191,6 +192,7 @@ pub use cognitive_workspace::{
     PolicyVersionRef, PromptSectionAudit, RewardObservation, TaskInvocationContract,
 };
 pub use conductor::{CognitiveSignal, ConductorDecision, ConductorEvaluation};
+pub use config::graduation::{GraduationConfig, GraduationPolicy};
 pub use connector::{
     ConnectorConfig, ConnectorHealth, ConnectorInfo, ConnectorKind, ConnectorRegistry,
     ConnectorStatus,
@@ -207,7 +209,6 @@ pub use dispatch_plan::{
 pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
-pub use config::graduation::{GraduationConfig, GraduationPolicy};
 pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry, FeedRuntimeStatus};
 pub use forensic::{
     ForensicReplay, ForensicReplayLogger, GateVerdictRecord, PolicyDecisionRecord, PolicyOutcome,

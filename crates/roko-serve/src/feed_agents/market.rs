@@ -36,7 +36,8 @@ impl FeedAgent for CorrelationAgent {
             feed_id: "analytics-correlation".into(),
             topic: "feed:analytics:correlation".into(),
             name: "Rate Correlation Matrix".into(),
-            description: "Cross-class rate correlation: lending vs staking vs funding vs structured".into(),
+            description:
+                "Cross-class rate correlation: lending vs staking vs funding vs structured".into(),
             kind: "composite".into(),
             rate: "30s".into(),
             schema: None,
@@ -128,7 +129,8 @@ impl FeedAgent for RegimeClassifierAgent {
             feed_id: "analytics-regime".into(),
             topic: "feed:analytics:regime".into(),
             name: "Market Regime".into(),
-            description: "Classifies current rate environment: trending, mean-reverting, or volatile".into(),
+            description:
+                "Classifies current rate environment: trending, mean-reverting, or volatile".into(),
             kind: "composite".into(),
             rate: "30s".into(),
             schema: None,
@@ -309,7 +311,8 @@ impl FeedAgent for SystemHeartbeatAgent {
             feed_id: "meta-heartbeat".into(),
             topic: "feed:meta:heartbeat".into(),
             name: "System Heartbeat".into(),
-            description: "Aggregate system health: uptime, feed agent count, event throughput".into(),
+            description: "Aggregate system health: uptime, feed agent count, event throughput"
+                .into(),
             kind: "meta".into(),
             rate: "5s".into(),
             schema: None,

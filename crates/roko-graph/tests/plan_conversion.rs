@@ -40,7 +40,10 @@ async fn single_task_round_trip() {
 
     // Validate before execution.
     let issues = engine.validate();
-    assert!(issues.is_empty(), "unexpected validation issues: {issues:?}");
+    assert!(
+        issues.is_empty(),
+        "unexpected validation issues: {issues:?}"
+    );
 
     // Execute.
     let ctx = roko_graph::CellContext::new();

@@ -216,18 +216,45 @@ impl Default for RokoConfig {
 /// `[providers.*]` config always takes precedence.
 #[must_use]
 pub fn synthesize_standard_providers() -> HashMap<String, ProviderConfig> {
-    use super::provider::{default_provider_timeout_ms, default_provider_ttft_timeout_ms, default_provider_connect_timeout_ms};
+    use super::provider::{
+        default_provider_connect_timeout_ms, default_provider_timeout_ms,
+        default_provider_ttft_timeout_ms,
+    };
 
     let specs: &[(&str, &str, ProviderKind, Option<&str>)] = &[
-        ("anthropic", "ANTHROPIC_API_KEY", ProviderKind::AnthropicApi, Some("https://api.anthropic.com")),
-        ("openai",    "OPENAI_API_KEY",    ProviderKind::OpenAiCompat, Some("https://api.openai.com")),
-        ("gemini",    "GEMINI_API_KEY",    ProviderKind::GeminiApi,    Some("https://generativelanguage.googleapis.com")),
-        ("perplexity","PERPLEXITY_API_KEY", ProviderKind::PerplexityApi, None),
+        (
+            "anthropic",
+            "ANTHROPIC_API_KEY",
+            ProviderKind::AnthropicApi,
+            Some("https://api.anthropic.com"),
+        ),
+        (
+            "openai",
+            "OPENAI_API_KEY",
+            ProviderKind::OpenAiCompat,
+            Some("https://api.openai.com"),
+        ),
+        (
+            "gemini",
+            "GEMINI_API_KEY",
+            ProviderKind::GeminiApi,
+            Some("https://generativelanguage.googleapis.com"),
+        ),
+        (
+            "perplexity",
+            "PERPLEXITY_API_KEY",
+            ProviderKind::PerplexityApi,
+            None,
+        ),
     ];
 
     let mut providers = HashMap::new();
     for &(name, env_var, kind, base_url) in specs {
-        if std::env::var(env_var).ok().filter(|v| !v.is_empty()).is_some() {
+        if std::env::var(env_var)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
             providers.insert(
                 name.to_string(),
                 ProviderConfig {
@@ -321,9 +348,8 @@ impl RokoConfig {
     #[must_use]
     pub fn effective_providers(&self) -> IndexMap<String, ProviderConfig> {
         // Start with env-synthesized providers as the base layer.
-        let mut providers: IndexMap<String, ProviderConfig> = synthesize_standard_providers()
-            .into_iter()
-            .collect();
+        let mut providers: IndexMap<String, ProviderConfig> =
+            synthesize_standard_providers().into_iter().collect();
 
         // User-defined providers override synthesized ones.
         for (name, pc) in &self.providers {

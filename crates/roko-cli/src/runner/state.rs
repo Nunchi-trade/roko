@@ -602,8 +602,7 @@ impl RunState {
 
     /// Get the set of failed task IDs for a plan.
     pub fn plan_failed_tasks(&self, plan_id: &str) -> &HashSet<String> {
-        static EMPTY: std::sync::LazyLock<HashSet<String>> =
-            std::sync::LazyLock::new(HashSet::new);
+        static EMPTY: std::sync::LazyLock<HashSet<String>> = std::sync::LazyLock::new(HashSet::new);
         self.failed_tasks.get(plan_id).unwrap_or(&EMPTY)
     }
 

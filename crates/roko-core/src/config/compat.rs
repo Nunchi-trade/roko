@@ -12,10 +12,10 @@ use serde::Deserialize;
 use super::schema::{
     AgentConfig, BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig, ConductorConfig,
     CoreRunnerConfig, DeployConfig, FeedAgentsConfig, GatesConfig, GeminiConfig,
-    GithubWebhookConfig, ISFRSection, LearningConfig, PerplexityConfig, PipelineConfig,
-    PrdConfig, ProjectConfig, RelayConfig, RokoConfig, RoleOverride, RoutingConfig,
-    SchedulerConfig, ServeConfig, ServerConfig, ToolsConfig, TuiConfig, ValidationConfig,
-    WatcherConfig, WebhooksConfig,
+    GithubWebhookConfig, ISFRSection, LearningConfig, PerplexityConfig, PipelineConfig, PrdConfig,
+    ProjectConfig, RelayConfig, RokoConfig, RoleOverride, RoutingConfig, SchedulerConfig,
+    ServeConfig, ServerConfig, ToolsConfig, TuiConfig, ValidationConfig, WatcherConfig,
+    WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.

@@ -186,9 +186,7 @@ async fn delete_feed(
 // ── Feed catalog handler ─────────────────────────────────────────
 
 /// `GET /api/feeds/catalog` — aggregated feed catalog from feed agents.
-async fn get_feed_catalog(
-    State(state): State<Arc<AppState>>,
-) -> Json<FeedCatalogResponse> {
+async fn get_feed_catalog(State(state): State<Arc<AppState>>) -> Json<FeedCatalogResponse> {
     let snapshot = state.feed_agent_catalog.read().await;
     Json(FeedCatalogResponse {
         agents: snapshot.agents.clone(),
@@ -579,8 +577,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
-        let status: roko_core::FeedRuntimeStatus =
-            serde_json::from_slice(&body).expect("parse");
+        let status: roko_core::FeedRuntimeStatus = serde_json::from_slice(&body).expect("parse");
         assert_eq!(status.id, "file-watch-roko-dir");
         assert_eq!(status.kind, "Raw");
         // .roko/ dir was created above so it should be connected.

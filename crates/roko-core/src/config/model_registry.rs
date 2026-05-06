@@ -255,7 +255,11 @@ mod tests {
     fn openai_models_use_max_completion_tokens() {
         for m in BUILTIN_MODELS {
             if m.provider_kind == ProviderKind::OpenAiCompat {
-                assert!(m.use_max_completion_tokens, "{} should use max_completion_tokens", m.slug);
+                assert!(
+                    m.use_max_completion_tokens,
+                    "{} should use max_completion_tokens",
+                    m.slug
+                );
             }
         }
     }

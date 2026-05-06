@@ -35,7 +35,9 @@ impl FeedAgent for YieldCurveAgent {
             feed_id: "defi-yield-curve".into(),
             topic: "feed:defi:yield-curve".into(),
             name: "Yield Curve".into(),
-            description: "Term structure of DeFi yields across lending, staking, and structured products".into(),
+            description:
+                "Term structure of DeFi yields across lending, staking, and structured products"
+                    .into(),
             kind: "composite".into(),
             rate: "30s".into(),
             schema: None,

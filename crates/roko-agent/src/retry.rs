@@ -172,10 +172,7 @@ mod tests {
 
         for _ in 0..200 {
             let delay = policy.delay_for_attempt_with_rng(0, &mut rng);
-            assert!(
-                delay >= floor,
-                "delay {delay} below floor {floor}"
-            );
+            assert!(delay >= floor, "delay {delay} below floor {floor}");
             assert!(delay <= capped, "delay {delay} above cap {capped}");
             unique.insert(delay);
         }

@@ -123,7 +123,8 @@ mod tests {
             r#"{"run_id":"run-1"}"#.to_string(),
             r#"{"rungs":{}}"#.to_string(),
         );
-        snap.checksum = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        snap.checksum =
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string();
         let err = snap.verify().unwrap_err();
         assert!(err.contains("checksum mismatch"), "got: {err}");
     }

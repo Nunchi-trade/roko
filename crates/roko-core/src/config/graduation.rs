@@ -350,9 +350,7 @@ mod tests {
 
         let cfg: GraduationConfig = toml::from_str(toml_str).expect("should parse exact topic");
         assert_eq!(cfg.policies.len(), 1);
-        assert!(cfg.policies[0]
-            .watch
-            .matches(&Topic::new("cost.charged")));
+        assert!(cfg.policies[0].watch.matches(&Topic::new("cost.charged")));
     }
 
     #[test]

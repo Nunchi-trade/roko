@@ -186,8 +186,8 @@ mod tests {
     use super::*;
     use crate::bridge_events::CognitiveEvent;
     use crate::types::{
-        ContentBlock, McpInitStatus, McpServerStatus, PlanEntry, PlanStatus, Priority,
-        StopReason, ToolCallKind, ToolCallStatus, UsageInfo,
+        ContentBlock, McpInitStatus, McpServerStatus, PlanEntry, PlanStatus, Priority, StopReason,
+        ToolCallKind, ToolCallStatus, UsageInfo,
     };
     use roko_core::runtime_event::{RuntimeEvent, WorkflowOutcome};
 
@@ -360,12 +360,16 @@ mod tests {
         };
         let mapped = fwd.map_event(&event).expect("should map");
         match mapped {
-            RuntimeEvent::FeedbackRecorded {
-                kind, summary, ..
-            } => {
+            RuntimeEvent::FeedbackRecorded { kind, summary, .. } => {
                 assert_eq!(kind, "acp_plan_update");
-                assert!(summary.contains("step one"), "summary should contain entry text");
-                assert!(summary.contains("step two"), "summary should contain both entries");
+                assert!(
+                    summary.contains("step one"),
+                    "summary should contain entry text"
+                );
+                assert!(
+                    summary.contains("step two"),
+                    "summary should contain both entries"
+                );
             }
             other => panic!("expected FeedbackRecorded, got {other:?}"),
         }
@@ -561,7 +565,10 @@ mod tests {
     #[test]
     fn stop_reason_label_covers_all_variants() {
         assert_eq!(stop_reason_label(&StopReason::EndTurn), "end turn");
-        assert_eq!(stop_reason_label(&StopReason::MaxTokens), "max tokens reached");
+        assert_eq!(
+            stop_reason_label(&StopReason::MaxTokens),
+            "max tokens reached"
+        );
         assert_eq!(
             stop_reason_label(&StopReason::MaxTurnRequests),
             "max turn requests reached"

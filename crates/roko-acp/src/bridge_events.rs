@@ -494,7 +494,11 @@ fn maybe_spawn_dream_consolidation(workdir: &Path, config: &RokoConfig) {
         idle_threshold_mins: 0,
         min_episodes_for_dream: 1,
         agent: roko_dreams::DreamAgentConfig {
-            command: config.agent.command.clone().unwrap_or_else(|| "claude".into()),
+            command: config
+                .agent
+                .command
+                .clone()
+                .unwrap_or_else(|| "claude".into()),
             args: Vec::new(),
             model: Some(config.agent.default_model.clone()),
             bare_mode: true,
@@ -570,10 +574,7 @@ fn emit_acp_efficiency_event(
         ..AgentEfficiencyEvent::default()
     };
 
-    let path = workdir
-        .join(".roko")
-        .join("learn")
-        .join("efficiency.jsonl");
+    let path = workdir.join(".roko").join("learn").join("efficiency.jsonl");
 
     task::spawn_blocking(move || {
         if let Some(parent) = path.parent() {
@@ -3719,9 +3720,7 @@ fn format_acp_error_for_user(error: &str) -> String {
 
     // Rate limiting (HTTP 429 or explicit rate_limit error code).
     if error.contains("rate_limit") || error.contains("429") {
-        return format!(
-            "Rate limited. Waiting 30s before retry...\n\n(Original error: {error})"
-        );
+        return format!("Rate limited. Waiting 30s before retry...\n\n(Original error: {error})");
     }
 
     // Context length exceeded.

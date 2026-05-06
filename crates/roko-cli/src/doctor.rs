@@ -1107,9 +1107,11 @@ mod tests {
             "v2 abstractions check should pass: {:?}",
             check.detail
         );
-        assert!(check
-            .message
-            .contains("phase 1 protocol abstractions are reachable"));
+        assert!(
+            check
+                .message
+                .contains("phase 1 protocol abstractions are reachable")
+        );
     }
 
     #[tokio::test]
