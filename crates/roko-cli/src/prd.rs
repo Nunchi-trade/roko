@@ -1438,11 +1438,13 @@ async fn generate_plan_from_prd_with_outcome(
                 None,
             )
             .await;
+            eprintln!("--- Raw model output (first 2000 chars) ---");
+            eprintln!("{}", &output[..output.len().min(2000)]);
+            eprintln!("--- End raw model output ---");
             return Err(anyhow!(
                 "Plan generation failed after retries: no valid tasks.toml was produced.\n\
                  Last error: {final_err}\n\
                  The agent output ({} bytes) did not contain a parseable ```toml block.\n\
-                 Output preview:\n---\n{preview}\n---\n\
                  hint: Try again, or create plans/{slug}/tasks.toml manually.{toml_hint}",
                 output.len()
             ));
