@@ -326,6 +326,30 @@ pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
         }
     }
 
+    // 4. Builtin model registry — well-known models that work without TOML config.
+    if let Some(builtin) = crate::config::model_registry::builtin_model(model_key) {
+        let profile = ModelProfile {
+            provider: builtin.provider_kind.label().to_owned(),
+            slug: builtin.slug.to_owned(),
+            context_window: builtin.context_window,
+            max_output: Some(builtin.max_output),
+            supports_tools: builtin.supports_tools,
+            supports_thinking: builtin.supports_thinking,
+            supports_vision: builtin.supports_vision,
+            ..ModelProfile::default()
+        };
+        let provider_config = config.providers.get(builtin.provider_kind.label()).cloned();
+        let backend = builtin.provider_kind.to_backend();
+        return ResolvedModel {
+            model_key: model_key.to_owned(),
+            slug: builtin.slug.to_owned(),
+            provider_kind: builtin.provider_kind,
+            provider_config,
+            profile: Some(profile),
+            backend,
+        };
+    }
+
     // Unconfigured slug — heuristic fallback. This path fires when a model
     // key is not in config and must not be silently accepted in dispatch paths.
     #[allow(deprecated)]
