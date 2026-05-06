@@ -29,6 +29,7 @@ roko-learn = { path = "../roko-learn" }
 roko-dreams = { path = "../roko-dreams" }
 roko-neuro = { path = "../roko-neuro" }
 roko-std = { path = "../roko-std" }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
