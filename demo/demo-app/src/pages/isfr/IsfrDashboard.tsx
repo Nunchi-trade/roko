@@ -124,7 +124,7 @@ export default function IsfrDashboard() {
 
   const compositeBps = currentRate?.compositeBps ?? 0;
   const confidencePct = (currentRate?.confidenceBps ?? 0) / 100;
-  const sourceCount = currentRate?.sourceCount ?? 0;
+  const sourceCount = sources.length || (currentRate?.sourceCount ?? 0);
   const liveCount = sources.filter((s) => s.health === 'live').length;
 
   const delta = useMemo(() => {

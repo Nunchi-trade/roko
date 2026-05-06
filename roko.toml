@@ -1076,35 +1076,35 @@ outlier_sigma = 3.0
 
 [[isfr.sources]]
 name = "aave-v3-usdc"
-kind = "aave_v3"
+kind = "mock"
 weight = 0.30
 class = "lending"
-rpc_url = "http://127.0.0.1:8545"
-pool_address = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+rate_bps = 620
+jitter_bps = 15
 
 [[isfr.sources]]
 name = "compound-v3-usdc"
-kind = "compound_v3"
+kind = "mock"
 weight = 0.25
 class = "lending"
-rpc_url = "http://127.0.0.1:8545"
-pool_address = "0xc3d688B66703497DAA19211EEdff47f25384cdc3"
+rate_bps = 540
+jitter_bps = 12
 
 [[isfr.sources]]
 name = "ethena-susde"
-kind = "ethena"
+kind = "mock"
 weight = 0.25
 class = "structured"
-rpc_url = "http://127.0.0.1:8545"
-pool_address = "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
+rate_bps = 850
+jitter_bps = 30
 
 [[isfr.sources]]
 name = "lido-steth"
-kind = "eth_staking"
+kind = "mock"
 weight = 0.20
 class = "staking"
-rpc_url = "http://127.0.0.1:8545"
-pool_address = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+rate_bps = 350
+jitter_bps = 8
 
 [relay]
 url = "ws://127.0.0.1:9011/relay/agents/ws"
