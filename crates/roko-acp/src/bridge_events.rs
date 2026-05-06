@@ -2978,7 +2978,7 @@ async fn run_slash_command(
         // ── Research (foraging phase) ──
         "research" => {
             require_args!("research", "<topic>");
-            vec!["research".into(), "topic".into(), args.into()]
+            vec!["research".into(), "topic".into(), "--model".into(), model_key.clone(), args.into()]
         }
         "search" => {
             require_args!("search", "<query>");
@@ -2986,7 +2986,7 @@ async fn run_slash_command(
         }
         "enhance-prd" => {
             require_args!("enhance-prd", "<slug>");
-            vec!["research".into(), "enhance-prd".into(), args.into()]
+            vec!["research".into(), "enhance-prd".into(), "--model".into(), model_key.clone(), args.into()]
         }
 
         // ── Specification (PRD lifecycle) ──
@@ -2996,13 +2996,13 @@ async fn run_slash_command(
         }
         "prd-draft" => {
             require_args!("prd-draft", "<slug>");
-            vec!["prd".into(), "draft".into(), "new".into(), args.into()]
+            vec!["prd".into(), "draft".into(), "new".into(), "--model".into(), model_key.clone(), args.into()]
         }
         "prd-list" => vec!["prd".into(), "list".into()],
         "prd-status" => vec!["prd".into(), "status".into()],
         "prd-plan" => {
             require_args!("prd-plan", "<slug>");
-            vec!["prd".into(), "plan".into(), args.into()]
+            vec!["prd".into(), "plan".into(), "--model".into(), model_key.clone(), args.into()]
         }
         "prd-consolidate" => vec!["prd".into(), "consolidate".into()],
 
@@ -3010,7 +3010,11 @@ async fn run_slash_command(
         "plan-list" => vec!["plan".into(), "list".into()],
         "plan-generate" => {
             require_args!("plan-generate", "<description>");
-            vec!["plan".into(), "generate".into(), args.into()]
+            vec!["plan".into(), "generate".into(), "--model".into(), model_key.clone(), args.into()]
+        }
+        "plan-regenerate" => {
+            require_args!("plan-regenerate", "<description>");
+            vec!["plan".into(), "regenerate".into(), "--model".into(), model_key.clone(), args.into()]
         }
         "plan-validate" => {
             let dir = if args.is_empty() { "plans/" } else { args };
@@ -3024,12 +3028,12 @@ async fn run_slash_command(
         // ── Implementation & Execution ──
         "run" => {
             require_args!("run", "<prompt>");
-            vec!["run".into(), args.into()]
+            vec!["run".into(), "--model".into(), model_key.clone(), args.into()]
         }
         "agents" => vec!["agent".into(), "list".into()],
         "agent-chat" => {
             require_args!("agent-chat", "<agent name>");
-            vec!["agent".into(), "chat".into(), "--agent".into(), args.into()]
+            vec!["agent".into(), "chat".into(), "--agent".into(), args.into(), "--model".into(), model_key.clone()]
         }
 
         // ── Verification & Gates ──
