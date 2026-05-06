@@ -3929,49 +3929,50 @@ Available commands (organized by Will's core loop):
         }
     };
 
-    // Stream stdout line-by-line.
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let mut reader = tokio::io::BufReader::new(stdout);
-    let mut line = String::new();
+    // Interleave stdout and stderr reading.
+    let mut stdout_lines =
+        tokio::io::BufReader::new(child.stdout.take().expect("stdout was piped")).lines();
+    let mut stderr_lines =
+        tokio::io::BufReader::new(child.stderr.take().expect("stderr was piped")).lines();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
     let mut output = String::new();
 
     loop {
-        if cancel_token.is_cancelled() {
-            let _ = child.kill().await;
-            return Ok(());
+        if stdout_done && stderr_done {
+            break;
         }
-        line.clear();
-        let read = tokio::select! {
+        tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
                 return Ok(());
             }
-            r = reader.read_line(&mut line) => r,
-        };
-        match read {
-            Ok(0) => break,
-            Ok(_) => output.push_str(&line),
-            Err(e) => {
-                warn!(session_id, error = %e, "error reading slash command output");
-                break;
+            line = stdout_lines.next_line(), if !stdout_done => {
+                match line {
+                    Ok(Some(l)) => {
+                        output.push_str(&l);
+                        output.push('\n');
+                    }
+                    Ok(None) => stdout_done = true,
+                    Err(e) => {
+                        warn!(session_id, error = %e, "error reading slash command stdout");
+                        stdout_done = true;
+                    }
+                }
             }
-        }
-    }
-
-    // Also capture stderr.
-    if let Some(stderr) = child.stderr.take() {
-        let mut stderr_buf = String::new();
-        let mut stderr_reader = tokio::io::BufReader::new(stderr);
-        while let Ok(n) = stderr_reader.read_line(&mut stderr_buf).await {
-            if n == 0 {
-                break;
+            line = stderr_lines.next_line(), if !stderr_done => {
+                match line {
+                    Ok(Some(l)) => {
+                        output.push_str(&format!("\x1b[2m{}\x1b[0m\n", l));
+                    }
+                    Ok(None) => stderr_done = true,
+                    Err(e) => {
+                        warn!(session_id, error = %e, "error reading slash command stderr");
+                        stderr_done = true;
+                    }
+                }
             }
-        }
-        let stderr_trimmed = stderr_buf.trim();
-        if !stderr_trimmed.is_empty() {
-            output.push_str("\n--- stderr ---\n");
-            output.push_str(stderr_trimmed);
         }
     }
 
@@ -4028,52 +4029,55 @@ async fn run_shell_command(
         }
     };
 
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let mut reader = tokio::io::BufReader::new(stdout);
-    let mut line = String::new();
+    // Interleave stdout and stderr reading.
+    let mut stdout_lines =
+        tokio::io::BufReader::new(child.stdout.take().expect("stdout was piped")).lines();
+    let mut stderr_lines =
+        tokio::io::BufReader::new(child.stderr.take().expect("stderr was piped")).lines();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
     let mut had_output = false;
 
     loop {
-        line.clear();
-        let read = tokio::select! {
+        if stdout_done && stderr_done {
+            break;
+        }
+        tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
                 return Ok(());
             }
-            r = reader.read_line(&mut line) => r,
-        };
-        match read {
-            Ok(0) => break,
-            Ok(_) => {
-                had_output = true;
-                let _ = event_sender
-                    .send(CognitiveEvent::TokenChunk(line.clone()))
-                    .await;
+            line = stdout_lines.next_line(), if !stdout_done => {
+                match line {
+                    Ok(Some(l)) => {
+                        had_output = true;
+                        let _ = event_sender
+                            .send(CognitiveEvent::TokenChunk(format!("{l}\n")))
+                            .await;
+                    }
+                    Ok(None) => stdout_done = true,
+                    Err(e) => {
+                        warn!(session_id, error = %e, "error reading shell command stdout");
+                        stdout_done = true;
+                    }
+                }
             }
-            Err(e) => {
-                warn!(session_id, error = %e, "error reading shell command output");
-                break;
+            line = stderr_lines.next_line(), if !stderr_done => {
+                match line {
+                    Ok(Some(l)) => {
+                        had_output = true;
+                        let _ = event_sender
+                            .send(CognitiveEvent::TokenChunk(format!("\x1b[2m{l}\x1b[0m\n")))
+                            .await;
+                    }
+                    Ok(None) => stderr_done = true,
+                    Err(e) => {
+                        warn!(session_id, error = %e, "error reading shell command stderr");
+                        stderr_done = true;
+                    }
+                }
             }
-        }
-    }
-
-    if let Some(stderr) = child.stderr.take() {
-        let mut stderr_buf = String::new();
-        let mut stderr_reader = tokio::io::BufReader::new(stderr);
-        while let Ok(n) = stderr_reader.read_line(&mut stderr_buf).await {
-            if n == 0 {
-                break;
-            }
-        }
-        let stderr_trimmed = stderr_buf.trim();
-        if !stderr_trimmed.is_empty() {
-            let _ = event_sender
-                .send(CognitiveEvent::TokenChunk(format!(
-                    "\n--- stderr ---\n{stderr_trimmed}"
-                )))
-                .await;
-            had_output = true;
         }
     }
 
