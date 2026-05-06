@@ -44,6 +44,7 @@ use roko_dreams::{load_dream_routing_advice, relevant_pattern_summaries};
 use roko_learn::{
     cascade_router::CascadeRouter,
     cost_table::CostTable,
+    efficiency::AgentEfficiencyEvent,
     episode_logger::{Episode, EpisodeLogger, Usage as EpUsage},
     model_router::RoutingContext,
     playbook::Playbook,
@@ -434,6 +435,95 @@ async fn append_acp_episode(
     let distill_caller: Arc<dyn roko_core::foundation::ModelCaller> =
         Arc::new(ModelCallService::new(distill_model).with_config(roko_config.clone()));
     roko_neuro::spawn_episode_distillation(distill_workdir, episode, Some(distill_caller));
+}
+
+/// Emit an [`AgentEfficiencyEvent`] to `.roko/learn/efficiency.jsonl`.
+///
+/// This is fire-and-forget: the write is spawned on a blocking thread so it
+/// never delays the response stream, and failures are logged but swallowed.
+fn emit_acp_efficiency_event(
+    workdir: &Path,
+    session_id: &str,
+    resolved: &ResolvedModel,
+    dispatch_started: Instant,
+    stream_result: Option<&StreamResult>,
+    succeeded: bool,
+    cost_override: Option<f64>,
+) {
+    let elapsed_ms = dispatch_started.elapsed().as_millis() as u64;
+    let usage = stream_result.and_then(|sr| sr.usage.as_ref());
+
+    let input_tokens = usage.map_or(0, |u| u.input_tokens);
+    let output_tokens = usage.map_or(0, |u| u.output_tokens);
+    let cached_read = usage.and_then(|u| u.cached_read_tokens).unwrap_or(0);
+    let cached_write = usage.and_then(|u| u.cached_write_tokens).unwrap_or(0);
+
+    let cost_usd = cost_override.unwrap_or_else(|| {
+        calculate_cost_for_model_slug(&resolved.slug, input_tokens, output_tokens, cached_read)
+            .unwrap_or(0.0)
+    });
+    let cost_usd_without_cache = cost_override.unwrap_or_else(|| {
+        calculate_cost_without_cache_for_model_slug(
+            &resolved.slug,
+            input_tokens,
+            output_tokens,
+            cached_read,
+        )
+        .unwrap_or(cost_usd)
+    });
+
+    let outcome = if succeeded { "success" } else { "failure" }.to_string();
+
+    let event = AgentEfficiencyEvent {
+        agent_id: session_id.to_string(),
+        backend: resolved.provider_kind.label().to_string(),
+        model: resolved.slug.clone(),
+        model_used: resolved.slug.clone(),
+        input_tokens,
+        output_tokens,
+        cache_read_tokens: cached_read,
+        cache_write_tokens: cached_write,
+        cost_usd,
+        cost_usd_without_cache,
+        wall_time_ms: elapsed_ms,
+        duration_ms: elapsed_ms,
+        outcome,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        ..AgentEfficiencyEvent::default()
+    };
+
+    let path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("efficiency.jsonl");
+
+    task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let line = match serde_json::to_string(&event) {
+            Ok(json) => json,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to serialize efficiency event");
+                return;
+            }
+        };
+        use std::io::Write;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path);
+        match file {
+            Ok(mut f) => {
+                if let Err(err) = writeln!(f, "{line}") {
+                    tracing::warn!(error = %err, "failed to write efficiency event");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to open efficiency.jsonl");
+            }
+        }
+    });
 }
 
 fn acp_routing_context(mode: &str, prompt: &str, effort: &str) -> RoutingContext {
@@ -1412,6 +1502,16 @@ where
             cost_override,
         )
         .await;
+
+        emit_acp_efficiency_event(
+            &workdir_for_logging,
+            &session.session_id,
+            &resolved_for_logging,
+            dispatch_started,
+            stream_result.as_ref().ok(),
+            task_error.is_none() && stream_error.is_none(),
+            cost_override,
+        );
 
         let stream_result_ref = stream_result.as_ref().ok();
         let dispatch_succeeded = acp_dispatch_succeeded(
