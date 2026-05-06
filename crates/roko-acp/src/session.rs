@@ -296,6 +296,13 @@ pub struct AcpSession {
     /// Loaded from workspace trust at session creation; updated on "always allow" decisions.
     #[serde(skip, default)]
     pub always_allowed: HashSet<crate::types::PermissionAction>,
+    /// Whether builtin tool definitions are sent to the model.
+    #[serde(default = "default_true")]
+    pub tools_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl AcpSession {
@@ -320,6 +327,7 @@ impl AcpSession {
             shared_run: new_shared_run(),
             cached_conventions: None,
             always_allowed: HashSet::new(),
+            tools_enabled: true,
         }
     }
 
@@ -365,6 +373,7 @@ impl AcpSession {
             shared_run: new_shared_run(),
             cached_conventions: None,
             always_allowed: HashSet::new(),
+            tools_enabled: true,
         }
     }
 
@@ -1201,7 +1210,7 @@ fn build_config_options(
 
     // If at least one model is available, show only available ones;
     // otherwise keep all (marked unavailable) so the dropdown isn't empty.
-    let mut model_options = if available_model_options.is_empty() {
+    let model_options = if available_model_options.is_empty() {
         all_model_options
     } else {
         available_model_options
