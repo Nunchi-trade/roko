@@ -3795,7 +3795,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_capture_episode_records_memory_episode() {
+    async fn persist_capture_episode_records_learning_episode() {
         let dir = tempdir().unwrap();
         let workdir = dir.path();
 
@@ -3814,7 +3814,7 @@ mod tests {
         .await
         .unwrap();
 
-        let episodes_path = workdir.join(".roko").join("memory").join("episodes.jsonl");
+        let episodes_path = workdir.join(".roko").join("learn").join("episodes.jsonl");
         let episodes = EpisodeLogger::read_all_lossy(&episodes_path).await.unwrap();
         assert_eq!(episodes.len(), 1);
 
