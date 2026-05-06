@@ -187,6 +187,8 @@ export default function IntegrityView() {
   const [gateHistory, setGateHistory] = useState<GateRun[]>([]);
   const [latestHash, setLatestHash] = useState('');
   const [typedHash, setTypedHash] = useState('');
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -206,8 +208,11 @@ export default function IntegrityView() {
       if (Array.isArray(gates)) setGateHistory(gates);
       const latest = Array.isArray(eps) ? eps[0] : null;
       setLatestHash(latest ? await sha256Hex(JSON.stringify(latest)) : '');
-    } catch {
-      /* keep previous */
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load integrity data');
+    } finally {
+      setInitialLoading(false);
     }
   }, [get]);
 
@@ -257,17 +262,35 @@ export default function IntegrityView() {
     };
   }, [latestHash]);
 
+  if (initialLoading) {
+    return (
+      <div className="dash-page progressive-reveal">
+        <div className="skeleton" style={{ height: 32, borderRadius: 6 }} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+        </div>
+      </div>
+    );
+  }
+
   const gateTotal = gatesPassed + gatesFailed;
   const passRate = gateTotal > 0 ? (gatesPassed / gateTotal) * 100 : 0;
 
   return (
-    <div className="dash-page--wide">
+    <div className="dash-page--wide" style={{ animation: 'fadeInUp 0.35s var(--ease) both' }}>
       <style>{`
         @keyframes blink-cursor {
           0%, 100% { opacity: 1; }
           50% { opacity: 0; }
         }
       `}</style>
+
+      {error && (
+        <div style={{ padding: '8px 12px', background: 'var(--rose-deep)', border: '1px solid var(--rose-dim)', borderRadius: 'var(--radius-md)', fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)', color: 'var(--rose-bright)', marginBottom: 8 }}>
+          {error}
+        </div>
+      )}
 
       {/* TOP MOSAIC */}
       <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>

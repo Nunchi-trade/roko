@@ -143,6 +143,8 @@ let ws = null;
 let sessionId = 'builder-1';
 let building = false;
 let tmpDir = null;
+// When true, PTY output is buffered but not rendered to xterm.
+let termMuted = false;
 
 function connectTerminal() {
   ws = new WebSocket(`${WS_BASE}/ws/terminal/${sessionId}`);
@@ -157,12 +159,12 @@ function connectTerminal() {
   ws.onmessage = (e) => {
     if (e.data instanceof ArrayBuffer) {
       const text = new TextDecoder().decode(e.data);
-      term.write(new Uint8Array(e.data));
+      if (!termMuted) term.write(new Uint8Array(e.data));
       appendOutput(text);
       detectGates(text);
       detectFiles(text);
     } else {
-      term.write(e.data);
+      if (!termMuted) term.write(e.data);
       appendOutput(typeof e.data === 'string' ? e.data : '');
     }
   };
@@ -225,31 +227,36 @@ async function runCmd(cmd, timeoutMs = 60000) {
 }
 
 // Resolve the roko binary path inside the PTY shell.
+// Mutes terminal rendering and suppresses shell echo so the probe is invisible.
 async function resolveRoko() {
   if (rokoResolved) return;
+  termMuted = true;
   // Try `which roko` — if it's on PATH, use it directly.
   outputBuffer = '';
-  await typeCmd('which roko 2>/dev/null && echo __ROKO_OK__ || echo __ROKO_MISS__');
+  await typeCmd('stty -echo 2>/dev/null; which roko 2>/dev/null && echo __ROKO_OK__ || echo __ROKO_MISS__; stty echo 2>/dev/null');
   await waitForPrompt(5000);
   if (outputBuffer.includes('__ROKO_OK__')) {
     ROKO = 'roko';
     rokoResolved = true;
+    termMuted = false;
     return;
   }
   // Fall back to local builds.
   for (const p of ['./target/release/roko', './target/debug/roko']) {
     outputBuffer = '';
-    await typeCmd(`test -x ${p} && echo __ROKO_OK__ || echo __ROKO_MISS__`);
+    await typeCmd(`stty -echo 2>/dev/null; test -x ${p} && echo __ROKO_OK__ || echo __ROKO_MISS__; stty echo 2>/dev/null`);
     await waitForPrompt(3000);
     if (outputBuffer.includes('__ROKO_OK__')) {
       ROKO = p;
       rokoResolved = true;
+      termMuted = false;
       return;
     }
   }
   // Last resort
   ROKO = 'roko';
   rokoResolved = true;
+  termMuted = false;
 }
 
 function submitFromInput() {

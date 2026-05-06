@@ -1,0 +1,6 @@
+[
+  {"type":"function","name":"register","inputs":[{"name":"worker","type":"address"},{"name":"stake","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
+  {"type":"function","name":"isRegistered","inputs":[{"name":"worker","type":"address"}],"outputs":[{"name":"","type":"bool"}],"stateMutability":"view"},
+  {"type":"function","name":"workerCount","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
+  {"type":"event","name":"WorkerRegistered","inputs":[{"name":"worker","type":"address","indexed":true}]}
+]

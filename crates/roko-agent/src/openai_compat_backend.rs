@@ -84,6 +84,8 @@ pub struct OpenAiCompatLlmBackend {
     provider_kind: ProviderKind,
     /// Environment variable name holding the API key (for error messages).
     api_key_env: Option<String>,
+    /// Optional metric registry for emitting TTFT and request duration histograms.
+    metrics: Option<Arc<roko_core::obs::metrics::MetricRegistry>>,
 }
 
 impl OpenAiCompatLlmBackend {
@@ -112,7 +114,18 @@ impl OpenAiCompatLlmBackend {
             use_max_completion_tokens: false,
             provider_kind: ProviderKind::OpenAiCompat,
             api_key_env: None,
+            metrics: None,
         }
+    }
+
+    /// Attach a metric registry for emitting TTFT and request duration histograms.
+    #[must_use]
+    pub fn with_metrics(
+        mut self,
+        registry: Arc<roko_core::obs::metrics::MetricRegistry>,
+    ) -> Self {
+        self.metrics = Some(registry);
+        self
     }
 
     /// Override the provider identifier used for request throttling.
@@ -450,6 +463,237 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             .map_err(|e| LlmError::Backend(format!("parse response: {e}")))?;
 
         Ok(BackendResponse::Json(json))
+    }
+
+    async fn stream_turn(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+        session: &SessionState,
+        config: &crate::tool_loop::TurnConfig,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<crate::tool_loop::StreamEvent, LlmError>,
+        >,
+        LlmError,
+    > {
+        use crate::tool_loop::{StreamEvent, StreamEventKind};
+
+        let body_bytes = self.build_body(messages, tools, session, true)?;
+        self.rate_limiter.acquire(&self.provider_id).await;
+
+        let mut req = crate::provider::shared_http_client()
+            .post(self.endpoint())
+            .timeout(Duration::from_millis(
+                config.request_timeout.as_millis() as u64,
+            ));
+        for (key, value) in &self.computed_headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
+
+        // Capture request start for TTFT and total duration measurement.
+        let request_start = std::time::Instant::now();
+
+        let response = req
+            .body(body_bytes)
+            .send()
+            .await
+            .map_err(|e| LlmError::Network(self.decorate_error(&e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            // Observe request duration on HTTP status error path.
+            if let Some(ref registry) = self.metrics {
+                let dur = request_start.elapsed().as_secs_f64();
+                let dur_labels = roko_core::obs::metrics::LabelSet::from_pairs(&[
+                    (roko_core::obs::schema::LABEL_PROVIDER, &self.provider_id),
+                    (roko_core::obs::schema::LABEL_MODEL, &self.model),
+                ]);
+                registry
+                    .register_histogram(
+                        roko_core::obs::schema::ROKO_LLM_REQUEST_DURATION_SECONDS,
+                        "LLM total request duration in seconds",
+                        dur_labels,
+                        roko_core::obs::histograms::LLM_LATENCY_BUCKETS.to_vec(),
+                    )
+                    .observe(dur);
+            }
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("read error body failed: {e}"));
+            let raw_err = crate::http::HttpPostError::http(status.as_u16(), text);
+            return Err(LlmError::Network(self.decorate_error(&raw_err)));
+        }
+
+        // Build the stream: spawn a task that reads HTTP chunks, parses SSE
+        // lines, and sends StreamEvent values through a channel.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, LlmError>>(256);
+        let ttft_timeout_ms = self.ttft_timeout_ms.unwrap_or(config.ttft_timeout.as_millis() as u64);
+        let endpoint = self.endpoint();
+        let metrics_registry = self.metrics.clone();
+        let metrics_provider = self.provider_id.clone();
+        let metrics_model = self.model.clone();
+
+        tokio::spawn(async move {
+            let mut response = response;
+            let mut pending = Vec::new();
+            let mut first_chunk = true;
+            let mut sent_done = false;
+            let mut ttft_recorded = false;
+
+            loop {
+                let chunk_fut = response.chunk();
+                let chunk = if first_chunk {
+                    first_chunk = false;
+                    match tokio::time::timeout(
+                        Duration::from_millis(ttft_timeout_ms),
+                        chunk_fut,
+                    )
+                    .await
+                    {
+                        Ok(inner) => inner,
+                        Err(_) => {
+                            let message = format!(
+                                "TTFT timeout: no streaming data within {ttft_timeout_ms}ms"
+                            );
+                            tracing::warn!(
+                                endpoint = %endpoint,
+                                ttft_timeout_ms,
+                                "TTFT timeout -- no first chunk within deadline"
+                            );
+                            // Observe request duration on TTFT timeout path.
+                            if let Some(ref registry) = metrics_registry {
+                                let dur = request_start.elapsed().as_secs_f64();
+                                let dur_labels = roko_core::obs::metrics::LabelSet::from_pairs(&[
+                                    (roko_core::obs::schema::LABEL_PROVIDER, metrics_provider.as_str()),
+                                    (roko_core::obs::schema::LABEL_MODEL, metrics_model.as_str()),
+                                ]);
+                                registry
+                                    .register_histogram(
+                                        roko_core::obs::schema::ROKO_LLM_REQUEST_DURATION_SECONDS,
+                                        "LLM total request duration in seconds",
+                                        dur_labels,
+                                        roko_core::obs::histograms::LLM_LATENCY_BUCKETS.to_vec(),
+                                    )
+                                    .observe(dur);
+                            }
+                            let _ = tx
+                                .send(Err(LlmError::Timeout(message)))
+                                .await;
+                            return;
+                        }
+                    }
+                } else {
+                    chunk_fut.await
+                };
+
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(LlmError::Network(format!("read chunk failed: {e}"))))
+                            .await;
+                        return;
+                    }
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
+
+                pending.extend_from_slice(&chunk);
+                while let Some(newline_idx) = pending.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=newline_idx).collect();
+                    let line_str = String::from_utf8_lossy(&line);
+                    let line_str = line_str.trim_end_matches(['\r', '\n']);
+
+                    if let Some(stream_chunk) = parse_sse_line(line_str) {
+                        let event: StreamEvent = stream_chunk.into();
+                        // Record TTFT on the first non-error content/tool/reasoning chunk.
+                        if !ttft_recorded {
+                            let is_content_chunk = matches!(
+                                event.kind,
+                                StreamEventKind::TextDelta(_)
+                                    | StreamEventKind::ReasoningDelta { .. }
+                                    | StreamEventKind::ToolCallDelta { .. }
+                            );
+                            if is_content_chunk {
+                                ttft_recorded = true;
+                                if let Some(ref registry) = metrics_registry {
+                                    let ttft_secs = request_start.elapsed().as_secs_f64();
+                                    let labels = roko_core::obs::metrics::LabelSet::from_pairs(&[
+                                        (roko_core::obs::schema::LABEL_PROVIDER, metrics_provider.as_str()),
+                                        (roko_core::obs::schema::LABEL_MODEL, metrics_model.as_str()),
+                                    ]);
+                                    registry
+                                        .register_histogram(
+                                            roko_core::obs::schema::ROKO_LLM_TTFT_SECONDS,
+                                            "LLM time-to-first-token in seconds",
+                                            labels,
+                                            roko_core::obs::histograms::LLM_LATENCY_BUCKETS.to_vec(),
+                                        )
+                                        .observe(ttft_secs);
+                                }
+                            }
+                        }
+                        if matches!(event.kind, StreamEventKind::Done { .. }) {
+                            sent_done = true;
+                        }
+                        if tx.send(Ok(event)).await.is_err() {
+                            return; // consumer dropped
+                        }
+                    }
+                }
+            }
+
+            // Observe total request duration on stream completion.
+            if let Some(ref registry) = metrics_registry {
+                let dur = request_start.elapsed().as_secs_f64();
+                let dur_labels = roko_core::obs::metrics::LabelSet::from_pairs(&[
+                    (roko_core::obs::schema::LABEL_PROVIDER, metrics_provider.as_str()),
+                    (roko_core::obs::schema::LABEL_MODEL, metrics_model.as_str()),
+                ]);
+                registry
+                    .register_histogram(
+                        roko_core::obs::schema::ROKO_LLM_REQUEST_DURATION_SECONDS,
+                        "LLM total request duration in seconds",
+                        dur_labels,
+                        roko_core::obs::histograms::LLM_LATENCY_BUCKETS.to_vec(),
+                    )
+                    .observe(dur);
+            }
+
+            // Flush remaining buffer.
+            if !pending.is_empty() {
+                let line_str = String::from_utf8_lossy(&pending);
+                let line_str = line_str.trim_end_matches(['\r', '\n']);
+                if let Some(stream_chunk) = parse_sse_line(line_str) {
+                    let event: StreamEvent = stream_chunk.into();
+                    if matches!(event.kind, StreamEventKind::Done { .. }) {
+                        sent_done = true;
+                    }
+                    let _ = tx.send(Ok(event)).await;
+                }
+            }
+
+            // Ensure a Done event is always emitted, but avoid duplicates
+            // when the SSE stream already contained `data: [DONE]`.
+            if !sent_done {
+                let _ = tx
+                    .send(Ok(StreamEvent::now(StreamEventKind::Done {
+                        finish_reason: "stop".to_string(),
+                    })))
+                    .await;
+            }
+        });
+
+        // Convert tokio mpsc::Receiver into a futures::Stream without
+        // requiring the tokio-stream crate.
+        let stream = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+        Ok(Box::pin(stream))
     }
 
     async fn send_turn_streaming(

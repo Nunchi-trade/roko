@@ -1,0 +1,9 @@
+[
+  {"type":"function","name":"getCurrentRate","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
+  {"type":"function","name":"submitRate","inputs":[{"name":"compositeBps","type":"uint256"},{"name":"lendingBps","type":"uint256"},{"name":"structuredBps","type":"uint256"},{"name":"fundingBps","type":"uint256"},{"name":"stakingBps","type":"uint256"},{"name":"confidenceBps","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
+  {"type":"function","name":"submitRateForRange","inputs":[{"name":"rangeStart","type":"uint256"},{"name":"rangeEnd","type":"uint256"},{"name":"compositeBps","type":"uint256"},{"name":"components","type":"uint256[4]"},{"name":"confidenceBps","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
+  {"type":"function","name":"currentEpoch","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
+  {"type":"function","name":"getRateHistory","inputs":[{"name":"epoch","type":"uint256"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
+  {"type":"event","name":"RateSubmitted","inputs":[{"name":"keeper","type":"address","indexed":true},{"name":"epoch","type":"uint256","indexed":false},{"name":"compositeBps","type":"uint256","indexed":false}]},
+  {"type":"event","name":"RangeClosed","inputs":[{"name":"rangeStart","type":"uint256","indexed":false},{"name":"rangeEnd","type":"uint256","indexed":false},{"name":"compositeBps","type":"uint256","indexed":false}]}
+]

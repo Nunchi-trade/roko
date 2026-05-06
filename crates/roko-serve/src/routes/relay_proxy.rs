@@ -30,14 +30,31 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/relay", any(relay_root_proxy))
 }
 
-/// Return 503 when the agent relay is not configured.
+/// Return the relay HTTP base URL (scheme + authority only), or 503 when not configured.
 fn require_relay(state: &AppState) -> Result<String, ApiError> {
-    state.agent_relay_url.clone().ok_or_else(|| ApiError {
+    let raw = state.agent_relay_url.as_deref().ok_or_else(|| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: "agent_relay_not_configured".into(),
         message: "ROKO_AGENT_RELAY_URL not set — relay proxy unavailable".into(),
         details: None,
-    })
+    })?;
+    // Normalise: strip any path, convert ws(s) to http(s).
+    Ok(normalize_relay_base(raw))
+}
+
+/// Extract `http(s)://host:port` from any relay URL variant.
+fn normalize_relay_base(raw: &str) -> String {
+    let s = raw
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
+    // Keep only scheme + authority (strip path).
+    if let Some(idx) = s.find("://") {
+        let after_scheme = &s[idx + 3..];
+        if let Some(slash) = after_scheme.find('/') {
+            return s[..idx + 3 + slash].to_string();
+        }
+    }
+    s
 }
 
 /// `GET /relay/agents/ws` — proxy agent WebSocket.

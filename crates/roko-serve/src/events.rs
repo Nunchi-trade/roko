@@ -382,6 +382,42 @@ pub enum ServerEvent {
         block_number: Option<u64>,
     },
 
+    /// New ISFR composite rate computed by the keeper.
+    IsfrRateComputed {
+        /// Overall composite rate in basis points.
+        composite_bps: u64,
+        /// Lending-class weighted median in basis points.
+        lending_bps: u64,
+        /// Structured-product weighted median in basis points.
+        structured_bps: u64,
+        /// Funding-rate weighted median in basis points.
+        funding_bps: u64,
+        /// Staking-rate weighted median in basis points.
+        staking_bps: u64,
+        /// Confidence score (0–10000, where 10000 = 100% of sources live).
+        confidence_bps: u64,
+        /// Number of source readings that contributed to this composite.
+        source_count: usize,
+        /// Unix millisecond timestamp when this composite was computed.
+        timestamp_ms: i64,
+    },
+
+    /// ISFR source health status changed.
+    IsfrSourceHealthChanged {
+        /// Unique source identifier.
+        source_id: String,
+        /// Health status string: "live", "stale", or "offline".
+        health: String,
+        /// Most recent rate from this source in basis points, if available.
+        last_rate_bps: Option<u64>,
+    },
+
+    /// ISFR keeper started or stopped.
+    IsfrKeeperStateChanged {
+        /// Whether the keeper is now running.
+        running: bool,
+    },
+
     /// The server is shutting down.
     ServerShutdown,
 
@@ -484,6 +520,14 @@ pub enum ServerEvent {
         summary: serde_json::Value,
     },
 
+    /// A bench regression report was produced after a run completed.
+    #[serde(rename = "BenchRegressionReport")]
+    BenchRegressionReport {
+        bench_id: String,
+        has_regressions: bool,
+        report: serde_json::Value,
+    },
+
     /// A matrix (multi-lane) bench run was started.
     #[serde(rename = "MatrixRunStarted")]
     MatrixRunStarted {
@@ -571,6 +615,59 @@ pub enum ServerEvent {
         total: u32,
         pass_rate: f64,
     },
+
+    /// New block observed on the connected chain.
+    ChainBlock {
+        number: u64,
+        hash: String,
+        parent_hash: String,
+        timestamp: u64,
+        gas_used: u64,
+        gas_limit: u64,
+        tx_count: u32,
+        base_fee_per_gas: Option<u64>,
+    },
+
+    /// Transaction included in a block.
+    ChainTx {
+        block_number: u64,
+        tx_hash: String,
+        from: String,
+        to: Option<String>,
+        value_wei: String,
+        gas_used: u64,
+        method_sig: Option<String>,
+        success: bool,
+    },
+
+    /// Decoded contract event log.
+    ChainContractEvent {
+        block_number: u64,
+        tx_hash: String,
+        log_index: u32,
+        contract: String,
+        event_name: String,
+        decoded: serde_json::Value,
+    },
+
+    /// A feed agent published new data.
+    FeedTick {
+        agent_id: String,
+        feed_id: String,
+        topic: String,
+        payload: serde_json::Value,
+        timestamp_ms: i64,
+    },
+
+    /// A feed agent came online.
+    FeedAgentOnline {
+        agent_id: String,
+        name: String,
+        feed_count: usize,
+    },
+
+    /// A feed agent went offline.
+    FeedAgentOffline { agent_id: String },
 }
 
 #[cfg(test)]

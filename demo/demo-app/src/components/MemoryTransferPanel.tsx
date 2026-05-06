@@ -1,41 +1,11 @@
-import { useState, useMemo } from 'react';
-import { useEventStreamContext, useContextEventSubscription } from '../contexts/EventStreamContext';
-import { useInferenceCosts } from '../hooks/useOperationEvents';
+import { useMemo } from 'react';
+import type { RunMetrics } from './CostComparisonPanel';
 import './MemoryTransferPanel.css';
 
 interface MemoryTransferPanelProps {
-  /** Operation ID for the cold run */
-  coldOpId?: string | null;
-  /** Operation ID for the warm run */
-  warmOpId?: string | null;
+  cold: RunMetrics;
+  warm: RunMetrics;
   isRunning?: boolean;
-}
-
-interface KnowledgeEvent {
-  id: string;
-  type: 'ingested' | 'consumed';
-  topic?: string;
-  timestamp: number;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
-}
-
-function readStr(obj: Record<string, unknown>, keys: string[]): string {
-  for (const k of keys) {
-    const v = obj[k];
-    if (typeof v === 'string' && v.length > 0) return v;
-  }
-  for (const nest of ['data', 'event'] as const) {
-    const sub = obj[nest];
-    if (!isRecord(sub)) continue;
-    for (const k of keys) {
-      const v = sub[k];
-      if (typeof v === 'string' && v.length > 0) return v;
-    }
-  }
-  return '';
 }
 
 function fmtCost(n: number): string {
@@ -51,78 +21,54 @@ function fmtTokens(n: number): string {
 }
 
 export default function MemoryTransferPanel({
-  coldOpId = null,
-  warmOpId = null,
+  cold,
+  warm,
   isRunning = false,
 }: MemoryTransferPanelProps) {
-  const { connected } = useEventStreamContext();
-  const coldCosts = useInferenceCosts(coldOpId);
-  const warmCosts = useInferenceCosts(warmOpId);
-  const [knowledgeEvents, setKnowledgeEvents] = useState<KnowledgeEvent[]>([]);
-
-  useContextEventSubscription(
-    ['knowledge_ingested', 'knowledge_consumed'],
-    (event: unknown) => {
-      if (!isRecord(event)) return;
-      const type = typeof event.type === 'string' ? event.type : '';
-      const mapped: 'ingested' | 'consumed' =
-        type === 'knowledge_consumed' ? 'consumed' : 'ingested';
-      const topic = readStr(event, ['topic', 'key', 'title', 'path']);
-
-      setKnowledgeEvents((prev) => [
-        ...prev.slice(-19),
-        {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          type: mapped,
-          topic: topic || undefined,
-          timestamp: Date.now(),
-        },
-      ]);
-    },
-  );
-
-  const hasBothCosts = coldCosts.totalCost > 0 && warmCosts.totalCost > 0;
+  const hasBothCosts = cold.cost > 0 && warm.cost > 0;
   const costDelta = hasBothCosts
-    ? ((coldCosts.totalCost - warmCosts.totalCost) / coldCosts.totalCost) * 100
+    ? ((cold.cost - warm.cost) / cold.cost) * 100
     : null;
-
-  const ingestedCount = knowledgeEvents.filter((e) => e.type === 'ingested').length;
-  const consumedCount = knowledgeEvents.filter((e) => e.type === 'consumed').length;
 
   type Phase = 'cold' | 'ingest' | 'warm' | 'delta';
   const currentPhase: Phase = useMemo(() => {
-    if (warmCosts.calls > 0) return hasBothCosts ? 'delta' : 'warm';
-    if (ingestedCount > 0) return 'ingest';
-    if (coldCosts.calls > 0) return 'cold';
+    if (warm.calls > 0) return hasBothCosts ? 'delta' : 'warm';
+    if (cold.calls > 0 && cold.cost > 0) return 'ingest';
+    if (cold.calls > 0) return 'cold';
     return 'cold';
-  }, [coldCosts.calls, warmCosts.calls, ingestedCount, hasBothCosts]);
+  }, [cold.calls, cold.cost, warm.calls, hasBothCosts]);
 
   const phases: { id: Phase; label: string }[] = [
-    { id: 'cold', label: 'Cold' },
-    { id: 'ingest', label: 'Ingest' },
-    { id: 'warm', label: 'Warm' },
-    { id: 'delta', label: 'Delta' },
+    { id: 'cold', label: 'First Run' },
+    { id: 'ingest', label: 'Save Knowledge' },
+    { id: 'warm', label: 'Second Run' },
+    { id: 'delta', label: 'Compare' },
   ];
 
   const phaseOrder: Phase[] = ['cold', 'ingest', 'warm', 'delta'];
   const currentIdx = phaseOrder.indexOf(currentPhase);
 
-  const panelState = isRunning
-    ? 'running'
-    : coldCosts.calls > 0 || warmCosts.calls > 0 ? 'data' : 'pending';
+  const hasData = cold.calls > 0 || warm.calls > 0;
+  const panelState = isRunning ? 'running' : hasData ? 'data' : 'pending';
 
   return (
     <section className="memory-panel" aria-label="Memory transfer">
       <div className="memory-panel-header">
-        <span className="memory-panel-title">Knowledge Transfer</span>
-        <span className={`memory-panel-live ${connected ? 'connected' : ''}`}>
-          {panelState === 'pending' ? (connected ? 'armed' : 'offline') : 'live'}
+        <span className="memory-panel-title">Knowledge Reuse</span>
+        <span className={`memory-panel-live${hasData ? ' connected' : ''}`}>
+          {panelState === 'pending' ? 'ready' : 'live'}
         </span>
+      </div>
+
+      <div className="memory-panel-description">
+        The first agent solves a task from scratch and saves what it learned to the knowledge store.
+        The second agent tackles a similar task but starts with that knowledge — compare cost and
+        speed to see the benefit of persistent memory.
       </div>
 
       <div className="memory-panel-phases">
         {phases.map((phase, i) => {
-          const status = i < currentIdx ? 'done' : i === currentIdx && (isRunning || coldCosts.calls > 0) ? 'active' : '';
+          const status = i < currentIdx ? 'done' : i === currentIdx && (isRunning || cold.calls > 0) ? 'active' : '';
           return (
             <div key={phase.id} className={`memory-panel-phase${status ? ` memory-panel-phase--${status}` : ''}`}>
               <div className="memory-panel-phase-dot" />
@@ -134,45 +80,45 @@ export default function MemoryTransferPanel({
 
       <div className="memory-panel-columns">
         <div className="memory-panel-column memory-panel-column--cold">
-          <div className="memory-panel-column-label">Cold Run</div>
+          <div className="memory-panel-column-label">First Run (no prior knowledge)</div>
           <div className="memory-panel-metric">
             <span className="memory-panel-metric-label">Cost</span>
-            <span className={`memory-panel-metric-value${coldCosts.totalCost <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
-              {fmtCost(coldCosts.totalCost)}
+            <span className={`memory-panel-metric-value${cold.cost <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
+              {fmtCost(cold.cost)}
             </span>
           </div>
           <div className="memory-panel-metric">
             <span className="memory-panel-metric-label">Tokens</span>
-            <span className={`memory-panel-metric-value${coldCosts.totalTokens <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
-              {fmtTokens(coldCosts.totalTokens)}
+            <span className={`memory-panel-metric-value${cold.tokens <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
+              {fmtTokens(cold.tokens)}
             </span>
           </div>
           <div className="memory-panel-metric">
             <span className="memory-panel-metric-label">Calls</span>
-            <span className={`memory-panel-metric-value${coldCosts.calls <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
-              {coldCosts.calls > 0 ? String(coldCosts.calls) : '--'}
+            <span className={`memory-panel-metric-value${cold.calls <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
+              {cold.calls > 0 ? String(cold.calls) : '--'}
             </span>
           </div>
         </div>
 
         <div className="memory-panel-column memory-panel-column--warm">
-          <div className="memory-panel-column-label">Warm Run</div>
+          <div className="memory-panel-column-label">Second Run (with knowledge)</div>
           <div className="memory-panel-metric">
             <span className="memory-panel-metric-label">Cost</span>
-            <span className={`memory-panel-metric-value${warmCosts.totalCost <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
-              {fmtCost(warmCosts.totalCost)}
+            <span className={`memory-panel-metric-value${warm.cost <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
+              {fmtCost(warm.cost)}
             </span>
           </div>
           <div className="memory-panel-metric">
             <span className="memory-panel-metric-label">Tokens</span>
-            <span className={`memory-panel-metric-value${warmCosts.totalTokens <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
-              {fmtTokens(warmCosts.totalTokens)}
+            <span className={`memory-panel-metric-value${warm.tokens <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
+              {fmtTokens(warm.tokens)}
             </span>
           </div>
           <div className="memory-panel-metric">
             <span className="memory-panel-metric-label">Calls</span>
-            <span className={`memory-panel-metric-value${warmCosts.calls <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
-              {warmCosts.calls > 0 ? String(warmCosts.calls) : '--'}
+            <span className={`memory-panel-metric-value${warm.calls <= 0 ? ' memory-panel-metric-value--empty' : ''}`}>
+              {warm.calls > 0 ? String(warm.calls) : '--'}
             </span>
           </div>
         </div>
@@ -191,24 +137,6 @@ export default function MemoryTransferPanel({
             : 'run both to compare'}
         </div>
       </div>
-
-      {knowledgeEvents.length > 0 && (
-        <div className="memory-panel-knowledge">
-          <div className="memory-panel-knowledge-title">
-            Knowledge Events ({ingestedCount} ingested, {consumedCount} consumed)
-          </div>
-          {knowledgeEvents.slice(-5).reverse().map((ev) => (
-            <div key={ev.id} className="memory-panel-knowledge-row">
-              <span className={`memory-panel-knowledge-type memory-panel-knowledge-type--${ev.type}`}>
-                {ev.type}
-              </span>
-              <span className="memory-panel-knowledge-content">
-                {ev.topic || 'knowledge entry'}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
     </section>
   );
 }

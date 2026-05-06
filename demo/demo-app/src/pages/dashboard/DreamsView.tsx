@@ -40,14 +40,23 @@ export default function DreamsView() {
   const { get } = useLiveApi();
   const [journal, setJournal] = useState<DreamJournal | null>(null);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchAll = useCallback(async () => {
-    const [j, e] = await Promise.all([
-      get<DreamJournal>('/api/dream/journal').catch(() => null),
-      get<KnowledgeEntry[]>('/api/knowledge/entries').catch(() => []),
-    ]);
-    setJournal(j);
-    setEntries(Array.isArray(e) ? e : ((e as { items?: KnowledgeEntry[] }).items ?? []));
+    try {
+      const [j, e] = await Promise.all([
+        get<DreamJournal>('/api/dream/journal').catch(() => null),
+        get<KnowledgeEntry[]>('/api/knowledge/entries').catch(() => []),
+      ]);
+      setJournal(j);
+      setEntries(Array.isArray(e) ? e : ((e as { items?: KnowledgeEntry[] }).items ?? []));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load dreams data');
+    } finally {
+      setInitialLoading(false);
+    }
   }, [get]);
 
   // Initial fetch + 60s fallback poll
@@ -60,9 +69,21 @@ export default function DreamsView() {
   // SSE-triggered refetch
   const debouncedRefetch = useDebouncedRefetch(fetchAll, 2000);
   useContextEventSubscription(
-    ['dream_started', 'dream_completed', 'dream_phase_changed'],
+    ['dream_started', 'dream_completed', 'dream_phase_changed', 'knowledge_ingested', 'knowledge_consumed'],
     debouncedRefetch,
   );
+
+  if (initialLoading) {
+    return (
+      <div className="dash-page progressive-reveal">
+        <div className="skeleton" style={{ height: 32, borderRadius: 6 }} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+        </div>
+      </div>
+    );
+  }
 
   /* Derived stats */
   const totalEpisodes = journal?.phases.reduce((s, p) => s + p.episodes_processed, 0) ?? 0;
@@ -76,7 +97,12 @@ export default function DreamsView() {
   const recentEntries = entries.slice(-8).reverse();
 
   return (
-    <div className="dash-page">
+    <div className="dash-page" style={{ animation: 'fadeInUp 0.35s var(--ease) both' }}>
+      {error && (
+        <div style={{ padding: '8px 12px', background: 'var(--rose-deep)', border: '1px solid var(--rose-dim)', borderRadius: 'var(--radius-md)', fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)', color: 'var(--rose-bright)', marginBottom: 8 }}>
+          {error}
+        </div>
+      )}
       {/* TOP MOSAIC */}
       <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
         <Mosaic columns={6}>

@@ -398,6 +398,102 @@ impl SseAdapter {
                     "consuming_agent": consuming_agent,
                 }),
             ),
+            RuntimeEvent::InferenceFirstToken {
+                run_id,
+                request_id,
+                model,
+                agent_id,
+                ttft_ms,
+                ..
+            } => (
+                "inference_first_token",
+                run_id.as_str(),
+                serde_json::json!({
+                    "request_id": request_id,
+                    "model": model,
+                    "agent_id": agent_id,
+                    "ttft_ms": ttft_ms,
+                }),
+            ),
+            RuntimeEvent::ToolCallStarted {
+                run_id,
+                agent_id,
+                tool,
+                iteration,
+                ..
+            } => (
+                "tool_call_started",
+                run_id.as_str(),
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "tool": tool,
+                    "iteration": iteration,
+                }),
+            ),
+            RuntimeEvent::ToolCallCompleted {
+                run_id,
+                agent_id,
+                tool,
+                duration_ms,
+                success,
+                ..
+            } => (
+                "tool_call_completed",
+                run_id.as_str(),
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "tool": tool,
+                    "duration_ms": duration_ms,
+                    "success": success,
+                }),
+            ),
+            RuntimeEvent::TaskStarted {
+                run_id,
+                plan_id,
+                task_id,
+                task_title,
+                role,
+                ..
+            } => (
+                "task_started",
+                run_id.as_str(),
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "task_id": task_id,
+                    "task_title": task_title,
+                    "role": role,
+                }),
+            ),
+            RuntimeEvent::TaskCompleted {
+                run_id,
+                plan_id,
+                task_id,
+                passed,
+                duration_ms,
+                ..
+            } => (
+                "task_completed",
+                run_id.as_str(),
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "task_id": task_id,
+                    "passed": passed,
+                    "duration_ms": duration_ms,
+                }),
+            ),
+            RuntimeEvent::PipelinePhase {
+                run_id,
+                phase,
+                status,
+                ..
+            } => (
+                "pipeline_phase",
+                run_id.as_str(),
+                serde_json::json!({
+                    "phase": phase,
+                    "status": status,
+                }),
+            ),
         };
 
         SseEvent {
@@ -488,5 +584,84 @@ mod tests {
         assert_eq!(adapter.subscriber_count(), 0);
         let _rx = adapter.subscribe();
         assert_eq!(adapter.subscriber_count(), 1);
+    }
+
+    #[test]
+    fn converts_progress_events_to_sse() {
+        let cases: Vec<(RuntimeEvent, &str, &str)> = vec![
+            (
+                RuntimeEvent::InferenceFirstToken {
+                    run_id: "r1".into(),
+                    request_id: "req-1".into(),
+                    model: "claude-sonnet".into(),
+                    agent_id: "a1".into(),
+                    ttft_ms: 1823,
+                },
+                "inference_first_token",
+                "ttft_ms",
+            ),
+            (
+                RuntimeEvent::ToolCallStarted {
+                    run_id: "r1".into(),
+                    agent_id: "a1".into(),
+                    tool: "read_file".into(),
+                    iteration: 2,
+                },
+                "tool_call_started",
+                "tool",
+            ),
+            (
+                RuntimeEvent::ToolCallCompleted {
+                    run_id: "r1".into(),
+                    agent_id: "a1".into(),
+                    tool: "read_file".into(),
+                    duration_ms: 12,
+                    success: true,
+                },
+                "tool_call_completed",
+                "success",
+            ),
+            (
+                RuntimeEvent::TaskStarted {
+                    run_id: "r1".into(),
+                    plan_id: "p1".into(),
+                    task_id: "t1".into(),
+                    task_title: "Wire progress".into(),
+                    role: "implementer".into(),
+                },
+                "task_started",
+                "task_title",
+            ),
+            (
+                RuntimeEvent::TaskCompleted {
+                    run_id: "r1".into(),
+                    plan_id: "p1".into(),
+                    task_id: "t1".into(),
+                    passed: true,
+                    duration_ms: 5000,
+                },
+                "task_completed",
+                "passed",
+            ),
+            (
+                RuntimeEvent::PipelinePhase {
+                    run_id: "r1".into(),
+                    phase: "execute".into(),
+                    status: "started".into(),
+                },
+                "pipeline_phase",
+                "phase",
+            ),
+        ];
+
+        for (event, expected_kind, expected_field) in cases {
+            let sse = SseAdapter::to_sse_event(&event);
+            assert_eq!(sse.kind, expected_kind, "kind mismatch for {expected_kind}");
+            assert_eq!(sse.run_id, "r1", "run_id mismatch for {expected_kind}");
+            assert!(
+                sse.data.get(expected_field).is_some(),
+                "missing field {expected_field} for {expected_kind}"
+            );
+        }
     }
 }

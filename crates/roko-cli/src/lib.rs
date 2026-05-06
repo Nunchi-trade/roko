@@ -31,11 +31,11 @@ pub const DEFAULT_SERVE_PORT: u16 = roko_core::defaults::DEFAULT_SERVE_PORT;
 /// Canonical default base URL for CLI and TUI calls into `roko-serve`.
 pub const DEFAULT_SERVE_URL: &str = "http://localhost:6677";
 
-// StateHub lives behind roko-serve's compatibility export until roko-core can
-// own it directly. Re-exporting that module here keeps CLI runner code and
-// serve AppState on the same concrete SharedStateHub type.
+// StateHub now lives in roko-runtime (moved from the path-include hack in
+// roko-serve by Task 104). This re-export keeps `crate::state_hub::*`
+// working for CLI modules that haven't migrated their imports yet.
 pub mod state_hub {
-    pub use roko_serve::state_hub::*;
+    pub use roko_runtime::state_hub::*;
 }
 
 pub mod agent_config;
@@ -68,6 +68,7 @@ pub mod dispatch;
 pub mod dispatch_direct;
 pub(crate) mod dispatch_helpers;
 pub mod dispatch_v2;
+pub mod dry_run;
 pub mod doctor;
 pub mod episode;
 pub mod event_sources;
@@ -86,6 +87,10 @@ pub mod layer_check;
 pub mod learning_helpers;
 pub mod model_selection;
 pub mod oneshot;
+// orchestrate.rs is the legacy 21K-line engine. It is retained on disk for
+// reference but no longer compiled by default. The v2 event_loop.rs in
+// runner/ is the sole execution engine. See task 056 for the convergence
+// rationale.
 #[cfg(feature = "legacy-orchestrate")]
 pub mod orchestrate;
 pub mod output_format;

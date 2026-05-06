@@ -6,9 +6,10 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::bus::{TopicBus, TopicBusConfig};
 use crate::protocol::{
-    AgentHello, ConnectedAgent, ConnectedWorkspace, RelayEvent, RelayMessageRequest,
-    RelayMessageResponse, RelayOutboundFrame, WorkspaceHello,
+    AgentHello, ConnectedAgent, ConnectedWorkspace, FeedDescriptor, RelayEvent,
+    RelayMessageRequest, RelayMessageResponse, RelayOutboundFrame, WorkspaceHello,
 };
 
 struct ConnectedAgentHandle {
@@ -28,12 +29,16 @@ struct RelayStateInner {
     cards: HashMap<String, Value>,
     pending: HashMap<String, PendingResponse>,
     workspaces: HashMap<String, ConnectedWorkspace>,
+    /// Feeds registered by each agent, keyed by agent_id.
+    feeds: HashMap<String, Vec<FeedDescriptor>>,
 }
 
 /// Shared in-memory relay state for directory, cards, and pending replies.
 pub struct RelayState {
     inner: RwLock<RelayStateInner>,
     events_tx: broadcast::Sender<RelayEvent>,
+    /// Topic-based pub/sub bus. Agents subscribe/publish via WebSocket frames.
+    pub bus: TopicBus,
 }
 
 impl Default for RelayState {
@@ -49,6 +54,7 @@ impl RelayState {
         Self {
             inner: RwLock::new(RelayStateInner::default()),
             events_tx,
+            bus: TopicBus::new(TopicBusConfig::default()),
         }
     }
 
@@ -143,7 +149,7 @@ impl RelayState {
     }
 
     pub fn unregister_agent(&self, agent_id: &str, session_id: Uuid) {
-        let pending = {
+        let (pending, removed_feeds) = {
             let mut inner = self.inner.write();
             let Some(current) = inner.agents.get(agent_id) else {
                 return;
@@ -160,12 +166,22 @@ impl RelayState {
                     inner.pending.insert(message_id, pending_response);
                 }
             }
+            let removed_feeds = inner.feeds.remove(agent_id).unwrap_or_default();
             drop(inner);
-            pending
+            (pending, removed_feeds)
         };
 
         for pending in pending {
             let _ = pending.tx.send(Err("agent disconnected".to_string()));
+        }
+        // Clean up all topic subscriptions for this agent.
+        self.bus.unsubscribe_all(agent_id);
+        // Emit FeedUnregistered events for each removed feed.
+        for feed in &removed_feeds {
+            let _ = self.events_tx.send(RelayEvent::FeedUnregistered {
+                agent_id: agent_id.to_string(),
+                feed_id: feed.feed_id.clone(),
+            });
         }
         let _ = self.events_tx.send(RelayEvent::AgentDisconnected {
             agent_id: agent_id.to_string(),
@@ -308,6 +324,19 @@ impl RelayState {
         });
     }
 
+    /// Send a frame to a connected agent by ID.
+    ///
+    /// Returns `true` if the agent was found and the send succeeded,
+    /// `false` if the agent is unknown or has disconnected.
+    pub fn send_to_agent(&self, agent_id: &str, frame: RelayOutboundFrame) -> bool {
+        let inner = self.inner.read();
+        if let Some(handle) = inner.agents.get(agent_id) {
+            handle.tx.send(frame).is_ok()
+        } else {
+            false
+        }
+    }
+
     /// Remove workspaces that haven't sent a heartbeat in `stale_ms`.
     pub fn expire_stale_workspaces(&self, stale_ms: u64) -> Vec<String> {
         let now = now_ms();
@@ -328,6 +357,67 @@ impl RelayState {
             });
         }
         expired
+    }
+
+    // ── Feed registration ────────────────────────────────────────────
+
+    pub fn register_feed(&self, agent_id: &str, feed: FeedDescriptor) {
+        let mut inner = self.inner.write();
+        let feeds = inner.feeds.entry(agent_id.to_string()).or_default();
+        // Replace existing feed with same id, or append.
+        if let Some(existing) = feeds.iter_mut().find(|f| f.feed_id == feed.feed_id) {
+            *existing = feed.clone();
+        } else {
+            feeds.push(feed.clone());
+        }
+        drop(inner);
+        let _ = self.events_tx.send(RelayEvent::FeedRegistered {
+            agent_id: agent_id.to_string(),
+            feed,
+        });
+    }
+
+    pub fn unregister_feed(&self, agent_id: &str, feed_id: &str) -> bool {
+        let mut inner = self.inner.write();
+        let Some(feeds) = inner.feeds.get_mut(agent_id) else {
+            return false;
+        };
+        let before = feeds.len();
+        feeds.retain(|f| f.feed_id != feed_id);
+        if feeds.len() == before {
+            return false;
+        }
+        if feeds.is_empty() {
+            inner.feeds.remove(agent_id);
+        }
+        drop(inner);
+        let _ = self.events_tx.send(RelayEvent::FeedUnregistered {
+            agent_id: agent_id.to_string(),
+            feed_id: feed_id.to_string(),
+        });
+        true
+    }
+
+    #[must_use]
+    pub fn list_feeds(&self) -> Vec<(String, Vec<FeedDescriptor>)> {
+        let inner = self.inner.read();
+        let mut result: Vec<(String, Vec<FeedDescriptor>)> = inner
+            .feeds
+            .iter()
+            .map(|(agent_id, feeds)| (agent_id.clone(), feeds.clone()))
+            .collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
+    }
+
+    #[must_use]
+    pub fn agent_feeds(&self, agent_id: &str) -> Vec<FeedDescriptor> {
+        self.inner
+            .read()
+            .feeds
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

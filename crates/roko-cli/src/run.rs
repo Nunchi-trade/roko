@@ -452,6 +452,7 @@ fn build_workflow_effect_services(
         inference_observer: Some(Arc::new(
             crate::inference_observer::RuntimeEventInferenceObserver::new(),
         )),
+        metrics: None,
     })
     .map_err(|error| anyhow!("build workflow services: {error}"))?;
 
@@ -1381,18 +1382,40 @@ pub async fn run_once(
     })
 }
 
+/// Single-prompt execution via the v2 `ModelCallService` path.
+///
+/// This is the convergence replacement for the legacy `run_once()` that was
+/// behind `#[cfg(feature = "legacy-orchestrate")]`. It uses the same
+/// `dispatch_bench_prompt()` infrastructure as `serve_runtime.rs`, wrapping
+/// the result into a [`RunReport`] for backward compatibility with existing
+/// callers (`demo_cmd`, `worker`, `run_inline`, `commands/job`).
 #[cfg(not(feature = "legacy-orchestrate"))]
 pub async fn run_once(
-    _workdir: &Path,
-    _config: &Config,
-    _prompt_text: &str,
-    strategy: Option<BenchStrategy>,
+    workdir: &Path,
+    config: &Config,
+    prompt_text: &str,
+    _strategy: Option<BenchStrategy>,
     _external_hub: Option<&StateHub>,
 ) -> Result<RunReport> {
-    let _ = strategy;
-    anyhow::bail!(
-        "legacy run_once is disabled; use the WorkflowEngine v2 path or enable legacy-orchestrate"
-    )
+    let result =
+        crate::serve_runtime::dispatch_bench_prompt(workdir, config, prompt_text, None).await?;
+
+    let content_hash = roko_core::ContentHash::of(result.text.as_bytes());
+    let prompt_hash = roko_core::ContentHash::of(prompt_text.as_bytes());
+
+    Ok(RunReport {
+        episode_id: content_hash.to_hex(),
+        prompt_id: prompt_hash.to_hex(),
+        agent_output_id: content_hash.to_hex(),
+        agent_success: true,
+        gate_verdicts: Vec::new(),
+        total_signals: 0,
+        output_text: Some(result.text),
+        usage: Some(RunUsage {
+            input_tokens: result.input_tokens,
+            output_tokens: result.output_tokens,
+        }),
+    })
 }
 
 #[cfg(feature = "legacy-orchestrate")]

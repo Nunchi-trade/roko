@@ -3488,16 +3488,29 @@ fn receipt_json(receipt: &LocalReceipt) -> serde_json::Value {
 }
 
 fn transaction_json(tx: &LocalTransaction) -> serde_json::Value {
+    let block_hash = keccak256(tx.block_number.to_be_bytes());
+    let zero_hash = "0x0000000000000000000000000000000000000000000000000000000000000000";
     serde_json::json!({
         "hash": tx.hash,
         "from": tx.from,
         "to": tx.to,
         "value": hex_u256(tx.value),
         "input": format!("0x{}", hex::encode(&tx.input)),
-
         "gas": hex_u64(tx.gas),
+        "gasPrice": "0x1",
         "nonce": hex_u64(tx.nonce),
         "blockNumber": hex_u64(tx.block_number),
+        "blockHash": format!("{block_hash}"),
+        "transactionIndex": "0x0",
+        "type": "0x2",
+        "chainId": "0x7a69",
+        "maxFeePerGas": "0x1",
+        "maxPriorityFeePerGas": "0x0",
+        "yParity": "0x0",
+        "v": "0x0",
+        "r": zero_hash,
+        "s": zero_hash,
+        "accessList": [],
     })
 }
 
@@ -3580,11 +3593,9 @@ fn render_transactions_json(
         let nonce_hex = tx
             .map(|t| hex_u64(t.nonce))
             .unwrap_or_else(|| "0x0".to_string());
-        // Deliberately omit `input` (calldata) — it's the only unbounded
-        // field on a tx, and Ponder's assertions don't read it. Dropping it
-        // keeps heavy blocks (e.g. ClearingHouse batches with ~200 bytes of
-        // calldata per tx × many txs) from ballooning the getBlockByHash
-        // response and tripping jsonrpsee's body-size ceiling under load.
+        // Use EIP-1559 (type 2) format so alloy 1.8 can deserialize without
+        // needing a valid legacy `v` value. yParity + accessList satisfy the
+        // required fields for type-2 deserialization.
         arr.push(serde_json::json!({
             "hash": format!("{tx_hash}"),
             "blockHash": block_hash_hex,
@@ -3595,13 +3606,17 @@ fn render_transactions_json(
             "value": value_hex,
             "gas": gas_hex,
             "gasPrice": "0x1",
+            "maxFeePerGas": "0x1",
+            "maxPriorityFeePerGas": "0x0",
             "nonce": nonce_hex,
             "input": "0x",
-            "type": "0x0",
-            "chainId": "0x1",
+            "type": "0x2",
+            "chainId": "0x7a69",
+            "yParity": "0x0",
             "v": "0x0",
             "r": zero_hash,
             "s": zero_hash,
+            "accessList": [],
         }));
     }
     serde_json::Value::Array(arr)

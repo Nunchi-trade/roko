@@ -7,7 +7,7 @@ use super::agent::default_true;
 // ---- [serve] -------------------------------------------------------------
 
 /// API serving options.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ServeConfig {
     /// Port override for `roko serve`. Falls back to `server.port` (default 6677).
     #[serde(default)]
@@ -48,6 +48,9 @@ pub struct ServeConfig {
     /// `serve.auth.enabled = true` instead of this allowlist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub event_ingest_allowlist: Vec<String>,
+    /// Optional OTLP tracing export. Disabled when `otlp_endpoint` is absent.
+    #[serde(default)]
+    pub tracing: TracingConfig,
 }
 
 impl Default for ServeConfig {
@@ -62,6 +65,7 @@ impl Default for ServeConfig {
             auto_start: false,
             acknowledge_public_risk: false,
             event_ingest_allowlist: Vec::new(),
+            tracing: TracingConfig::default(),
         }
     }
 }
@@ -187,6 +191,52 @@ impl Default for ServeDeployWebhookConfig {
     }
 }
 
+// ---- [serve.tracing] -----------------------------------------------------
+
+/// Optional distributed tracing export configuration.
+///
+/// Parsed from `[serve.tracing]` in `roko.toml`. When `otlp_endpoint` is absent,
+/// tracing export is disabled and no OTLP dependencies are loaded at runtime.
+///
+/// ```toml
+/// [serve.tracing]
+/// otlp_endpoint = "http://localhost:4317"
+/// service_name = "roko-serve-dev"
+/// sample_rate = 0.1
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TracingConfig {
+    /// OTLP gRPC endpoint for trace export (e.g. `"http://localhost:4317"`).
+    /// When absent, tracing export is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otlp_endpoint: Option<String>,
+    /// Service name reported in OTLP spans. Defaults to `"roko-serve"`.
+    #[serde(default = "default_tracing_service_name")]
+    pub service_name: String,
+    /// Sample rate 0.0--1.0. Default 1.0 (trace everything).
+    #[serde(default = "default_tracing_sample_rate")]
+    pub sample_rate: f64,
+}
+
+fn default_tracing_service_name() -> String {
+    "roko-serve".to_string()
+}
+
+fn default_tracing_sample_rate() -> f64 {
+    1.0
+}
+
+impl Default for TracingConfig {
+    fn default() -> Self {
+        Self {
+            otlp_endpoint: None,
+            service_name: default_tracing_service_name(),
+            sample_rate: default_tracing_sample_rate(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +259,53 @@ mod tests {
     #[test]
     fn default_auth_is_enabled() {
         assert!(ServeAuthConfig::default().enabled);
+    }
+
+    #[test]
+    fn tracing_config_defaults_are_disabled() {
+        let tc = TracingConfig::default();
+        assert!(tc.otlp_endpoint.is_none());
+        assert_eq!(tc.service_name, "roko-serve");
+        assert!((tc.sample_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn serve_config_tracing_absent_uses_defaults() {
+        let toml_text = "port = 8080\n";
+        let cfg: ServeConfig = toml::from_str(toml_text).expect("parse serve config");
+        assert!(cfg.tracing.otlp_endpoint.is_none());
+        assert_eq!(cfg.tracing.service_name, "roko-serve");
+        assert!((cfg.tracing.sample_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn serve_config_tracing_parses_full_block() {
+        let toml_text = r#"
+port = 6677
+
+[tracing]
+otlp_endpoint = "http://localhost:4317"
+service_name = "roko-serve-dev"
+sample_rate = 0.1
+"#;
+        let cfg: ServeConfig = toml::from_str(toml_text).expect("parse serve config");
+        assert_eq!(
+            cfg.tracing.otlp_endpoint.as_deref(),
+            Some("http://localhost:4317")
+        );
+        assert_eq!(cfg.tracing.service_name, "roko-serve-dev");
+        assert!((cfg.tracing.sample_rate - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn serve_config_tracing_sample_rate_defaults_to_one() {
+        let toml_text = r#"
+[tracing]
+otlp_endpoint = "http://otel:4317"
+"#;
+        let cfg: ServeConfig = toml::from_str(toml_text).expect("parse serve config");
+        assert!((cfg.tracing.sample_rate - 1.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.tracing.service_name, "roko-serve");
     }
 }
 

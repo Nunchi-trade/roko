@@ -328,22 +328,11 @@
   z-index: 3;
 }
 
-.term-cell .terminal-pane,
-.term-cell .term-pane-real {
+.term-cell .terminal-pane {
   flex: 1;
   min-height: 0;
   position: relative;
   z-index: 1;
-}
-
-/* ── TerminalPaneReal ── */
-.term-pane-real {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  border: 1px solid transparent;
-  transition: border-color var(--duration-smooth) var(--ease),
-              box-shadow var(--duration-smooth) var(--ease);
 }
 
 /* Focus glow */
@@ -425,32 +414,7 @@
   }
 }
 
-/* ── Pane header ── */
-.term-pane-header {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  padding: var(--sp-1) var(--sp-2);
-  border-bottom: 1px solid var(--glass-border);
-  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
-  flex-shrink: 0;
-}
-.term-conn-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  transition: background var(--duration-snap), box-shadow var(--duration-snap);
-}
-.term-conn-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
-.term-conn-dot.connecting { background: var(--warning, #c8a030); animation: status-blink 1s infinite; }
-.term-conn-dot.disconnected { background: var(--text-ghost); }
-.term-pane-label {
-  font-family: var(--mono);
-  font-size: var(--text-sm);
-  color: var(--text-soft);
-  letter-spacing: .04em;
-}
+/* ── Pane header addons (shared pane-header from TerminalPane.css) ── */
 
 /* Workspace badge with typewriter */
 .term-ws-badge {
@@ -479,13 +443,7 @@
   50%, 100% { opacity: 0; }
 }
 
-.term-pane-status {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: var(--text-sm);
-  color: var(--text-ghost);
-  letter-spacing: .06em;
-}
+/* pane-status styled by TerminalPane.css */
 
 /* ── Header buttons ── */
 .term-header-btn {
@@ -526,18 +484,7 @@
   margin-left: 2px;
 }
 
-.term-pane-body {
-  flex: 1;
-  min-height: 0;
-  padding: 2px;
-  /* Content fades in after border draws */
-  animation: termContentFade var(--duration-reveal) var(--ease) 200ms both;
-}
-
-@keyframes termContentFade {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
+/* pane-body styled by TerminalPane.css */
 
 /* ── Empty state ── */
 .terminal-empty {

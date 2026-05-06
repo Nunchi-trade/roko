@@ -66,6 +66,11 @@ impl RokoCliRuntime {
 
 #[async_trait]
 impl CliRuntime for RokoCliRuntime {
+    /// Dispatch a single prompt via the v2 `ModelCallService` path.
+    ///
+    /// This is the converged entry point for HTTP/serve one-shot dispatch.
+    /// Uses `dispatch_bench_prompt()` which routes through the same
+    /// `ModelCallService` infrastructure as the WorkflowEngine v2 runner.
     async fn run_once(&self, workdir: &Path, prompt: &str) -> anyhow::Result<RunResult> {
         let result = dispatch_bench_prompt(workdir, &self.config, prompt, None).await?;
         Ok(RunResult {
@@ -85,6 +90,11 @@ impl CliRuntime for RokoCliRuntime {
         prompt: &str,
         overrides: &BenchConfigOverrides,
     ) -> anyhow::Result<RunResult> {
+        // Demo strategy returns simulated results — no LLM dispatch needed.
+        if matches!(overrides.strategy, BenchStrategy::Demo) {
+            return Ok(simulate_bench_result(prompt));
+        }
+
         // Apply model override if provided by cloning the config.
         let mut config = self.config.clone();
         if let Some(ref model) = overrides.model {
@@ -615,6 +625,35 @@ fn build_runner_config(
         http_event_sink: None,
         output_sink: Arc::new(crate::runner::output_sink::NoopSink),
         warm_cache: true,
+        metrics: None,
+    }
+}
+
+/// Produce a deterministic, realistic-looking simulated result for demo mode.
+///
+/// No LLM dispatch is performed. ~88% of tasks "pass" based on a hash of the
+/// prompt, and token counts / cost are synthetic but plausible.
+fn simulate_bench_result(prompt: &str) -> RunResult {
+    // Deterministic "randomness" from prompt bytes.
+    let seed: u64 = prompt.bytes().map(|b| b as u64).sum();
+    let passed = (seed % 100) < 88;
+    let input_tokens = 800 + (seed % 600);
+    let output_tokens = 200 + (seed % 400);
+
+    RunResult {
+        success: passed,
+        output_text: Some(if passed {
+            format!(
+                "[demo] Simulated successful completion for prompt ({input_tokens}+{output_tokens} tokens)"
+            )
+        } else {
+            "[demo] Simulated failure — gate check did not pass".to_string()
+        }),
+        usage: Some(RunResultUsage {
+            input_tokens,
+            output_tokens,
+        }),
+        gate_results: Vec::new(),
     }
 }
 
@@ -623,7 +662,7 @@ fn build_runner_config(
 /// This replaces the legacy `run_once()` which is feature-gated behind
 /// `legacy-orchestrate`. The v2 path uses the same ModelCallService that
 /// `WorkflowEngine` uses, preserving routing, budget, and feedback behavior.
-async fn dispatch_bench_prompt(
+pub(crate) async fn dispatch_bench_prompt(
     workdir: &Path,
     config: &Config,
     prompt: &str,
@@ -748,12 +787,12 @@ async fn dispatch_bench_prompt(
 }
 
 /// Result from dispatching a bench prompt via `ModelCallService`.
-struct BenchDispatchResult {
-    text: String,
+pub(crate) struct BenchDispatchResult {
+    pub(crate) text: String,
     #[allow(dead_code)]
-    model: String,
-    input_tokens: u64,
-    output_tokens: u64,
+    pub(crate) model: String,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
 fn non_empty_string(value: &str) -> Option<String> {

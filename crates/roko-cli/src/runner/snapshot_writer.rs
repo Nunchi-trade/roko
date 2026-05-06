@@ -1,4 +1,4 @@
-//! Async snapshot writer — offloads JSON persistence to a dedicated OS thread
+//! Async snapshot writer -- offloads JSON persistence to a dedicated OS thread
 //! so `save_snapshot` never blocks the `select!` event loop.
 
 use std::path::PathBuf;
@@ -8,14 +8,12 @@ use std::thread::JoinHandle;
 use roko_core::defaults::DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT;
 use tracing::{error, warn};
 
-/// Pre-serialized snapshot data ready for disk writes.
+/// Pre-serialized, unified state snapshot ready for a single atomic disk write.
 pub struct SnapshotPayload {
-    pub orchestrator_json: Vec<u8>,
-    pub orchestrator_path: PathBuf,
-    pub executor_json: Vec<u8>,
-    pub executor_path: PathBuf,
-    pub run_state_json: Vec<u8>,
-    pub run_state_path: PathBuf,
+    /// The complete JSON blob (outer `StateSnapshot` serialized to bytes).
+    pub snapshot_json: Vec<u8>,
+    /// Destination path (`.roko/state/state-snapshot.json`).
+    pub snapshot_path: PathBuf,
 }
 
 enum WriterMsg {
@@ -34,7 +32,7 @@ struct DrainResult {
 
 /// Bounded-channel writer that persists snapshots on a dedicated OS thread.
 ///
-/// If multiple snapshots queue up, intermediate ones are skipped — the thread
+/// If multiple snapshots queue up, intermediate ones are skipped -- the thread
 /// always drains to the *latest* payload before writing.
 pub struct SnapshotWriter {
     tx: Option<SyncSender<WriterMsg>>,
@@ -67,10 +65,10 @@ impl SnapshotWriter {
         match tx.try_send(WriterMsg::Write(payload)) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
-                warn!("snapshot writer channel full — dropping intermediate snapshot");
+                warn!("snapshot writer channel full -- dropping intermediate snapshot");
             }
             Err(TrySendError::Disconnected(_)) => {
-                error!("snapshot writer thread has stopped — snapshot lost");
+                error!("snapshot writer thread has stopped -- snapshot lost");
             }
         }
     }
@@ -97,7 +95,7 @@ impl Drop for SnapshotWriter {
                     .unwrap_or("unknown panic");
                 error!(
                     panic = %msg,
-                    "snapshot-writer thread panicked — recent snapshots may be lost"
+                    "snapshot-writer thread panicked -- recent snapshots may be lost"
                 );
             }
         }
@@ -111,7 +109,7 @@ fn writer_loop(rx: std::sync::mpsc::Receiver<WriterMsg>, flush_tx: std::sync::mp
     loop {
         let msg = match rx.recv() {
             Ok(msg) => msg,
-            Err(_) => break, // sender dropped — exit
+            Err(_) => break, // sender dropped -- exit
         };
 
         match msg {
@@ -180,25 +178,8 @@ fn write_payload(payload: &SnapshotPayload, fail_streak: &mut u32) {
 }
 
 fn write_all_files(payload: &SnapshotPayload) -> anyhow::Result<()> {
-    use super::persist::{atomic_write, write_checkpoint};
-    atomic_write(&payload.orchestrator_path, &payload.orchestrator_json)?;
-    atomic_write(&payload.executor_path, &payload.executor_json)?;
-    atomic_write(&payload.run_state_path, &payload.run_state_json)?;
-
-    // Write a checkpoint manifest so the next resume can verify the three
-    // state files are consistent.  Errors are non-fatal — a missing or stale
-    // checkpoint just means the verification step will log a warning.
-    if let Some(state_dir) = payload.executor_path.parent() {
-        let files: &[(&str, &[u8])] = &[
-            ("orchestrator.json", &payload.orchestrator_json),
-            ("executor.json", &payload.executor_json),
-            ("run-state.json", &payload.run_state_json),
-        ];
-        if let Err(err) = write_checkpoint(state_dir, files) {
-            tracing::warn!(error = %err, "failed to write state checkpoint");
-        }
-    }
-
+    use super::persist::atomic_write;
+    atomic_write(&payload.snapshot_path, &payload.snapshot_json)?;
     Ok(())
 }
 
@@ -207,32 +188,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_and_flush_persists_files() {
+    fn write_and_flush_persists_file() {
         let tmp = tempfile::tempdir().unwrap();
         let writer = SnapshotWriter::new(4);
 
         let payload = SnapshotPayload {
-            orchestrator_json: b"orch".to_vec(),
-            orchestrator_path: tmp.path().join("orch.json"),
-            executor_json: b"exec".to_vec(),
-            executor_path: tmp.path().join("exec.json"),
-            run_state_json: b"state".to_vec(),
-            run_state_path: tmp.path().join("state.json"),
+            snapshot_json: b"unified-snapshot".to_vec(),
+            snapshot_path: tmp.path().join("state-snapshot.json"),
         };
         writer.write(payload);
         writer.flush();
 
         assert_eq!(
-            std::fs::read_to_string(tmp.path().join("orch.json")).unwrap(),
-            "orch"
-        );
-        assert_eq!(
-            std::fs::read_to_string(tmp.path().join("exec.json")).unwrap(),
-            "exec"
-        );
-        assert_eq!(
-            std::fs::read_to_string(tmp.path().join("state.json")).unwrap(),
-            "state"
+            std::fs::read_to_string(tmp.path().join("state-snapshot.json")).unwrap(),
+            "unified-snapshot"
         );
     }
 
@@ -244,19 +213,15 @@ mod tests {
         for i in 0..3 {
             let label = format!("v{i}");
             writer.write(SnapshotPayload {
-                orchestrator_json: label.as_bytes().to_vec(),
-                orchestrator_path: tmp.path().join("orch.json"),
-                executor_json: label.as_bytes().to_vec(),
-                executor_path: tmp.path().join("exec.json"),
-                run_state_json: label.as_bytes().to_vec(),
-                run_state_path: tmp.path().join("state.json"),
+                snapshot_json: label.as_bytes().to_vec(),
+                snapshot_path: tmp.path().join("state-snapshot.json"),
             });
         }
         writer.flush();
 
-        // The writer drains to latest, so files should contain "v2" (or at
+        // The writer drains to latest, so file should contain "v2" (or at
         // minimum the last payload that was written).
-        let content = std::fs::read_to_string(tmp.path().join("orch.json")).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join("state-snapshot.json")).unwrap();
         assert!(content == "v0" || content == "v1" || content == "v2");
     }
 

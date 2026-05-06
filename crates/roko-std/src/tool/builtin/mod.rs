@@ -1,4 +1,4 @@
-//! Built-in tool definitions (§36.b) plus chain-domain tools.
+//! Built-in tool definitions (§36.b) plus chain-domain and ISFR tools.
 //!
 //! Each `builtin/<name>.rs` module exposes:
 //!
@@ -7,8 +7,8 @@
 //! - `pub fn tool_def() -> ToolDef` — constructs the full definition
 //!
 //! [`ROKO_BUILTIN_TOOLS`] exposes the 16 std tools plus 17 chain-domain
-//! tools as a single `Vec`, materialized once via [`std::sync::LazyLock`]
-//! on first access.
+//! tools plus 4 ISFR tools as a single `Vec`, materialized once via
+//! [`std::sync::LazyLock`] on first access.
 //!
 //! Std tool order follows `roko_core::tool::aliases::ALIASES`:
 //! `read_file` → `write_file` → `edit_file` → `multi_edit` → `glob` →
@@ -27,6 +27,7 @@ pub mod edit_file;
 pub mod exit_plan_mode;
 pub mod glob;
 pub mod grep;
+pub mod isfr;
 pub mod ls;
 pub mod multi_edit;
 pub mod notebook_edit;
@@ -39,10 +40,10 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write_file;
 
-/// Number of total built-in tools (16 std + 17 chain).
-pub const TOOL_COUNT: usize = 33;
+/// Number of total built-in tools (16 std + 17 chain + 4 ISFR).
+pub const TOOL_COUNT: usize = 37;
 
-/// All built-in tool definitions: 16 std tools + 17 chain-domain tools.
+/// All built-in tool definitions: 16 std tools + 17 chain-domain tools + 4 ISFR tools.
 ///
 /// Materialized on first access via [`std::sync::LazyLock`]; every
 /// subsequent read is lock-free.
@@ -66,6 +67,7 @@ pub static ROKO_BUILTIN_TOOLS: LazyLock<Vec<ToolDef>> = LazyLock::new(|| {
         run_tests::tool_def(),
     ];
     tools.extend(CHAIN_DOMAIN_TOOLS.iter().cloned());
+    tools.extend(isfr::all_tool_defs());
     tools
 });
 
@@ -90,5 +92,6 @@ pub static BUILTIN_TOOL_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         run_tests::NAME,
     ];
     names.extend_from_slice(&CHAIN_TOOL_NAMES);
+    names.extend_from_slice(&isfr::ISFR_TOOL_NAMES);
     names
 });

@@ -164,12 +164,13 @@ pub fn detect_auth_from_env() -> AuthMethod {
 
 /// Print setup instructions when no auth is detected.
 pub fn print_setup_instructions() {
-    eprintln!("error: no LLM provider configured.\n");
-    eprintln!("To get started, either:");
-    eprintln!("  1. Run `roko init` to create a workspace with default config");
-    eprintln!("  2. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or ZAI_API_KEY");
-    eprintln!("  3. Edit roko.toml to configure a provider");
-    eprintln!("\n  hint: run `roko doctor` to diagnose your setup");
+    eprintln!("error: no LLM provider is configured or available.\n");
+    eprintln!("To set one up:");
+    eprintln!("  roko config providers available    # see all supported provider kinds");
+    eprintln!("  roko config providers add claude   # interactive setup (if available)");
+    eprintln!("  export ANTHROPIC_API_KEY=sk-ant-... && roko init");
+    eprintln!();
+    eprintln!("See roko.toml [providers.*] for manual configuration.");
 }
 
 #[cfg(test)]

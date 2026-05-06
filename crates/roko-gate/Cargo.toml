@@ -22,6 +22,7 @@ toml = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-util = { workspace = true }
 tempfile = { workspace = true }
 roko-std = { path = "../roko-std" }
 

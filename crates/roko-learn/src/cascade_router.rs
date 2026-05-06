@@ -1014,6 +1014,43 @@ impl CascadeRouter {
         self.observe_internal(&ctx.to_features(), model_idx, reward, success, None, None);
     }
 
+    /// Apply a WAL-replayed observation. Does NOT write a WAL entry.
+    ///
+    /// Validates that `model_idx` still maps to `model_slug`. If the config
+    /// has changed since the WAL was written (e.g. model list reordered),
+    /// the entry is silently skipped with a warning.
+    pub fn replay_observation(
+        &self,
+        model_slug: &str,
+        context_features: &[f64],
+        model_idx: usize,
+        reward: f64,
+        success: bool,
+    ) {
+        // Validate the slug/index pair is still valid after potential config changes.
+        let current_idx = self.model_index_for_slug(model_slug);
+        let effective_idx = match current_idx {
+            Some(idx) => idx,
+            None => {
+                tracing::warn!(
+                    slug = %model_slug,
+                    model_idx,
+                    "[wal] replay: unknown model slug -- skipping observation"
+                );
+                return;
+            }
+        };
+        if effective_idx != model_idx {
+            tracing::warn!(
+                slug = %model_slug,
+                wal_idx = model_idx,
+                current_idx = effective_idx,
+                "[wal] replay: model index changed -- using current index"
+            );
+        }
+        self.observe_internal(context_features, effective_idx, reward, success, None, None);
+    }
+
     /// Record an observation enriched with Perplexity search metadata.
     pub fn record_perplexity_observation(
         &self,
@@ -2406,5 +2443,77 @@ impl CascadeRouter {
         let actual_value = if actual_success { 1.0 } else { 0.0 };
         let residual = predicted_success - actual_value;
         self.feedback(model_slug, predicted_success, actual_success, residual);
+    }
+}
+
+#[cfg(test)]
+mod cascade_router_tests {
+    use super::*;
+
+    #[test]
+    fn replay_observation_increments_confidence_stats() {
+        let router = CascadeRouter::new(vec![
+            "claude-sonnet-4-5".into(),
+            "claude-haiku-4-5".into(),
+        ]);
+        let context_features = vec![0.0; crate::model_router::CONTEXT_DIM];
+
+        // Replay 10 observations for the first model.
+        for _ in 0..10 {
+            router.replay_observation(
+                "claude-sonnet-4-5",
+                &context_features,
+                0,
+                0.85,
+                true,
+            );
+        }
+
+        let stats = router.confidence_stats.lock();
+        let entry = stats.get("claude-sonnet-4-5").expect("stats should exist");
+        assert_eq!(entry.trials, 10);
+        assert_eq!(entry.successes, 10);
+    }
+
+    #[test]
+    fn replay_observation_skips_unknown_slug() {
+        let router = CascadeRouter::new(vec!["claude-sonnet-4-5".into()]);
+        let context_features = vec![0.0; crate::model_router::CONTEXT_DIM];
+
+        // This should log a warning and not panic.
+        router.replay_observation(
+            "nonexistent-model",
+            &context_features,
+            0,
+            1.0,
+            true,
+        );
+
+        let stats = router.confidence_stats.lock();
+        assert!(stats.get("nonexistent-model").is_none());
+    }
+
+    #[test]
+    fn replay_observation_uses_current_index_on_mismatch() {
+        let router = CascadeRouter::new(vec![
+            "claude-haiku-4-5".into(),
+            "claude-sonnet-4-5".into(),
+        ]);
+        let context_features = vec![0.0; crate::model_router::CONTEXT_DIM];
+
+        // WAL says model_idx=0 but the slug maps to current index 1.
+        // replay_observation should use the current index (1) not the stale WAL index.
+        router.replay_observation(
+            "claude-sonnet-4-5",
+            &context_features,
+            0, // stale WAL index
+            0.9,
+            true,
+        );
+
+        let stats = router.confidence_stats.lock();
+        let entry = stats.get("claude-sonnet-4-5").expect("stats should exist");
+        assert_eq!(entry.trials, 1);
+        assert_eq!(entry.successes, 1);
     }
 }

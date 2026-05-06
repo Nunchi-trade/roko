@@ -108,8 +108,6 @@ use roko_learn::conductor::{
 };
 use roko_learn::costs_db::{CostRecord, CostsDb};
 use roko_learn::costs_log::CostsLog;
-use roko_learn::event_subscriber::run_learning_subscriber;
-use roko_learn::provider_health::ProviderHealthRegistry;
 use roko_learn::curriculum::{CurriculumMode, CurriculumScheduler};
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
@@ -118,6 +116,7 @@ use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
 use roko_learn::error_pattern_store::{
     ErrorPatternStore, FailurePatternQuery, GateFailureObservation, GateFailureSource,
 };
+use roko_learn::event_subscriber::run_learning_subscriber;
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::hdc_fingerprint::{encode as encode_hdc_fingerprint, fingerprint_episode};
 use roko_learn::latency::LatencyRegistry;
@@ -125,6 +124,7 @@ use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::PlaybookStore;
 use roko_learn::prediction::CalibrationTracker;
 use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
+use roko_learn::provider_health::ProviderHealthRegistry;
 use roko_learn::routing_log::{
     RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
 };
@@ -10096,6 +10096,24 @@ impl PlanRunner {
                         break;
                     }
 
+                    // ── Rate-limit backoff ────────────────────────────────
+                    // When the failure is a provider rate limit, apply
+                    // exponential backoff (2s / 4s / 8s) before the next
+                    // dispatch attempt so we don't hammer the provider.
+                    if matches!(state.error_pattern, RetryErrorPattern::RateLimit) {
+                        let backoff_base_ms: u64 = 2_000;
+                        let exp = consecutive_failures.saturating_sub(1).min(4);
+                        let delay_ms = backoff_base_ms.saturating_mul(1u64 << exp);
+                        tracing::warn!(
+                            plan_id = %plan_id,
+                            task_id = %task_id,
+                            delay_ms,
+                            attempt = total_dispatches,
+                            "[orchestrate] rate limited; backing off before retry"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+
                     match action {
                         RetryConductorAction::Continue => {
                             // Always include failure context in the retry prompt so
@@ -10898,8 +10916,11 @@ impl PlanRunner {
             .unwrap_or_else(|| {
                 format!("Plan: {plan_id}\nTask: {task_id}\n\nImplement the task described above.")
             });
+        let failing_command = task_def
+            .and_then(|td| td.verify.iter().find(|v| v.phase == gate).map(|v| v.command.as_str()))
+            .unwrap_or("unknown");
         let prompt = task_def
-            .map(|task| task.build_fix_prompt(&base_prompt, gate, error_output))
+            .map(|task| task.build_fix_prompt(&base_prompt, gate, failing_command, error_output))
             .unwrap_or_else(|| {
                 format!(
                     "{base_prompt}\n\n---\n\n## Verification Failed\n\nPhase: {gate}\n\nError output:\n```text\n{}\n```",
@@ -14178,9 +14199,13 @@ impl PlanRunner {
                 _ => roko_core::defaults::MODEL_FOCUSED.into(),
             });
 
-        let mut fix_prompt = if let Some(td) = task_def {
+        let mut fix_prompt = if let Some(ref td) = task_def {
             let original_prompt = td.build_prompt(plan_id, &self.workdir);
-            td.build_fix_prompt(&original_prompt, &gate_phase, &gate_context)
+            let failing_command = td.verify.iter()
+                .find(|v| v.phase == gate_phase)
+                .map(|v| v.command.as_str())
+                .unwrap_or("unknown");
+            td.build_fix_prompt(&original_prompt, &gate_phase, failing_command, &gate_context)
         } else {
             let truncated = gate_context.chars().take(4000).collect::<String>();
             format!(
@@ -21682,9 +21707,8 @@ depends_on = []
             )
             .expect("AppState::new"),
         );
-        // state.state_hub is roko_serve::StateHub (via #[path] include), but
-        // set_state_hub expects roko_cli::state_hub::StateHubSender. Both are the
-        // same source file but distinct types. Create a local hub for the test.
+        // Both AppState::state_hub and the orchestrator use the same
+        // roko_runtime::StateHub type (Task 104 unified the boundary).
         let local_hub = crate::state_hub::shared_state_hub();
         runner.set_state_hub(local_hub.sender());
 

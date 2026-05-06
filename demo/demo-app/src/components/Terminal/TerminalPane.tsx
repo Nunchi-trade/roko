@@ -13,7 +13,7 @@ interface TerminalPaneProps {
 }
 
 export default function TerminalPane({ sessionId, label, agent }: TerminalPaneProps) {
-  const { attach, status } = useTerminal(sessionId);
+  const { attach, status, shellWarning } = useTerminal(sessionId);
   const paneRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const prevStatusRef = useRef(status);
@@ -68,6 +68,9 @@ export default function TerminalPane({ sessionId, label, agent }: TerminalPanePr
         )}
         <span className="pane-status">{status}</span>
       </div>
+      {shellWarning && (
+        <div className="terminal-shell-warning">{shellWarning}</div>
+      )}
       <div className="pane-body" ref={bodyCallbackRef} />
     </div>
   );

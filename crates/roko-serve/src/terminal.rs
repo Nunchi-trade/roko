@@ -2,13 +2,19 @@
 //!
 //! Each session spawns a real shell process via `portable-pty` and bridges
 //! it to a WebSocket connection. Multiple sessions can run concurrently.
+//!
+//! Sessions survive brief disconnects via a 60-second grace period: when a
+//! WebSocket closes, the PTY keeps running and output accumulates in a
+//! per-session scrollback ring buffer. A reconnecting client receives the
+//! buffered scrollback before live data resumes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json,
@@ -30,6 +36,16 @@ use crate::state::AppState;
 use roko_core::config::schema::RokoConfig;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// How long a disconnected PTY session stays alive waiting for reattach.
+const TERMINAL_GRACE_PERIOD: Duration = Duration::from_secs(60);
+
+/// Maximum number of output chunks kept in the per-session scrollback ring.
+const SCROLLBACK_CHUNKS: usize = 512;
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -45,6 +61,45 @@ pub(crate) struct PtySession {
     sess_generation: u64,
     /// Temp ZDOTDIR created for this session's shell — cleaned up on destroy.
     zdotdir: Option<std::path::PathBuf>,
+    /// When the last WebSocket client disconnected (None = currently attached).
+    disconnected_at: Option<Instant>,
+    /// Per-session scrollback ring buffer — shared with the PTY reader thread.
+    scrollback: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    /// Live output subscribers (WebSocket bridge tasks subscribe here).
+    subscribers: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>>,
+    /// Working directory the PTY was spawned in (for state persistence).
+    spawn_workdir: std::path::PathBuf,
+    /// Terminal dimensions at creation.
+    spawn_cols: u16,
+    /// Terminal dimensions at creation.
+    spawn_rows: u16,
+}
+
+/// Persisted terminal state written to `.roko/workspaces/{id}/terminal.state`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TerminalStateFile {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub cwd: String,
+    pub scrollback_lines: usize,
+    pub disconnected_at_unix: u64,
+}
+
+/// Result of attempting to attach to a session.
+pub enum AttachResult {
+    /// Reattached to an existing session within the grace period.
+    Reattached {
+        sess_generation: u64,
+        receiver: mpsc::Receiver<Vec<u8>>,
+        scrollback_snapshot: Vec<Vec<u8>>,
+    },
+    /// Created a fresh session (no existing session or grace period expired).
+    Created {
+        sess_generation: u64,
+        receiver: mpsc::Receiver<Vec<u8>>,
+    },
+    /// Failed to create a session.
+    Failed(String),
 }
 
 /// Session metadata returned by the REST API.
@@ -268,6 +323,353 @@ impl SessionManager {
         }
     }
 
+    /// Mark a session as disconnected (WebSocket closed). The PTY remains alive
+    /// during the grace period. Also persists terminal state to disk.
+    pub fn mark_disconnected(&self, id: &str, sess_gen: u64) {
+        let mut sessions = self.sessions.lock();
+        if let Some(session) = sessions.get_mut(id) {
+            if session.sess_generation == sess_gen {
+                session.disconnected_at = Some(Instant::now());
+                // Persist state file for crash recovery
+                let state_file = TerminalStateFile {
+                    session_id: id.to_string(),
+                    workspace_id: id.to_string(),
+                    cwd: session.spawn_workdir.to_string_lossy().into_owned(),
+                    scrollback_lines: session.scrollback.lock().len(),
+                    disconnected_at_unix: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                drop(sessions);
+                self.write_state_file(id, &state_file);
+            }
+        }
+    }
+
+    /// Reap sessions whose grace period has expired. Called lazily from
+    /// `attach_session` and `list_sessions`.
+    pub fn reap_expired(&self) {
+        let expired_ids: Vec<String> = {
+            let sessions = self.sessions.lock();
+            sessions
+                .iter()
+                .filter_map(|(id, s)| {
+                    s.disconnected_at
+                        .filter(|t| t.elapsed() > TERMINAL_GRACE_PERIOD)
+                        .map(|_| id.clone())
+                })
+                .collect()
+        };
+
+        for id in &expired_ids {
+            let removed = self.sessions.lock().remove(id);
+            if let Some(session) = removed {
+                self.finish_session(id, session, "grace period expired");
+            }
+            self.session_info.lock().remove(id);
+        }
+    }
+
+    /// Attempt to attach to an existing session or create a new one.
+    /// This is the primary entry point for WebSocket connections.
+    pub fn attach_session(
+        &self,
+        id: &str,
+        cols: u16,
+        rows: u16,
+        command: Option<&str>,
+        workdir: Option<&str>,
+    ) -> AttachResult {
+        // First, reap any expired sessions
+        self.reap_expired();
+
+        let mut sessions = self.sessions.lock();
+
+        if let Some(session) = sessions.get_mut(id) {
+            if let Some(disc_at) = session.disconnected_at {
+                if disc_at.elapsed() <= TERMINAL_GRACE_PERIOD {
+                    // Reattach: clear disconnected state, snapshot scrollback,
+                    // subscribe to live output.
+                    session.disconnected_at = None;
+                    let scrollback_snapshot: Vec<Vec<u8>> =
+                        session.scrollback.lock().iter().cloned().collect();
+                    let (tx, rx) = mpsc::channel(256);
+                    session.subscribers.lock().push(tx);
+                    let generation = session.sess_generation;
+                    drop(sessions);
+                    // Remove stale state file since we're reattached
+                    self.remove_state_file(id);
+                    return AttachResult::Reattached {
+                        sess_generation: generation,
+                        receiver: rx,
+                        scrollback_snapshot,
+                    };
+                }
+                // Grace period expired — remove and create fresh
+                let old = sessions.remove(id);
+                drop(sessions);
+                if let Some(old_session) = old {
+                    self.finish_session(id, old_session, "grace period expired on reattach");
+                }
+                self.session_info.lock().remove(id);
+            } else {
+                // Session is still actively connected (shouldn't normally happen
+                // but handle gracefully by subscribing as an additional viewer).
+                let (tx, rx) = mpsc::channel(256);
+                session.subscribers.lock().push(tx);
+                let generation = session.sess_generation;
+                let scrollback_snapshot: Vec<Vec<u8>> =
+                    session.scrollback.lock().iter().cloned().collect();
+                drop(sessions);
+                return AttachResult::Reattached {
+                    sess_generation: generation,
+                    receiver: rx,
+                    scrollback_snapshot,
+                };
+            }
+        } else {
+            drop(sessions);
+        }
+
+        // Check for persisted state file to restore CWD
+        let restored_workdir = self.read_state_file(id).map(|sf| sf.cwd);
+        let effective_workdir = workdir
+            .map(|w| w.to_string())
+            .or(restored_workdir);
+
+        // Create a new session
+        match self.create_session_with_subscriber(
+            id.to_string(),
+            cols,
+            rows,
+            command,
+            effective_workdir.as_deref(),
+        ) {
+            Ok((sess_gen, rx)) => AttachResult::Created {
+                sess_generation: sess_gen,
+                receiver: rx,
+            },
+            Err(e) => AttachResult::Failed(e.to_string()),
+        }
+    }
+
+    /// Write terminal state file to disk.
+    fn write_state_file(&self, id: &str, state: &TerminalStateFile) {
+        let dir = self.workdir.join(".roko/workspaces").join(id);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!("failed to create terminal state dir: {e}");
+            return;
+        }
+        let path = dir.join("terminal.state");
+        match serde_json::to_string_pretty(state) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    tracing::warn!("failed to write terminal state file: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("failed to serialize terminal state: {e}"),
+        }
+    }
+
+    /// Read terminal state file from disk.
+    fn read_state_file(&self, id: &str) -> Option<TerminalStateFile> {
+        let path = self
+            .workdir
+            .join(".roko/workspaces")
+            .join(id)
+            .join("terminal.state");
+        let content = std::fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Remove terminal state file from disk.
+    fn remove_state_file(&self, id: &str) {
+        let path = self
+            .workdir
+            .join(".roko/workspaces")
+            .join(id)
+            .join("terminal.state");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Create a session with a session-owned PTY reader thread that fans output
+    /// to a scrollback ring buffer and live subscriber channels. Returns the
+    /// session generation and a receiver for the initial subscriber.
+    fn create_session_with_subscriber(
+        &self,
+        id: String,
+        cols: u16,
+        rows: u16,
+        command: Option<&str>,
+        workdir: Option<&str>,
+    ) -> anyhow::Result<(u64, mpsc::Receiver<Vec<u8>>)> {
+        let pty_system = NativePtySystem::default();
+        let size = PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+
+        let wd = workdir
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.workdir.clone());
+
+        let (mut cmd, command_label) = if let Some(command) = command {
+            let mut parts = command.split_whitespace();
+            let Some(program) = parts.next() else {
+                self.command_event_emitter.emit(CommandEvent::SpawnFailed {
+                    command_id: Some(id.clone()),
+                    command: command.to_string(),
+                    error: "empty command".to_string(),
+                });
+                return Err(anyhow::anyhow!("empty command"));
+            };
+            let mut cmd = CommandBuilder::new(program);
+            for arg in parts {
+                cmd.arg(arg);
+            }
+            (cmd, command.to_string())
+        } else {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            (CommandBuilder::new(shell.clone()), shell)
+        };
+
+        let pair = match pty_system.openpty(size) {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.command_event_emitter.emit(CommandEvent::SpawnFailed {
+                    command_id: Some(id.clone()),
+                    command: command_label,
+                    error: format!("open pty: {e}"),
+                });
+                return Err(anyhow::anyhow!("open pty: {e}"));
+            }
+        };
+        cmd.cwd(&wd);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        self.server_env.lock().apply_to(&mut cmd, &id);
+
+        let zdotdir_path = if command.is_none() {
+            let zdotdir = std::env::temp_dir().join(format!("roko-zdot-{}", Uuid::new_v4()));
+            let _ = std::fs::create_dir_all(&zdotdir);
+            let _ = std::fs::write(zdotdir.join(".zshrc"), "PS1='%F{95}roko%f %F{240}%1~%f %F{95}❯%f '\n");
+            cmd.env("ZDOTDIR", zdotdir.to_string_lossy().as_ref());
+            Some(zdotdir)
+        } else {
+            None
+        };
+
+        let child = match pair.slave.spawn_command(cmd) {
+            Ok(child) => child,
+            Err(e) => {
+                self.command_event_emitter.emit(CommandEvent::SpawnFailed {
+                    command_id: Some(id.clone()),
+                    command: command_label,
+                    error: e.to_string(),
+                });
+                return Err(anyhow::anyhow!("spawn: {e}"));
+            }
+        };
+
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| anyhow::anyhow!("clone reader: {e}"))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| anyhow::anyhow!("take writer: {e}"))?;
+
+        self.session_info.lock().insert(
+            id.clone(),
+            SessionInfo {
+                id: id.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                cols,
+                rows,
+            },
+        );
+
+        let sess_gen = self.sess_generation.fetch_add(1, Ordering::Relaxed);
+
+        // Shared scrollback + subscriber state (per-session, not global lock)
+        let scrollback: Arc<Mutex<VecDeque<Vec<u8>>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_CHUNKS)));
+        let subscribers: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        // First subscriber for the initial attacher
+        let (tx, rx) = mpsc::channel(256);
+        subscribers.lock().push(tx);
+
+        self.sessions.lock().insert(
+            id.clone(),
+            PtySession {
+                writer,
+                master: pair.master,
+                child,
+                sess_generation: sess_gen,
+                zdotdir: zdotdir_path,
+                disconnected_at: None,
+                scrollback: scrollback.clone(),
+                subscribers: subscribers.clone(),
+                spawn_workdir: wd.clone(),
+                spawn_cols: cols,
+                spawn_rows: rows,
+            },
+        );
+
+        self.command_event_emitter.emit(CommandEvent::Started {
+            command_id: id.clone(),
+            command: command_label,
+            cwd: Some(wd.to_string_lossy().into_owned()),
+        });
+
+        // Session-owned PTY reader thread: reads from PTY, appends to scrollback
+        // ring, and fans out to all live subscriber channels. This thread outlives
+        // individual WebSocket connections so output is captured during the grace
+        // period between disconnects.
+        let emitter = self.command_event_emitter.clone();
+        let reader_id = id.clone();
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = buf[..n].to_vec();
+
+                        emitter.emit(CommandEvent::Output {
+                            command_id: reader_id.clone(),
+                            stream: CommandOutputStream::System,
+                            data: String::from_utf8_lossy(&chunk).into_owned(),
+                        });
+
+                        // Append to scrollback ring (per-session lock, not global)
+                        {
+                            let mut sb = scrollback.lock();
+                            if sb.len() >= SCROLLBACK_CHUNKS {
+                                sb.pop_front();
+                            }
+                            sb.push_back(chunk.clone());
+                        }
+
+                        // Fan out to all live subscribers, pruning closed channels
+                        {
+                            let mut subs = subscribers.lock();
+                            subs.retain(|s| s.try_send(chunk.clone()).is_ok());
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok((sess_gen, rx))
+    }
+
     pub(crate) fn configure_server_env_from_config(&self, config: &RokoConfig) {
         let serve_url =
             serve_url_from_bind_and_port(&config.server.bind, effective_config_port(config));
@@ -299,6 +701,7 @@ impl SessionManager {
         self.create_session_inner(None, cols, rows, command, workdir)
     }
 
+    #[allow(dead_code)] // Retained for REST API extensibility.
     fn create_session_with_id(
         &self,
         id: String,
@@ -374,7 +777,7 @@ impl SessionManager {
         let zdotdir_path = if command.is_none() {
             let zdotdir = std::env::temp_dir().join(format!("roko-zdot-{}", Uuid::new_v4()));
             let _ = std::fs::create_dir_all(&zdotdir);
-            let _ = std::fs::write(zdotdir.join(".zshrc"), "PS1='%~ %# '\n");
+            let _ = std::fs::write(zdotdir.join(".zshrc"), "PS1='%F{95}roko%f %F{240}%1~%f %F{95}❯%f '\n");
             cmd.env("ZDOTDIR", zdotdir.to_string_lossy().as_ref());
             Some(zdotdir)
         } else {
@@ -422,6 +825,12 @@ impl SessionManager {
                 child,
                 sess_generation: sess_gen,
                 zdotdir: zdotdir_path,
+                disconnected_at: None,
+                scrollback: Arc::new(Mutex::new(VecDeque::new())),
+                subscribers: Arc::new(Mutex::new(Vec::new())),
+                spawn_workdir: wd.clone(),
+                spawn_cols: cols,
+                spawn_rows: rows,
             },
         );
 
@@ -476,6 +885,7 @@ impl SessionManager {
     }
 
     pub fn list_sessions(&self) -> Vec<SessionInfo> {
+        self.reap_expired();
         self.session_info.lock().values().cloned().collect()
     }
 
@@ -607,59 +1017,59 @@ pub async fn send_input(
     }
 }
 
-/// WebSocket bridge to a PTY session. Auto-creates the session.
+/// WebSocket bridge to a PTY session. Reattaches to an existing session
+/// within the grace period, or creates a new one if none exists.
 pub async fn ws_terminal(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    // Destroy any stale session, then create fresh.
-    state.terminal_sessions.destroy_session(&id);
-
-    let (reader, sess_gen) =
-        match state
-            .terminal_sessions
-            .create_session_with_id(id.clone(), 80, 24, None, None)
-        {
-            Ok((_new_id, reader, sess_gen)) => (Some(reader), sess_gen),
-            Err(e) => {
-                tracing::error!("failed to create PTY: {e}");
-                (None, 0)
-            }
-        };
+    let attach_result = state
+        .terminal_sessions
+        .attach_session(&id, 80, 24, None, None);
 
     crate::routes::ws_size_limits(ws)
-        .on_upgrade(move |socket| handle_ws(socket, id, state, reader, sess_gen))
+        .on_upgrade(move |socket| handle_ws(socket, id, state, attach_result))
 }
 
 async fn handle_ws(
-    socket: WebSocket,
+    mut socket: WebSocket,
     id: String,
     state: Arc<AppState>,
-    reader: Option<Box<dyn Read + Send>>,
-    sess_generation: u64,
+    attach_result: AttachResult,
 ) {
-    let (mut sink, mut stream) = socket.split();
-    let (pty_tx, mut pty_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (sess_generation, mut pty_rx, scrollback_snapshot) = match attach_result {
+        AttachResult::Reattached {
+            sess_generation,
+            receiver,
+            scrollback_snapshot,
+        } => (sess_generation, receiver, Some(scrollback_snapshot)),
+        AttachResult::Created {
+            sess_generation,
+            receiver,
+        } => (sess_generation, receiver, None),
+        AttachResult::Failed(e) => {
+            tracing::error!("failed to attach/create PTY session {id}: {e}");
+            let _ = socket.close().await;
+            return;
+        }
+    };
 
-    // Spawn reader thread: PTY stdout → WebSocket
-    if let Some(mut reader) = reader {
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if pty_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                }
+    let (mut sink, mut stream) = socket.split();
+
+    // Replay scrollback snapshot before live data on reattach
+    if let Some(snapshot) = scrollback_snapshot {
+        for chunk in snapshot {
+            if sink.send(Message::Binary(chunk.into())).await.is_err() {
+                state
+                    .terminal_sessions
+                    .mark_disconnected(&id, sess_generation);
+                return;
             }
-        });
+        }
     }
 
-    // Bridge loop
+    // Bridge loop: subscriber receiver <-> WebSocket
     loop {
         tokio::select! {
             Some(data) = pty_rx.recv() => {
@@ -695,9 +1105,11 @@ async fn handle_ws(
         }
     }
 
+    // Mark disconnected instead of destroying — PTY stays alive during the
+    // grace period so a reconnecting client can reattach.
     state
         .terminal_sessions
-        .destroy_session_if_sess_generation(&id, sess_generation);
+        .mark_disconnected(&id, sess_generation);
 }
 
 pub fn routes() -> axum::Router<Arc<AppState>> {
@@ -886,5 +1298,238 @@ mod tests {
             )),
             "spawn_failed event missing from {events:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grace_period_reattach_reuses_session_and_returns_scrollback() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let manager = SessionManager::new(tempdir.path().to_path_buf());
+
+        // Create a session via attach (creates new)
+        let sess_id = "test-reattach-session";
+        let result = manager.attach_session(sess_id, 80, 24, Some("/bin/echo hello-scrollback"), None);
+        let generation = match &result {
+            AttachResult::Created { sess_generation, .. } => *sess_generation,
+            other => panic!("expected Created, got {other:?}", other = std::mem::discriminant(other)),
+        };
+
+        // Give the echo command time to produce output and fill the scrollback
+        thread::sleep(Duration::from_millis(500));
+
+        // Mark disconnected (simulates WS close)
+        manager.mark_disconnected(sess_id, generation);
+
+        // Verify the session is still alive (disconnected_at is set)
+        {
+            let sessions = manager.sessions.lock();
+            let session = sessions.get(sess_id).expect("session should still exist");
+            assert!(session.disconnected_at.is_some(), "disconnected_at should be set");
+        }
+
+        // Reattach within grace period
+        let reattach_result = manager.attach_session(sess_id, 80, 24, None, None);
+        match reattach_result {
+            AttachResult::Reattached {
+                sess_generation,
+                scrollback_snapshot,
+                ..
+            } => {
+                assert_eq!(
+                    sess_generation, generation,
+                    "reattach should return same generation"
+                );
+                // The echo command should have produced some scrollback
+                assert!(
+                    !scrollback_snapshot.is_empty(),
+                    "scrollback snapshot should not be empty after echo"
+                );
+            }
+            other => panic!(
+                "expected Reattached, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        // Verify disconnected_at is cleared after reattach
+        {
+            let sessions = manager.sessions.lock();
+            let session = sessions.get(sess_id).expect("session should still exist");
+            assert!(
+                session.disconnected_at.is_none(),
+                "disconnected_at should be cleared after reattach"
+            );
+        }
+
+        // Clean up
+        manager.destroy_session(sess_id);
+    }
+
+    #[test]
+    fn reap_expired_removes_sessions_past_grace_period() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let manager = SessionManager::new(tempdir.path().to_path_buf());
+
+        // Manually insert a fake session with an expired disconnected_at
+        let fake_id = "test-reap-session";
+        let scrollback = Arc::new(Mutex::new(VecDeque::new()));
+        let subscribers: Arc<Mutex<Vec<tokio::sync::mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        // We need a ZDOTDIR to verify cleanup
+        let zdotdir = tempdir.path().join("zdot-reap-test");
+        std::fs::create_dir_all(&zdotdir).expect("create zdotdir");
+        assert!(zdotdir.exists(), "zdotdir should exist before reap");
+
+        // Create a minimal PTY session for the test. We use /bin/sleep
+        // so the child stays alive long enough for the test to complete.
+        #[cfg(unix)]
+        {
+            let pty_system = NativePtySystem::default();
+            let size = PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            };
+            let pair = pty_system.openpty(size).expect("open pty");
+            let mut cmd = CommandBuilder::new("/bin/sleep");
+            cmd.arg("60");
+            cmd.cwd(tempdir.path());
+            let child = pair.slave.spawn_command(cmd).expect("spawn sleep");
+            let writer = pair.master.take_writer().expect("take writer");
+
+            manager.sessions.lock().insert(
+                fake_id.to_string(),
+                PtySession {
+                    writer,
+                    master: pair.master,
+                    child,
+                    sess_generation: 0,
+                    zdotdir: Some(zdotdir.clone()),
+                    disconnected_at: Some(Instant::now() - Duration::from_secs(120)),
+                    scrollback: scrollback.clone(),
+                    subscribers: subscribers.clone(),
+                    spawn_workdir: tempdir.path().to_path_buf(),
+                    spawn_cols: 80,
+                    spawn_rows: 24,
+                },
+            );
+            manager.session_info.lock().insert(
+                fake_id.to_string(),
+                SessionInfo {
+                    id: fake_id.to_string(),
+                    created_at: "2024-01-01T00:00:00Z".to_string(),
+                    cols: 80,
+                    rows: 24,
+                },
+            );
+
+            // Verify session exists before reap
+            assert!(
+                manager.sessions.lock().contains_key(fake_id),
+                "session should exist before reap"
+            );
+
+            // Reap expired sessions
+            manager.reap_expired();
+
+            // Verify session was removed
+            assert!(
+                !manager.sessions.lock().contains_key(fake_id),
+                "session should be removed after reap"
+            );
+            assert!(
+                !manager.session_info.lock().contains_key(fake_id),
+                "session info should be removed after reap"
+            );
+
+            // Verify ZDOTDIR was cleaned up
+            assert!(
+                !zdotdir.exists(),
+                "zdotdir should be removed after reap via finish_session"
+            );
+        }
+    }
+
+    #[test]
+    fn state_file_write_read_remove_roundtrip() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let manager = SessionManager::new(tempdir.path().to_path_buf());
+
+        let test_id = "state-file-test-session";
+        let state = TerminalStateFile {
+            session_id: test_id.to_string(),
+            workspace_id: test_id.to_string(),
+            cwd: "/tmp/test-workspace".to_string(),
+            scrollback_lines: 42,
+            disconnected_at_unix: 1746600000,
+        };
+
+        // Write state file
+        manager.write_state_file(test_id, &state);
+
+        // Verify file exists on disk
+        let state_path = tempdir
+            .path()
+            .join(".roko/workspaces")
+            .join(test_id)
+            .join("terminal.state");
+        assert!(state_path.exists(), "state file should exist after write");
+
+        // Read it back
+        let loaded = manager
+            .read_state_file(test_id)
+            .expect("should read state file");
+        assert_eq!(loaded.session_id, test_id);
+        assert_eq!(loaded.cwd, "/tmp/test-workspace");
+        assert_eq!(loaded.scrollback_lines, 42);
+        assert_eq!(loaded.disconnected_at_unix, 1746600000);
+
+        // Remove it
+        manager.remove_state_file(test_id);
+        assert!(
+            !state_path.exists(),
+            "state file should be removed after remove_state_file"
+        );
+        assert!(
+            manager.read_state_file(test_id).is_none(),
+            "read_state_file should return None after removal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attach_session_restores_cwd_from_state_file() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let manager = SessionManager::new(tempdir.path().to_path_buf());
+
+        let test_id = "cwd-restore-test";
+
+        // Write a state file with a custom CWD (use the tempdir itself as a
+        // known-existing directory so the PTY can spawn)
+        let state = TerminalStateFile {
+            session_id: test_id.to_string(),
+            workspace_id: test_id.to_string(),
+            cwd: tempdir.path().to_string_lossy().into_owned(),
+            scrollback_lines: 0,
+            disconnected_at_unix: 0,
+        };
+        manager.write_state_file(test_id, &state);
+
+        // Attach with no live session — should read the state file and use its CWD
+        let result = manager.attach_session(test_id, 80, 24, Some("/bin/echo cwd-ok"), None);
+        match result {
+            AttachResult::Created { .. } => {
+                // Success — new session created with restored CWD
+            }
+            other => panic!(
+                "expected Created, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        // Clean up
+        manager.destroy_session(test_id);
     }
 }

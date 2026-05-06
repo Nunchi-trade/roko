@@ -218,6 +218,16 @@ pub fn cmd_show(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Print the fully-resolved config as TOML after global merge and env var overrides.
+pub fn cmd_show_effective(workdir: &Path) -> Result<()> {
+    let config = roko_core::config::loader::load_config_unified(workdir)
+        .map_err(|e| anyhow::anyhow!("load config: {e}"))?;
+    let toml_str = roko_core::config::loader::serialize_effective(&config)
+        .map_err(|e| anyhow::anyhow!("serialize config: {e}"))?;
+    print!("{toml_str}");
+    Ok(())
+}
+
 /// Print the resolved config paths (global + project + env override).
 pub fn cmd_path(workdir: &Path) -> Result<()> {
     let resolved = load_resolved_config(workdir)?;

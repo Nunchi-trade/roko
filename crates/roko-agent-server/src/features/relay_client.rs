@@ -4,14 +4,118 @@ use std::sync::Arc;
 
 use agent_relay::protocol::{AgentHello, AgentInboundFrame, RelayOutboundFrame};
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 use crate::registration::AgentCard;
 use crate::state::{AgentState, DispatchError};
 
 type RelaySocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Callback interface for receiving topic messages from the relay.
+#[async_trait]
+pub trait TopicHandler: Send + Sync + 'static {
+    /// Called when a message arrives on a subscribed topic.
+    async fn on_topic_message(
+        &self,
+        topic: &str,
+        msg_type: &str,
+        payload: serde_json::Value,
+        publisher_id: Option<&str>,
+        seq: u64,
+    );
+}
+
+/// Handle returned from [`connect`] that allows sending pub/sub frames.
+///
+/// The handle is cheap to clone — each clone shares the same underlying
+/// sender channel.  If the background relay task stops (e.g. the relay
+/// disconnects), subsequent sends return an error but will never panic.
+#[derive(Clone)]
+pub struct RelayHandle {
+    outbound_tx: mpsc::UnboundedSender<AgentInboundFrame>,
+}
+
+impl RelayHandle {
+    /// Subscribe to a topic on the relay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the relay connection has been closed.
+    pub fn subscribe(&self, topic: impl Into<String>) -> Result<()> {
+        self.outbound_tx
+            .send(AgentInboundFrame::Subscribe {
+                topic: topic.into(),
+            })
+            .map_err(|_| anyhow!("relay connection closed"))
+    }
+
+    /// Unsubscribe from a previously subscribed topic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the relay connection has been closed.
+    pub fn unsubscribe(&self, topic: impl Into<String>) -> Result<()> {
+        self.outbound_tx
+            .send(AgentInboundFrame::Unsubscribe {
+                topic: topic.into(),
+            })
+            .map_err(|_| anyhow!("relay connection closed"))
+    }
+
+    /// Register a feed with the relay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the relay connection has been closed.
+    pub fn register_feed(
+        &self,
+        feed_id: impl Into<String>,
+        topic: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        kind: impl Into<String>,
+        rate: impl Into<String>,
+    ) -> Result<()> {
+        self.outbound_tx
+            .send(AgentInboundFrame::RegisterFeed {
+                feed: agent_relay::protocol::FeedDescriptor {
+                    feed_id: feed_id.into(),
+                    topic: topic.into(),
+                    name: name.into(),
+                    description: description.into(),
+                    kind: kind.into(),
+                    rate: rate.into(),
+                    schema: None,
+                },
+            })
+            .map_err(|_| anyhow!("relay connection closed"))
+    }
+
+    /// Publish a message to a topic.  The relay fans the message out to all
+    /// current subscribers of that topic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the relay connection has been closed.
+    pub fn publish(
+        &self,
+        topic: impl Into<String>,
+        msg_type: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.outbound_tx
+            .send(AgentInboundFrame::Publish {
+                topic: topic.into(),
+                msg_type: msg_type.into(),
+                payload,
+            })
+            .map_err(|_| anyhow!("relay connection closed"))
+    }
+}
 
 /// Configuration for connecting an agent runtime to `agent-relay`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +152,11 @@ impl RelayClientConfig {
 
 /// Connect an agent runtime to the relay and keep servicing relay messages.
 ///
+/// Returns a [`RelayHandle`] that can be used to subscribe to topics,
+/// unsubscribe, and publish messages after the connection is established.
+/// Pass `topic_handler` to receive incoming [`RelayOutboundFrame::TopicMessage`]
+/// frames; pass `None` if pub/sub delivery is not required.
+///
 /// # Errors
 ///
 /// Returns an error if the websocket connection or hello handshake fails.
@@ -55,7 +164,8 @@ pub async fn connect(
     config: RelayClientConfig,
     state: Arc<AgentState>,
     card: AgentCard,
-) -> Result<()> {
+    topic_handler: Option<Arc<dyn TopicHandler>>,
+) -> Result<RelayHandle> {
     let websocket_url = config.websocket_url()?;
     let card_uri = config.card_uri(state.agent_id())?;
     let relay_card = serde_json::to_value(&card)?;
@@ -86,27 +196,54 @@ pub async fn connect(
     )
     .await?;
 
+    // Channel used by `RelayHandle` to enqueue outbound pub/sub frames.
+    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<AgentInboundFrame>();
+
     tokio::spawn(async move {
-        if let Err(error) = run(socket, state).await {
+        if let Err(error) = run(socket, state, topic_handler, outbound_rx).await {
             tracing::warn!(%error, "relay client stopped");
         }
     });
 
-    Ok(())
+    Ok(RelayHandle { outbound_tx })
 }
 
-async fn run(mut socket: RelaySocket, state: Arc<AgentState>) -> Result<()> {
-    while let Some(frame) = socket.next().await {
-        match frame? {
-            Message::Text(text) => {
-                let outbound: RelayOutboundFrame = serde_json::from_str(text.as_str())?;
-                handle_outbound_frame(&mut socket, &state, outbound).await?;
+async fn run(
+    mut socket: RelaySocket,
+    state: Arc<AgentState>,
+    topic_handler: Option<Arc<dyn TopicHandler>>,
+    mut outbound_rx: mpsc::UnboundedReceiver<AgentInboundFrame>,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            // Incoming frames from the relay.
+            incoming = socket.next() => {
+                match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        let outbound: RelayOutboundFrame = serde_json::from_str(text.as_str())?;
+                        handle_outbound_frame(&mut socket, &state, topic_handler.as_ref(), outbound).await?;
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        socket.send(Message::Pong(payload)).await?;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => return Err(error.into()),
+                }
             }
-            Message::Ping(payload) => {
-                socket.send(Message::Pong(payload)).await?;
+            // Outbound pub/sub frames queued via RelayHandle.
+            frame = outbound_rx.recv() => {
+                match frame {
+                    Some(frame) => {
+                        let json = serde_json::to_string(&frame)?;
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    // All RelayHandle senders dropped — no more outbound frames possible.
+                    None => break,
+                }
             }
-            Message::Close(_) => break,
-            _ => {}
         }
     }
     Ok(())
@@ -115,6 +252,7 @@ async fn run(mut socket: RelaySocket, state: Arc<AgentState>) -> Result<()> {
 async fn handle_outbound_frame(
     socket: &mut RelaySocket,
     state: &Arc<AgentState>,
+    topic_handler: Option<&Arc<dyn TopicHandler>>,
     frame: RelayOutboundFrame,
 ) -> Result<()> {
     match frame {
@@ -133,6 +271,20 @@ async fn handle_outbound_frame(
                 },
             };
             send_frame(socket, response).await?;
+        }
+        RelayOutboundFrame::TopicMessage {
+            topic,
+            msg_type,
+            payload,
+            publisher_id,
+            seq,
+        } => {
+            tracing::debug!(%topic, %msg_type, seq, "received topic message");
+            if let Some(handler) = topic_handler {
+                handler
+                    .on_topic_message(&topic, &msg_type, payload, publisher_id.as_deref(), seq)
+                    .await;
+            }
         }
         RelayOutboundFrame::Error { error, .. } => {
             tracing::warn!(%error, "relay reported outbound error");
@@ -270,6 +422,8 @@ async fn await_hello_ack(socket: &mut RelaySocket) -> Result<()> {
                     RelayOutboundFrame::Message { .. } => {
                         return Err(anyhow!("relay sent a message before hello ack"));
                     }
+                    // A TopicMessage before hello ack is unexpected but harmless.
+                    RelayOutboundFrame::TopicMessage { .. } => {}
                 }
             }
             Message::Ping(payload) => {
@@ -344,6 +498,21 @@ mod tests {
         assert_eq!(
             extract_prompt(&Value::String("hello from string".to_string())),
             Some("hello from string".to_string())
+        );
+    }
+
+    #[test]
+    fn relay_handle_subscribe_returns_error_on_closed_channel() {
+        // Create a sender whose receiver has been dropped, simulating a dead relay.
+        let (tx, rx) = mpsc::unbounded_channel::<AgentInboundFrame>();
+        drop(rx);
+        let handle = RelayHandle { outbound_tx: tx };
+        assert!(handle.subscribe("topic").is_err());
+        assert!(handle.unsubscribe("topic").is_err());
+        assert!(
+            handle
+                .publish("topic", "rate_update", serde_json::json!({}))
+                .is_err()
         );
     }
 }

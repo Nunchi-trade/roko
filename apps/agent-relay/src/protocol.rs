@@ -1,3 +1,4 @@
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -67,6 +68,22 @@ pub struct RelayMessageResponse {
     pub response: Value,
 }
 
+/// Descriptor for a data feed an agent can provide.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FeedDescriptor {
+    pub feed_id: String,
+    pub topic: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub rate: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<Value>,
+}
+
 /// Frames the relay receives from agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -87,6 +104,28 @@ pub enum AgentInboundFrame {
         error: String,
     },
     Ping,
+    /// Subscribe to a topic. Relay will forward matching TopicEnvelopes.
+    Subscribe {
+        topic: String,
+    },
+    /// Unsubscribe from a previously subscribed topic.
+    Unsubscribe {
+        topic: String,
+    },
+    /// Publish a message to a topic. Relay fans out to all subscribers.
+    Publish {
+        topic: String,
+        msg_type: String,
+        payload: serde_json::Value,
+    },
+    /// Register a data feed this agent provides.
+    RegisterFeed {
+        feed: FeedDescriptor,
+    },
+    /// Unregister a previously registered feed.
+    UnregisterFeed {
+        feed_id: String,
+    },
 }
 
 /// Frames the relay sends to agents.
@@ -106,6 +145,53 @@ pub enum RelayOutboundFrame {
         error: String,
     },
     Pong,
+    /// A message published to a topic this agent is subscribed to.
+    TopicMessage {
+        topic: String,
+        msg_type: String,
+        payload: serde_json::Value,
+        publisher_id: Option<String>,
+        seq: u64,
+    },
+}
+
+/// Internal representation of a published topic message.
+/// Used within the relay bus; serialized as TopicMessage when sent to agents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicEnvelope {
+    pub topic: String,
+    pub msg_type: String,
+    pub payload: serde_json::Value,
+    pub publisher_id: Option<String>,
+    pub seq: u64,
+    pub timestamp_ms: i64,
+}
+
+impl TopicEnvelope {
+    pub fn new(
+        topic: impl Into<String>,
+        msg_type: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            topic: topic.into(),
+            msg_type: msg_type.into(),
+            payload,
+            publisher_id: None,
+            seq: 0,
+            timestamp_ms: Utc::now().timestamp_millis(),
+        }
+    }
+
+    pub fn with_publisher(mut self, id: impl Into<String>) -> Self {
+        self.publisher_id = Some(id.into());
+        self
+    }
+
+    pub fn with_seq(mut self, seq: u64) -> Self {
+        self.seq = seq;
+        self
+    }
 }
 
 /// Workspace hello frame sent by roko-serve on startup.
@@ -177,5 +263,13 @@ pub enum RelayEvent {
     WorkspaceHeartbeat {
         workspace_id: String,
         agents_count: u32,
+    },
+    FeedRegistered {
+        agent_id: String,
+        feed: FeedDescriptor,
+    },
+    FeedUnregistered {
+        agent_id: String,
+        feed_id: String,
     },
 }

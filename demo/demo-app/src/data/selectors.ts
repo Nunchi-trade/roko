@@ -157,3 +157,44 @@ export const useBenchSlice = () =>
       fetchBenchModels: s.fetchBenchModels,
     })),
   );
+
+// ── ISFR ────────────────────────────────────────────────────────────
+
+/** Current ISFR composite rate (null until first computation). */
+export const useIsfrCurrentRate = () => useDataHub((s) => s.isfrCurrentRate);
+
+/** ISFR rate history ring buffer. */
+export const useIsfrHistory = () => useDataHub((s) => s.isfrHistory);
+
+/** ISFR source health list. */
+export const useIsfrSources = () => useDataHub((s) => s.isfrSources);
+
+/** ISFR keeper running/stopped/unknown. */
+export const useIsfrKeeperStatus = () => useDataHub((s) => s.isfrKeeperStatus);
+
+/** Full ISFR slice for dashboard tiles. */
+export const useIsfrSlice = () =>
+  useDataHub(
+    useShallow((s) => ({
+      currentRate: s.isfrCurrentRate,
+      history: s.isfrHistory,
+      sources: s.isfrSources,
+      keeperStatus: s.isfrKeeperStatus,
+      fetchIsfrStatus: s.fetchIsfrStatus,
+      fetchIsfrCurrent: s.fetchIsfrCurrent,
+      fetchIsfrHistory: s.fetchIsfrHistory,
+      fetchIsfrSources: s.fetchIsfrSources,
+    })),
+  );
+
+/** Derived: composite rate as percentage (bps / 100). */
+export const useIsfrCompositePercent = () =>
+  useDataHub((s) =>
+    s.isfrCurrentRate ? s.isfrCurrentRate.compositeBps / 100 : null,
+  );
+
+/** Derived: number of live (healthy) sources. */
+export const useIsfrHealthySourceCount = () =>
+  useDataHub(
+    (s) => s.isfrSources.filter((src) => src.health === 'live').length,
+  );

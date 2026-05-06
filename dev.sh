@@ -84,12 +84,14 @@ jq_or_raw() {
 
 # ── cmd: up ──────────────────────────────────────────────────
 cmd_up() {
-  local watch=false no_vite=false release=false
+  local watch=false no_vite=false release=false chain=true
   while [ $# -gt 0 ]; do
     case "$1" in
-      --watch|-w) watch=true ;;
-      --no-vite)  no_vite=true ;;
-      --release)  release=true ;;
+      --watch|-w)  watch=true ;;
+      --no-vite)   no_vite=true ;;
+      --release)   release=true ;;
+      --chain|-c)  chain=true ;;
+      --no-chain)  chain=false ;;
       *) die "Unknown option: $1" ;;
     esac
     shift
@@ -103,9 +105,15 @@ cmd_up() {
     trap - EXIT INT TERM
     echo ""
     info "Shutting down..."
-    [ -n "${SERVE_PID:-}" ] && kill "$SERVE_PID" 2>/dev/null || true
-    [ -n "${VITE_PID:-}" ]  && kill "$VITE_PID"  2>/dev/null || true
+    [ -n "${MIRAGE_PID:-}" ]         && kill "$MIRAGE_PID" 2>/dev/null || true
+    [ -n "${RELAY_PID:-}" ]          && kill "$RELAY_PID" 2>/dev/null || true
+    [ -n "${SERVE_PID:-}" ]          && kill "$SERVE_PID" 2>/dev/null || true
+    [ -n "${VITE_PID:-}" ]           && kill "$VITE_PID"  2>/dev/null || true
+    [ -n "${LENDING_SCOUT_PID:-}" ]  && kill "$LENDING_SCOUT_PID" 2>/dev/null || true
+    [ -n "${STAKING_SCOUT_PID:-}" ]  && kill "$STAKING_SCOUT_PID" 2>/dev/null || true
     lsof -ti:$SERVE_PORT 2>/dev/null | xargs kill 2>/dev/null || true
+    lsof -ti:9011 2>/dev/null | xargs kill 2>/dev/null || true
+    lsof -ti:8545 2>/dev/null | xargs kill 2>/dev/null || true
     wait 2>/dev/null
     ok "Done."
   }
@@ -119,6 +127,97 @@ cmd_up() {
     echo "$stale" | xargs kill 2>/dev/null || true
     sleep 1
   fi
+
+  # Start mirage-rs if --chain flag passed
+  if $chain; then
+    local mirage_bin
+    if command -v mirage-rs &>/dev/null; then
+      mirage_bin="mirage-rs"
+    elif [ -x "./target/release/mirage-rs" ]; then
+      mirage_bin="./target/release/mirage-rs"
+    else
+      die "mirage-rs not found. Run 'cargo build --release -p mirage-rs' or use --no-chain to skip."
+    fi
+
+    local mirage_stale
+    mirage_stale=$(pids_on_port 8545)
+    if [ -n "$mirage_stale" ]; then
+      warn "Killing stale process(es) on :8545 — PIDs: $mirage_stale"
+      echo "$mirage_stale" | xargs kill 2>/dev/null || true
+      sleep 1
+    fi
+
+    info "Starting mirage-rs (mainnet fork on :8545)..."
+    local rpc_url="${ETH_RPC_URL:-https://cloudflare-eth.com}"
+    "$mirage_bin" \
+      --host 127.0.0.1 \
+      --port 8545 \
+      --rpc-url "$rpc_url" &
+    MIRAGE_PID=$!
+
+    # Wait for mirage BEFORE building contracts (forge needs the fork running)
+    echo -n "[dev] Waiting for mirage-rs..."
+    for i in $(seq 1 30); do
+      if curl -sf http://127.0.0.1:8545 -X POST -H 'Content-Type: application/json' \
+           -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' >/dev/null 2>&1; then
+        echo " ready!"
+        break
+      fi
+      if [ "$i" -eq 30 ]; then
+        echo " timeout (mirage may still be starting)"
+      fi
+      sleep 1
+      echo -n "."
+    done
+
+    export ROKO_MIRAGE_URL="http://127.0.0.1:8545"
+
+    # Build contracts after mirage is up
+    if [ -d "contracts" ] && [ ! -d "contracts/out" ]; then
+      if command -v forge &>/dev/null; then
+        info "Building ISFR contracts..."
+        (cd contracts && forge build) || warn "forge build failed"
+      fi
+    fi
+
+  fi
+
+  # Start agent-relay (always — provides WS event stream + agent registry)
+  local relay_stale
+  relay_stale=$(pids_on_port 9011)
+  if [ -n "$relay_stale" ]; then
+    warn "Killing stale process(es) on :9011 — PIDs: $relay_stale"
+    echo "$relay_stale" | xargs kill 2>/dev/null || true
+    sleep 1
+  fi
+
+  info "Building agent-relay..."
+  cargo build -p agent-relay 2>&1
+
+  local relay_args=(--bind 127.0.0.1:9011)
+  if $chain; then
+    relay_args+=(--rpc-ws-url ws://127.0.0.1:8545 --chain-id 31337)
+  fi
+
+  info "Starting agent-relay on :9011..."
+  ./target/debug/agent-relay "${relay_args[@]}" &
+  RELAY_PID=$!
+
+  # Wait for relay health
+  echo -n "[dev] Waiting for agent-relay..."
+  for i in $(seq 1 10); do
+    if curl -sf http://127.0.0.1:9011/relay/health >/dev/null 2>&1; then
+      echo " ready!"
+      break
+    fi
+    if [ "$i" -eq 10 ]; then
+      echo " timeout (relay may still be starting)"
+    fi
+    sleep 1
+    echo -n "."
+  done
+
+  export ROKO_AGENT_RELAY_URL="http://127.0.0.1:9011"
 
   # Build
   local profile="debug" bin="$ROKO_BIN"
@@ -157,6 +256,13 @@ cmd_up() {
     echo -n "."
   done
 
+  # ISFR on-chain submission: the keeper auto-submits rates to ISFROracle on
+  # each new epoch via the publish callback in start_isfr_keeper(). No separate
+  # agent processes needed — roko serve handles it all.
+  if $chain; then
+    info "ISFR keeper will auto-submit rates to ISFROracle on-chain each epoch"
+  fi
+
   # Start vite
   if ! $no_vite; then
     info "Starting demo-app on :$VITE_PORT..."
@@ -166,8 +272,17 @@ cmd_up() {
 
   echo ""
   echo "${BOLD}═══════════════════════════════════════════════════════${RESET}"
-  echo "  roko serve  → http://localhost:$SERVE_PORT"
-  $no_vite || echo "  demo-app    → http://localhost:$VITE_PORT"
+  $chain && echo "  mirage-rs     → http://localhost:8545 (mainnet fork)"
+  echo "  agent-relay   → http://localhost:9011"
+  echo "  roko serve    → http://localhost:$SERVE_PORT"
+  $no_vite || echo "  demo-app      → http://localhost:$VITE_PORT"
+  if $chain; then
+    echo "  ISFR data     → LIVE (on-chain via mirage-rs)"
+    echo "  ISFR oracle   → keeper auto-submits each epoch"
+    echo "  Feed agents   → 15 active (4 keepers + 11 derived)"
+  else
+    echo "  ISFR data     → MOCK (no chain — use --chain for live data)"
+  fi
   echo "  Ctrl+C to stop all"
   echo "${BOLD}═══════════════════════════════════════════════════════${RESET}"
   echo ""
@@ -180,7 +295,7 @@ cmd_down() {
   info "Stopping roko dev processes..."
   local killed=0
 
-  for pattern in "roko serve" "cargo watch" "vite"; do
+  for pattern in "mirage-rs" "agent-relay" "roko serve" "cargo watch" "vite"; do
     local pids
     pids=$(pgrep -f "$pattern" 2>/dev/null || true)
     if [ -n "$pids" ]; then
@@ -190,7 +305,7 @@ cmd_down() {
     fi
   done
 
-  for port in $SERVE_PORT $VITE_PORT; do
+  for port in 8545 9011 $SERVE_PORT $VITE_PORT; do
     local pids
     pids=$(pids_on_port "$port")
     if [ -n "$pids" ]; then
@@ -210,7 +325,7 @@ cmd_down() {
 # ── cmd: status ──────────────────────────────────────────────
 cmd_status() {
   echo "${BOLD}Processes${RESET}"
-  for pattern in "roko serve" "cargo watch" "vite"; do
+  for pattern in "mirage-rs" "agent-relay" "roko serve" "cargo watch" "vite"; do
     local pids
     pids=$(pgrep -f "$pattern" 2>/dev/null || true)
     if [ -n "$pids" ]; then
@@ -222,7 +337,7 @@ cmd_status() {
 
   echo ""
   echo "${BOLD}Ports${RESET}"
-  for port in $SERVE_PORT $VITE_PORT; do
+  for port in 8545 9011 $SERVE_PORT $VITE_PORT; do
     local pids
     pids=$(pids_on_port "$port")
     if [ -n "$pids" ]; then
@@ -1697,6 +1812,58 @@ cmd_reset_state() {
 }
 
 # ── cmd: help ────────────────────────────────────────────────
+cmd_mirage() {
+  info "Starting mirage-rs in mainnet fork mode..."
+
+  # Kill any existing mirage on port 8545
+  local pids
+  pids=$(pids_on_port 8545)
+  if [ -n "$pids" ]; then
+    echo "$pids" | xargs kill 2>/dev/null || true
+    info "Killed existing mirage on :8545"
+    sleep 1
+  fi
+
+  # Start mirage-rs in fork mode
+  local mirage_bin
+  if command -v mirage-rs &>/dev/null; then
+    mirage_bin="mirage-rs"
+  elif [ -x "./target/release/mirage-rs" ]; then
+    mirage_bin="./target/release/mirage-rs"
+  else
+    die "mirage-rs not found. Run 'cargo build --release -p mirage-rs' first."
+  fi
+  "$mirage_bin" \
+    --host 127.0.0.1 \
+    --port 8545 \
+    --rpc-url https://ethereum-rpc.publicnode.com &
+  local mirage_pid=$!
+  info "mirage-rs started pid=${mirage_pid}"
+
+  # Build contracts if needed
+  if [ -d "demo-ide/demo/contracts" ] && [ ! -d "demo-ide/demo/contracts/out" ]; then
+    if command -v forge &>/dev/null; then
+      info "Building ISFR contracts (first time)..."
+      (cd demo-ide/demo/contracts && forge build) || warn "forge build failed"
+    else
+      warn "forge not found, skipping contract build"
+    fi
+  fi
+
+  # Wait for health check
+  local attempts=30
+  for _ in $(seq 1 "$attempts"); do
+    if curl -fsS http://127.0.0.1:8545/health >/dev/null 2>&1; then
+      ok "mirage-rs ready at http://127.0.0.1:8545 (mainnet fork)"
+      return 0
+    fi
+    sleep 1
+  done
+
+  err "mirage-rs did not become ready after ${attempts}s"
+  return 1
+}
+
 cmd_help() {
   cat <<'HELP'
 dev.sh — Roko dev toolkit
@@ -1705,7 +1872,9 @@ USAGE
   ./dev.sh <command> [options]
 
 COMMANDS
-  up [--watch] [--no-vite] [--release]    Start dev environment
+  up [--watch] [--no-vite] [--release] [--chain]
+                                         Start dev environment
+                                         --chain/-c: start mirage-rs for live ISFR data
   down                                     Kill all roko dev processes
   status (st)                              Processes, ports, health, state
   logs <target> (l)                        Tail logs (serve|episodes|efficiency|events|runtime|errors|all)
@@ -1722,6 +1891,7 @@ COMMANDS
   reset-state --confirm                    Clear .roko/ data (preserves structure)
   pipeline <name> [options] (p)             Run demo pipeline end-to-end in ephemeral workspace
   clean-workspaces [--confirm]             List/remove pipeline workspaces
+  mirage                                   Start mirage-rs in mainnet fork mode (:8545)
   help                                     This message
 
 PIPELINES (./dev.sh pipeline <name>)
@@ -1774,6 +1944,7 @@ case "$cmd" in
   reset-state)             cmd_reset_state "$@" ;;
   pipeline|p)              cmd_pipeline "$@" ;;
   clean-workspaces)        cmd_clean_workspaces "$@" ;;
+  mirage)                  cmd_mirage ;;
   help|-h|--help)          cmd_help ;;
   *)                       die "Unknown command: $cmd (run ./dev.sh help)" ;;
 esac

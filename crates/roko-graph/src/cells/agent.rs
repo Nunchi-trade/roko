@@ -3,7 +3,6 @@
 //! Sends a prompt to an LLM backend and returns the response as a node output.
 //! Configuration includes model, provider, system prompt, and available tools.
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -59,27 +58,34 @@ impl Default for AgentCellConfig {
 }
 
 impl AgentCellConfig {
-    /// Parse config from a node's config map.
-    pub fn from_node_config(config: &HashMap<String, toml::Value>) -> Self {
-        let model = config
+    /// Parse config from a node's TOML config value.
+    ///
+    /// Expects a TOML table; returns defaults if the value is not a table.
+    pub fn from_node_config(config: &toml::Value) -> Self {
+        let table = match config.as_table() {
+            Some(t) => t,
+            None => return Self::default(),
+        };
+
+        let model = table
             .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("claude-sonnet-4-20250514")
             .to_string();
 
-        let provider = config
+        let provider = table
             .get("provider")
             .and_then(|v| v.as_str())
             .unwrap_or("anthropic")
             .to_string();
 
-        let system_prompt = config
+        let system_prompt = table
             .get("system_prompt")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
-        let tools = config
+        let tools = table
             .get("tools")
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -89,12 +95,12 @@ impl AgentCellConfig {
             })
             .unwrap_or_default();
 
-        let max_response_tokens = config
+        let max_response_tokens = table
             .get("max_response_tokens")
             .and_then(|v| v.as_integer())
             .map_or_else(default_max_tokens, |v| v as u32);
 
-        let temperature = config
+        let temperature = table
             .get("temperature")
             .and_then(|v| v.as_float())
             .map_or_else(default_temperature, |v| v as f32);
@@ -382,10 +388,11 @@ mod tests {
 
     #[test]
     fn config_from_node() {
-        let mut config = HashMap::new();
-        config.insert("model".into(), toml::Value::String("gpt-4o".into()));
-        config.insert("provider".into(), toml::Value::String("openai".into()));
-        config.insert("temperature".into(), toml::Value::Float(0.5.into()));
+        let mut table = toml::map::Map::new();
+        table.insert("model".into(), toml::Value::String("gpt-4o".into()));
+        table.insert("provider".into(), toml::Value::String("openai".into()));
+        table.insert("temperature".into(), toml::Value::Float(0.5));
+        let config = toml::Value::Table(table);
 
         let parsed = AgentCellConfig::from_node_config(&config);
         assert_eq!(parsed.model, "gpt-4o");

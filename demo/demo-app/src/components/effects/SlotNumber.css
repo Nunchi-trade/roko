@@ -1,0 +1,22 @@
+/* SlotNumber — per-digit roll-up transition */
+
+.slot-number {
+  display: inline-flex;
+  font-variant-numeric: tabular-nums;
+}
+
+.slot-number__col {
+  display: inline-block;
+  overflow: hidden;
+  /* Height matches one line of text */
+  height: 1.2em;
+  line-height: 1.2em;
+}
+
+.slot-number__char {
+  display: inline-block;
+}
+
+.slot-number__char--rolling {
+  animation: slot-roll-up var(--duration, 600ms) cubic-bezier(0.16, 1, 0.3, 1) both;
+}

@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
+import { useContextEventSubscription } from '../../contexts/EventStreamContext';
+import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import { fmtUptime } from '../../lib/format';
 import { getCssVar } from '../../lib/color';
 import FlatIcon from '../../components/FlatIcon';
@@ -49,6 +51,7 @@ export default function Explorer() {
   const [hoveredEp, setHoveredEp] = useState<Episode | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [fetchErrors, setFetchErrors] = useState<string[]>([]);
 
   /* ── refs ── */
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -69,11 +72,21 @@ export default function Explorer() {
         get<Episode[]>('/api/episodes'),
         get<StateEvent[]>('/api/statehub/events'),
       ]);
+
+      const errors: string[] = [];
+
       if (h.status === 'fulfilled') setHealth(h.value);
+      else errors.push(`Health: ${h.reason instanceof Error ? h.reason.message : String(h.reason)}`);
+
       if (eps.status === 'fulfilled') setEpisodes(Array.isArray(eps.value) ? eps.value : []);
+      else errors.push(`Episodes: ${eps.reason instanceof Error ? eps.reason.message : String(eps.reason)}`);
+
       if (evts.status === 'fulfilled') setEvents(Array.isArray(evts.value) ? evts.value : []);
+      else errors.push(`Events: ${evts.reason instanceof Error ? evts.reason.message : String(evts.reason)}`);
+
+      setFetchErrors(errors);
     } catch {
-      // API may not be available
+      setFetchErrors(['All API endpoints unreachable']);
     } finally {
       setTimeout(() => setRefreshing(false), 1000);
     }
@@ -84,6 +97,13 @@ export default function Explorer() {
     pollRef.current = setInterval(refresh, 10_000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [refresh]);
+
+  // SSE-triggered refetch
+  const debouncedRefetch = useDebouncedRefetch(refresh, 2000);
+  useContextEventSubscription(
+    ['episode', 'task_completed', 'gate_result', 'agent_spawned'],
+    debouncedRefetch,
+  );
 
   /* ── derived data ── */
   const providers = getProviders(health);
@@ -240,6 +260,25 @@ export default function Explorer() {
           <FlatIcon name="refresh" size={14} tone="rose" />
         </button>
       </header>
+
+      {/* ── Error banner ── */}
+      {fetchErrors.length > 0 && (
+        <div className="expl-error-banner" role="alert">
+          <span className="expl-error-banner__icon">!</span>
+          <div className="expl-error-banner__messages">
+            {fetchErrors.map((err, i) => (
+              <span key={i} className="expl-error-banner__line">{err}</span>
+            ))}
+          </div>
+          <button
+            className="expl-error-banner__dismiss"
+            onClick={() => setFetchErrors([])}
+            aria-label="Dismiss errors"
+          >
+            x
+          </button>
+        </div>
+      )}
 
       {/* ── 2. Hero canvas: Swimlane Timeline ── */}
       <ExplorerTimeline

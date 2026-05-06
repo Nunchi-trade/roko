@@ -1,0 +1,1017 @@
+# Master DAG — Task dependencies and wave assignments
+#
+# This file defines:
+# - All tasks (by ID)
+# - Dependencies between tasks (blocked_by)
+# - Wave assignments (which gate cycle they belong to)
+# - Track groupings (logical category)
+#
+# Tasks are populated separately in tasks/*.md files.
+# This file is the dependency graph only.
+
+[meta]
+version = "1.0"
+max_parallelism = 20
+project_root = "/Users/will/dev/nunchi/roko/roko"
+
+# ─── Tracks ──────────────────────────────────────────────────────────────
+# Logical groupings. A task belongs to exactly one track.
+
+[tracks]
+config-foundation = { description = "Config loading, validation, determinism", color = "blue" }
+ide-acp = { description = "IDE/ACP sidecar fixes", color = "green" }
+terminal-chat = { description = "Terminal, chat, raw mode stability", color = "yellow" }
+runner-hardening = { description = "Runner v2 event loop fixes", color = "red" }
+v2-core = { description = "V2 refactoring: Cell, Signal, protocols", color = "purple" }
+v2-engine = { description = "V2 Graph + Engine (new crate)", color = "magenta" }
+demo-ui = { description = "Demo app frontend fixes", color = "cyan" }
+perf = { description = "Performance optimizations", color = "white" }
+cleanup = { description = "Dead code removal, audit, tagging", color = "gray" }
+wiring = { description = "Wire existing floating code to runtime", color = "orange" }
+infrastructure = { description = "Concurrency, atomicity, CI, Docker, error handling", color = "brown" }
+v2-core-abstractions = { description = "V2 Cell execute, Signal rename, protocol traits", color = "violet" }
+cli-redesign = { description = "CLI convergence, roko do/show, streaming output", color = "pink" }
+graph-engine = { description = "V2 Graph crate + Engine + cells", color = "magenta" }
+
+# ─── Waves ──────────────────────────────────────────────────────────────
+# Each wave runs in parallel (up to max_parallelism agents).
+# Between waves, a gate (build+test+clippy) must pass.
+
+[waves]
+
+[waves.wave-0]
+name = "Foundation"
+description = "Config and core type fixes that everything else depends on"
+max_parallel = 5
+gate = "full"  # cargo build + test + clippy
+
+[waves.wave-1]
+name = "Parallel Fixes"
+description = "Independent bug fixes across all tracks"
+max_parallel = 20
+gate = "full"
+
+[waves.wave-1-audit]
+name = "Wave 1 Audit"
+description = "Fresh agents verify wiring and CLI behavior"
+max_parallel = 10
+gate = "none"  # audit doesn't change code
+
+[waves.wave-2]
+name = "V2 Core + More Fixes"
+description = "V2 Signal rename, Cell execute, protocol traits + remaining fixes"
+max_parallel = 15
+gate = "full"
+
+[waves.wave-2-audit]
+name = "Wave 2 Audit"
+description = "Verify wave 2 wiring"
+max_parallel = 10
+gate = "none"
+
+[waves.wave-3]
+name = "Engine + Integration"
+description = "V2 Graph+Engine crate, remaining integration work + observability + WAL"
+max_parallel = 10
+gate = "full"
+
+[waves.wave-4]
+name = "Feeds + Graduation + Calibration"
+description = "Feed trait, CLI, pulse graduation, predict-publish-correct loop"
+max_parallel = 10
+gate = "full"
+
+[waves.wave-5]
+name = "Migration + Hot Graphs"
+description = "Plan→Graph converter, Engine as default, Hot Graphs cognitive loop"
+max_parallel = 5
+gate = "full"
+
+# ─── Wave 0: Foundation ─────────────────────────────────────────────────
+# Config + core types. Max 5 parallel. Everything else depends on these.
+# Task 005 (path unification) subsumed by reworked Task 004.
+
+[tasks.001]
+title = "Migrate CLI config loading to roko-core's unified loader (30+ callsites)"
+track = "config-foundation"
+wave = "wave-0"
+blocked_by = []
+touches = ["crates/roko-core/src/config/loader.rs", "crates/roko-cli/src/config.rs"]
+exclusive_files = ["crates/roko-cli/src/config.rs"]
+estimated_minutes = 240
+
+[tasks.002]
+title = "IndexMap migration (HashMap → IndexMap for providers/models)"
+track = "config-foundation"
+wave = "wave-0"
+blocked_by = []
+touches = ["crates/roko-core/src/config/schema.rs", "crates/roko-agent/src/dispatch_resolver.rs"]
+exclusive_files = ["crates/roko-core/src/config/schema.rs"]
+estimated_minutes = 90
+
+[tasks.003]
+title = "Wire TimeoutConfig (replace hardcoded Duration::from_secs via PlanRunConfig bridge)"
+track = "config-foundation"
+wave = "wave-0"
+blocked_by = [1]
+touches = ["crates/roko-core/src/config/timeouts.rs", "crates/roko-cli/src/runner/event_loop.rs"]
+exclusive_files = ["crates/roko-core/src/config/timeouts.rs"]
+estimated_minutes = 90
+
+[tasks.004]
+title = "Define Workspace/RokoLayout boundary and migrate workspace path construction in phases"
+track = "config-foundation"
+wave = "wave-0"
+blocked_by = []
+touches = ["crates/roko-core/src/workspace.rs", "crates/roko-fs/src/layout.rs", "crates/roko-serve/", "crates/roko-learn/", "crates/roko-cli/"]
+exclusive_files = ["crates/roko-core/src/workspace.rs", "crates/roko-fs/src/layout.rs"]
+estimated_minutes = 180
+
+# ─── Wave 1: Parallel Fixes ────────────────────────────────────────────
+# Independent bug fixes + wiring. Max 20 parallel.
+# Task 005 deleted (subsumed by 004). Task 011 deleted (already implemented).
+# Tasks 021/022 deleted (old demo patches — replaced by redesign in wave-2).
+# Tasks 072-080 added from infrastructure-audit + model-provider-audit + redesign-plan gaps.
+
+[tasks.006]
+title = "Wire RunOutputSink into BOTH event_loop.rs and agent_events.rs"
+track = "runner-hardening"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/runner/output_sink.rs", "crates/roko-cli/src/runner/agent_events.rs", "crates/roko-cli/src/runner/event_loop.rs"]
+exclusive_files = ["crates/roko-cli/src/runner/output_sink.rs", "crates/roko-cli/src/runner/agent_events.rs"]
+estimated_minutes = 120
+
+[tasks.007]
+title = "Redesign gate pipeline: TOML-configurable shell commands"
+track = "runner-hardening"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-core/src/config/gates.rs", "crates/roko-cli/src/runner/event_loop.rs", "crates/roko-cli/src/runner/gate_dispatch.rs"]
+exclusive_files = ["crates/roko-core/src/config/gates.rs", "crates/roko-cli/src/runner/gate_dispatch.rs"]
+estimated_minutes = 180
+
+[tasks.008]
+title = "Wire AdaptiveBudget (scale prompts to model context window)"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-compose/src/templates/common.rs", "crates/roko-compose/src/system_prompt_builder.rs"]
+exclusive_files = ["crates/roko-compose/src/templates/common.rs"]
+estimated_minutes = 60
+
+[tasks.009]
+title = "Add SafetyLayer.check() to backends that bypass ToolDispatcher"
+track = "runner-hardening"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-agent/src/dispatcher/mod.rs", "crates/roko-agent/src/provider/mod.rs"]
+exclusive_files = []
+estimated_minutes = 90
+
+[tasks.010]
+title = "Wire playbook outcome recording via prompt_diagnostics.playbook_ids"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/runner/event_loop.rs", "crates/roko-learn/src/playbook.rs"]
+exclusive_files = []
+estimated_minutes = 60
+
+[tasks.012]
+title = "Wire validate_against_schema() into plan loading"
+track = "runner-hardening"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/task_parser.rs", "crates/roko-cli/src/runner/plan_loader.rs"]
+exclusive_files = ["crates/roko-cli/src/runner/plan_loader.rs"]
+estimated_minutes = 30
+
+[tasks.013]
+title = "Add SSE keepalive + bound replay buffer"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-serve/src/routes/sse.rs"]
+exclusive_files = ["crates/roko-serve/src/routes/sse.rs"]
+estimated_minutes = 45
+
+[tasks.014]
+title = "Remove blanket clippy suppression, fix underlying lints"
+track = "cleanup"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/main.rs"]
+exclusive_files = ["crates/roko-cli/src/main.rs"]
+estimated_minutes = 120
+
+[tasks.015]
+title = "Wire RunLedger for per-task cost tracking"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-runtime/src/run_ledger.rs", "crates/roko-cli/src/runner/event_loop.rs"]
+exclusive_files = []
+estimated_minutes = 60
+
+[tasks.016]
+title = "Wire or extract error enrichment into gate failure retry path"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/runner/event_loop.rs", "crates/roko-cli/src/runner/gate_dispatch.rs"]
+exclusive_files = []
+estimated_minutes = 90
+
+[tasks.017]
+title = "Wire or build JSONL rotation for episode/efficiency logs"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-learn/src/episode_logger.rs"]
+exclusive_files = []
+estimated_minutes = 60
+
+[tasks.018]
+title = "IDE/ACP SessionNewParams (model/provider/effort fields)"
+track = "ide-acp"
+wave = "wave-1"
+blocked_by = [2]
+touches = ["crates/roko-acp/src/types.rs", "crates/roko-acp/src/session.rs"]
+exclusive_files = ["crates/roko-acp/src/types.rs"]
+estimated_minutes = 30
+
+[tasks.019]
+title = "IDE/ACP MCP error accumulation (structured status)"
+track = "ide-acp"
+wave = "wave-1"
+blocked_by = [18]
+touches = ["crates/roko-acp/src/bridge_events.rs", "crates/roko-acp/src/types.rs"]
+exclusive_files = ["crates/roko-acp/src/bridge_events.rs"]
+estimated_minutes = 60
+
+[tasks.020]
+title = "IDE/ACP command categories + bare_mode filtering"
+track = "ide-acp"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-acp/src/types.rs", "crates/roko-acp/src/session.rs", "crates/roko-acp/src/handler.rs"]
+exclusive_files = []
+estimated_minutes = 60
+
+[tasks.023]
+title = "Health check degradation detection (check existing 207 behavior first)"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-serve/src/routes/status/health.rs"]
+exclusive_files = ["crates/roko-serve/src/routes/status/health.rs"]
+estimated_minutes = 60
+
+[tasks.024]
+title = "Wire agents_instructions_section() for all 7 templates"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-compose/src/templates/"]
+exclusive_files = []
+estimated_minutes = 45
+
+[tasks.025]
+title = "Runner v2 uses core config loader (not ad-hoc project root walk)"
+track = "runner-hardening"
+wave = "wave-1"
+blocked_by = [1]
+touches = ["crates/roko-cli/src/runner/event_loop.rs", "crates/roko-cli/src/runner/mod.rs"]
+exclusive_files = []
+estimated_minutes = 60
+
+# ─── Wave 2: Redesigns ────────────────────────────────────────────────
+# Larger redesign tasks. Demo scenario collapse, V2 core work.
+
+# ─── Wave 1: New Batch (quick wins, infra, IDE) ─────────────────────────
+
+[tasks.026]
+title = "Add And/Or/Not combinators to TopicFilter"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-core/src/pulse.rs", "crates/roko-core/src/pulse_bus.rs"]
+exclusive_files = ["crates/roko-core/src/pulse.rs"]
+estimated_minutes = 60
+
+[tasks.027]
+title = "Add balance:f64 field to Engram for demurrage support"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-core/src/engram.rs"]
+exclusive_files = ["crates/roko-core/src/engram.rs"]
+estimated_minutes = 45
+
+[tasks.028]
+title = "Verify orchestrate.rs feature gate is clean"
+track = "cleanup"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/lib.rs"]
+exclusive_files = []
+estimated_minutes = 30
+
+[tasks.029]
+title = "Delete roko-calc skeleton crate"
+track = "cleanup"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-calc/"]
+exclusive_files = ["crates/roko-calc/"]
+estimated_minutes = 15
+
+[tasks.030]
+title = "Tag all floating code with STATUS: NOT WIRED comments"
+track = "cleanup"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-runtime/src/", "crates/roko-learn/src/"]
+exclusive_files = []
+estimated_minutes = 60
+
+[tasks.043]
+title = "Replace sync Mutex with tokio Mutex in async contexts"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-serve/src/state.rs", "crates/roko-learn/src/runtime_feedback.rs"]
+exclusive_files = ["crates/roko-serve/src/state.rs", "crates/roko-learn/src/runtime_feedback.rs"]
+estimated_minutes = 90
+
+[tasks.044]
+title = "Add timeout to MCP StdioTransport locks"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-agent/src/mcp/client.rs"]
+exclusive_files = ["crates/roko-agent/src/mcp/client.rs"]
+estimated_minutes = 60
+
+[tasks.046]
+title = "Make PRD promote atomic + fix YAML frontmatter parser"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/prd.rs"]
+exclusive_files = ["crates/roko-cli/src/prd.rs"]
+estimated_minutes = 90
+
+[tasks.047]
+title = "Fix TOCTOU race conditions in file operations"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/runner/event_loop.rs", "crates/roko-cli/src/runner/plan_loader.rs"]
+exclusive_files = []
+estimated_minutes = 60
+
+[tasks.048]
+title = "Harden CI pipeline (pin rustc, port 0, integration test job)"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = [".github/workflows/ci.yml", "rust-toolchain.toml"]
+exclusive_files = [".github/workflows/ci.yml", "rust-toolchain.toml"]
+estimated_minutes = 90
+
+[tasks.050]
+title = "Fix silent error swallowing in serve routes and provider adapters"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-serve/src/routes/", "crates/roko-agent/src/provider/"]
+exclusive_files = []
+estimated_minutes = 90
+
+[tasks.052]
+title = "Migrate remaining critical writes to atomic pattern"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/prd.rs", "crates/roko-learn/src/cascade_router.rs"]
+exclusive_files = []
+estimated_minutes = 60
+
+[tasks.054]
+title = "Consolidate retry logic to shared RetryPolicy"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-core/src/error/mod.rs", "crates/roko-agent/src/provider/"]
+exclusive_files = []
+estimated_minutes = 90
+
+[tasks.061]
+title = "IDE/ACP max_output surfacing (effective_max_output method)"
+track = "ide-acp"
+wave = "wave-1"
+blocked_by = [2]
+touches = ["crates/roko-core/src/config/provider.rs", "crates/roko-acp/src/session.rs"]
+exclusive_files = ["crates/roko-core/src/config/provider.rs"]
+estimated_minutes = 20
+
+[tasks.062]
+title = "IDE/ACP provider readiness boolean"
+track = "ide-acp"
+wave = "wave-1"
+blocked_by = [2]
+touches = ["crates/roko-acp/src/types.rs", "crates/roko-acp/src/session.rs"]
+exclusive_files = []
+estimated_minutes = 20
+
+[tasks.063]
+title = "IDE/ACP MCP status notification + discovery timeout config"
+track = "ide-acp"
+wave = "wave-1"
+blocked_by = [19]
+touches = ["crates/roko-acp/src/bridge_events.rs", "crates/roko-acp/src/types.rs"]
+exclusive_files = []
+estimated_minutes = 40
+
+[tasks.064]
+title = "IDE/ACP default model/provider fallback logic"
+track = "ide-acp"
+wave = "wave-1"
+blocked_by = [2]
+touches = ["crates/roko-acp/src/session.rs"]
+exclusive_files = []
+estimated_minutes = 20
+
+[tasks.072]
+title = "Redesign CLI boot sequence: accurate banner provider label, session-resolved /provider slash command"
+track = "terminal-chat"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/chat_inline.rs", "crates/roko-cli/src/inline/terminal.rs", "crates/roko-cli/src/chat.rs"]
+exclusive_files = ["crates/roko-cli/src/inline/terminal.rs"]
+estimated_minutes = 180
+
+[tasks.073]
+title = "Harden ACP startup: provider readiness warnings, configWarnings in InitializeResult, smoke test"
+track = "ide-acp"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-acp/src/main.rs", "crates/roko-acp/src/runner.rs", "crates/roko-acp/src/acp_adapter.rs"]
+exclusive_files = ["crates/roko-acp/src/runner.rs"]
+estimated_minutes = 90
+
+[tasks.074]
+title = "Fix Claude CLI provider: extract usage from StreamJson, surface finish_reason, correct tool_format in roko.toml"
+track = "runner-hardening"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-agent/src/translate/mod.rs", "crates/roko-agent/src/provider/claude_cli.rs", "roko.toml", "docker/railway.roko.toml"]
+exclusive_files = ["crates/roko-agent/src/translate/mod.rs"]
+estimated_minutes = 180
+
+[tasks.075]
+title = "Fix provider/translator gaps: Gemini doubled URL, Ollama tool name sanitization, render_assistant_message docs, Anthropic API status"
+track = "runner-hardening"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-agent/src/gemini/adapter.rs", "crates/roko-agent/src/gemini/compat.rs", "crates/roko-agent/src/translate/ollama.rs", "crates/roko-agent/src/translate/anthropic.rs", "crates/roko-agent/src/provider/anthropic_api.rs"]
+exclusive_files = ["crates/roko-agent/src/translate/ollama.rs", "crates/roko-agent/src/translate/anthropic.rs"]
+estimated_minutes = 240
+
+[tasks.076]
+title = "Tool dispatch safety redesign: merge denylists, path confinement, env scrubbing, SafetyLayer required, truncated-arg detection"
+track = "runner-hardening"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-agent/src/dispatcher/mod.rs", "crates/roko-agent/src/safety/bash.rs", "crates/roko-agent/src/safety/mod.rs", "crates/roko-std/src/tool/builtin/bash.rs", "crates/roko-agent/src/translate/openai.rs"]
+exclusive_files = ["crates/roko-std/src/tool/builtin/bash.rs", "crates/roko-agent/src/dispatcher/mod.rs", "crates/roko-agent/src/translate/openai.rs"]
+estimated_minutes = 240
+
+[tasks.077]
+title = "Model identity redesign: current slugs, remove backend heuristic, tier field, per-model iteration cap"
+track = "config-foundation"
+wave = "wave-1"
+blocked_by = [2]
+touches = ["crates/roko-core/src/config/schema.rs", "crates/roko-core/src/config/provider.rs", "crates/roko-core/src/config/agent.rs", "crates/roko-core/src/config/presets.rs", "crates/roko-core/src/agent.rs", "crates/roko-learn/src/cascade/helpers.rs", "crates/roko-agent/src/provider/mod.rs"]
+exclusive_files = ["crates/roko-core/src/agent.rs", "crates/roko-core/src/config/presets.rs"]
+estimated_minutes = 240
+
+[tasks.078]
+title = "Ensure every agent dispatch surface records cascade observations and provider health"
+track = "wiring"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-cli/src/agent_exec.rs", "crates/roko-cli/src/commands/prd.rs", "crates/roko-cli/src/prd.rs", "crates/roko-cli/src/learning_helpers.rs", "crates/roko-learn/src/model_call_feedback.rs", "crates/roko-learn/src/runtime_feedback.rs", "crates/roko-cli/src/runner/event_loop.rs"]
+exclusive_files = []
+estimated_minutes = 180
+
+[tasks.079]
+title = "Centralize remaining active workflow iteration literals in runner, agent, and serve paths"
+track = "cleanup"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-core/src/defaults.rs", "crates/roko-cli/src/runner/", "crates/roko-agent/src/", "crates/roko-serve/src/"]
+exclusive_files = []
+estimated_minutes = 120
+
+[tasks.080]
+title = "Replace .unwrap() and .expect() in production code paths with proper error handling"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-serve/src/lib.rs", "crates/roko-agent/src/provider/openai_compat.rs", "crates/roko-agent/src/provider/mod.rs", "crates/roko-agent/src/safety/hooks.rs", "crates/roko-chain/src/marketplace.rs", "crates/roko-cli/src/prd.rs"]
+exclusive_files = []
+estimated_minutes = 120
+
+# ─── Wave 2: V2 Core + Wiring + CLI Redesign ────────────────────────────
+
+[tasks.021]
+title = "Demo app scenario redesign (14 → 5 with custom panels + SSE)"
+track = "demo-ui"
+wave = "wave-2"
+blocked_by = [13]
+touches = ["demo/demo-app/src/"]
+exclusive_files = []
+estimated_minutes = 480
+
+[tasks.031]
+title = "Wire CalibrationPolicy to CascadeRouter for model routing feedback"
+track = "wiring"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-learn/src/event_subscriber.rs", "crates/roko-learn/src/calibration_policy.rs"]
+exclusive_files = ["crates/roko-learn/src/event_subscriber.rs"]
+estimated_minutes = 120
+
+[tasks.032]
+title = "Wire DemurrageConsumer to periodic store pruning in roko serve"
+track = "wiring"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-runtime/src/demurrage_consumer.rs", "crates/roko-cli/src/serve_runtime.rs"]
+exclusive_files = ["crates/roko-cli/src/serve_runtime.rs"]
+estimated_minutes = 120
+
+[tasks.033]
+title = "Wire PostGateReflection into runner gate failure retry path"
+track = "wiring"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-cli/src/runner/event_loop.rs", "crates/roko-learn/src/post_gate_reflection.rs"]
+exclusive_files = []
+estimated_minutes = 90
+
+[tasks.034]
+title = "Wire SectionOutcome recording into runner task completion"
+track = "wiring"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-cli/src/runner/event_loop.rs", "crates/roko-learn/src/section_outcome.rs"]
+exclusive_files = ["crates/roko-cli/src/runner/persist.rs"]
+estimated_minutes = 90
+
+[tasks.035]
+title = "Add execute() to Cell trait (CellContext, TypeSchema, default impl)"
+track = "v2-core-abstractions"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-core/src/cell.rs", "crates/roko-core/src/lib.rs"]
+exclusive_files = ["crates/roko-core/src/cell.rs"]
+estimated_minutes = 120
+
+[tasks.036]
+title = "Implement execute() on 4 gates (CompileGate, TestGate, ClippyGate, DiffGate)"
+track = "v2-core-abstractions"
+wave = "wave-2"
+blocked_by = [35]
+touches = ["crates/roko-gate/src/compile.rs", "crates/roko-gate/src/test_gate.rs"]
+exclusive_files = ["crates/roko-gate/src/compile.rs", "crates/roko-gate/src/test_gate.rs"]
+estimated_minutes = 120
+
+[tasks.037]
+title = "Rename Engram → Signal in roko-core (struct + alias + internal migration)"
+track = "v2-core-abstractions"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-core/src/engram.rs", "crates/roko-core/src/signal.rs", "crates/roko-core/src/lib.rs"]
+exclusive_files = ["crates/roko-core/src/engram.rs"]
+estimated_minutes = 240
+
+[tasks.038]
+title = "Propagate Signal rename to 5 core crates"
+track = "v2-core-abstractions"
+wave = "wave-2"
+blocked_by = [37]
+touches = ["crates/roko-agent/src/", "crates/roko-gate/src/", "crates/roko-learn/src/"]
+exclusive_files = []
+estimated_minutes = 180
+
+[tasks.039]
+title = "Redesign Observe trait + wire StoreObserver into roko status"
+track = "v2-core-abstractions"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-core/src/traits.rs", "crates/roko-cli/src/status.rs"]
+exclusive_files = []
+estimated_minutes = 150
+
+[tasks.040]
+title = "Redesign Connect trait + wire ProviderConnection into providers health"
+track = "v2-core-abstractions"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-core/src/traits.rs", "crates/roko-cli/src/commands/config_cmd.rs"]
+exclusive_files = []
+estimated_minutes = 180
+
+[tasks.041]
+title = "Redesign Trigger trait + wire BusTrigger into event subscriptions"
+track = "v2-core-abstractions"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-core/src/traits.rs", "crates/roko-core/src/config/subscriptions.rs"]
+exclusive_files = []
+estimated_minutes = 180
+
+[tasks.042]
+title = "Phase 1 integration test (Cell execute + Signal + protocols)"
+track = "v2-core-abstractions"
+wave = "wave-2"
+blocked_by = [35, 36, 37, 39, 40, 41]
+touches = ["crates/roko-core/tests/phase1_integration.rs"]
+exclusive_files = ["crates/roko-core/tests/phase1_integration.rs"]
+estimated_minutes = 120
+
+[tasks.045]
+title = "Bound LLM streaming channels (replace unbounded senders)"
+track = "infrastructure"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-agent/src/agent.rs", "crates/roko-agent/src/tool_loop/mod.rs"]
+exclusive_files = ["crates/roko-agent/src/agent.rs"]
+estimated_minutes = 120
+
+[tasks.049]
+title = "Implement roko dev command with PID file management"
+track = "infrastructure"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-cli/src/main.rs", "crates/roko-cli/src/commands/server.rs"]
+exclusive_files = []
+estimated_minutes = 180
+
+[tasks.051]
+title = "Add core integration test suite (config, PRD, serve lifecycle)"
+track = "infrastructure"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-core/tests/", "crates/roko-cli/tests/", "crates/roko-serve/tests/"]
+exclusive_files = []
+estimated_minutes = 240
+
+[tasks.053]
+title = "Add workspace persistence for server restarts"
+track = "infrastructure"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-serve/src/state.rs", "crates/roko-serve/src/routes/workspaces.rs"]
+exclusive_files = ["crates/roko-serve/src/state.rs", "crates/roko-serve/src/routes/workspaces.rs"]
+estimated_minutes = 180
+
+[tasks.055]
+title = "Fix Dockerfile multi-stage build + CORS config from roko.toml"
+track = "infrastructure"
+wave = "wave-2"
+blocked_by = []
+touches = ["Dockerfile", "docker/railway.roko.toml"]
+exclusive_files = ["Dockerfile"]
+estimated_minutes = 120
+
+[tasks.056]
+title = "Execution engine convergence (port legacy to v2, remove EngineVariant)"
+track = "cli-redesign"
+wave = "wave-2"
+blocked_by = [6, 7]
+touches = ["crates/roko-cli/src/runner/event_loop.rs", "crates/roko-cli/src/orchestrate.rs"]
+exclusive_files = ["crates/roko-cli/src/orchestrate.rs"]
+estimated_minutes = 360
+
+[tasks.057]
+title = "roko do command (universal entry point with progressive formality)"
+track = "cli-redesign"
+wave = "wave-2"
+blocked_by = [56]
+touches = ["crates/roko-cli/src/main.rs", "crates/roko-cli/src/commands/util.rs", "crates/roko-cli/src/scope_resolver.rs", "crates/roko-cli/src/run.rs"]
+exclusive_files = []
+estimated_minutes = 360
+
+[tasks.058]
+title = "roko show command (unified inspect surface)"
+track = "cli-redesign"
+wave = "wave-2"
+blocked_by = [56]
+touches = ["crates/roko-cli/src/main.rs", "crates/roko-cli/src/commands/show_cmd.rs"]
+exclusive_files = ["crates/roko-cli/src/commands/show_cmd.rs"]
+estimated_minutes = 240
+
+[tasks.059]
+title = "Streaming CLI output (RunOutputSink + SSE client for remote progress)"
+track = "cli-redesign"
+wave = "wave-2"
+blocked_by = [6, 56]
+touches = ["crates/roko-cli/src/runner/output_sink.rs", "crates/roko-cli/src/runner/event_loop.rs"]
+exclusive_files = []
+estimated_minutes = 300
+
+# Wave 2 additions from infrastructure-audit + model-provider-audit + redesign-plan gaps
+
+[tasks.081]
+title = "Define thiserror enums per crate; replace anyhow::Result in library crate public APIs"
+track = "infrastructure"
+wave = "wave-1"
+blocked_by = []
+touches = ["crates/roko-agent/src/error.rs", "crates/roko-agent/src/lib.rs", "crates/roko-gate/src/error.rs", "crates/roko-gate/src/lib.rs", "crates/roko-learn/src/error.rs", "crates/roko-learn/src/lib.rs", "crates/roko-compose/src/error.rs", "crates/roko-compose/src/lib.rs"]
+exclusive_files = ["crates/roko-agent/src/error.rs", "crates/roko-gate/src/error.rs", "crates/roko-learn/src/error.rs", "crates/roko-compose/src/error.rs"]
+estimated_minutes = 360
+
+[tasks.082]
+title = "Redesign LlmBackend trait to be streaming-first: StreamEvent enum, stream_turn() primary, TurnConfig, measured TTFT"
+track = "v2-core-abstractions"
+wave = "wave-2"
+blocked_by = [45]
+touches = ["crates/roko-agent/src/provider/mod.rs", "crates/roko-agent/src/provider/claude_cli.rs", "crates/roko-agent/src/provider/openai_compat.rs", "crates/roko-agent/src/provider/anthropic_api.rs", "crates/roko-agent/src/tool_loop/mod.rs", "crates/roko-agent/src/openai_compat_backend.rs", "crates/roko-agent/src/provider/claude_cli/stream.rs"]
+exclusive_files = ["crates/roko-agent/src/provider/mod.rs"]
+estimated_minutes = 480
+
+[tasks.083]
+title = "Create ProgressEvent enum and ProgressSink trait (supersedes 006's RunOutputSink); wire into ToolLoopAgent, gate dispatch, CLI stderr, TUI, and demo SSE"
+track = "wiring"
+wave = "wave-2"
+blocked_by = [6, 82]
+touches = ["crates/roko-core/src/progress.rs", "crates/roko-core/src/lib.rs", "crates/roko-agent/src/tool_loop/mod.rs", "crates/roko-agent/src/tool_loop/agent_wrapper.rs", "crates/roko-cli/src/runner/event_loop.rs", "crates/roko-serve/src/routes/sse.rs"]
+exclusive_files = ["crates/roko-core/src/progress.rs"]
+estimated_minutes = 360
+
+[tasks.084]
+title = "Fix three concurrency anti-patterns: PlaybookStore nested mutex I/O, TUI thread spawn in async, CancelToken 50ms polling fallback"
+track = "infrastructure"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-learn/src/playbook.rs", "crates/roko-cli/src/tui/verdicts.rs", "crates/roko-core/src/tool/handler.rs", "crates/roko-agent/src/dispatcher/cancel.rs"]
+exclusive_files = ["crates/roko-core/src/tool/handler.rs", "crates/roko-agent/src/dispatcher/cancel.rs"]
+estimated_minutes = 180
+
+[tasks.085]
+title = "Config architecture redesign: ConfigCache (arc-swap + notify), ACP ConfigWatcher, validate_models warnings, provider merge validation, roko config export"
+track = "config-foundation"
+wave = "wave-2"
+blocked_by = [1, 73]
+touches = ["crates/roko-core/src/config/loader.rs", "crates/roko-core/src/config/cache.rs", "crates/roko-core/src/config/validation.rs", "crates/roko-acp/src/session.rs", "crates/roko-cli/src/commands/config_cmd.rs", "docker/railway.roko.toml"]
+exclusive_files = ["crates/roko-core/src/config/cache.rs", "crates/roko-core/src/config/validation.rs"]
+estimated_minutes = 360
+
+[tasks.086]
+title = "PTY session grace period, scrollback persist, reconnect reattach, and exponential backoff WS retry"
+track = "terminal-chat"
+wave = "wave-2"
+blocked_by = [53]
+touches = ["crates/roko-serve/src/terminal.rs", "crates/roko-serve/src/state.rs", "demo/demo-app/src/hooks/useTerminal.ts"]
+exclusive_files = ["crates/roko-serve/src/routes/terminal.rs"]
+estimated_minutes = 360
+
+[tasks.087]
+title = "Replace polling loops, fix stale closures, add cleanup, centralize config, fix model slug matching"
+track = "demo-ui"
+wave = "wave-2"
+blocked_by = [13, 21]
+touches = ["demo/demo-app/src/lib/config.ts", "demo/demo-app/src/hooks/useTerminal.ts", "demo/demo-app/src/hooks/useWorkspace.ts", "demo/demo-app/src/components/ErrorBoundary.tsx", "demo/demo-app/src/contexts/EventStreamContext.tsx", "demo/demo-app/src/hooks/useServerHealth.ts"]
+exclusive_files = ["demo/demo-app/src/lib/config.ts", "demo/demo-app/src/components/ErrorBoundary.tsx"]
+estimated_minutes = 360
+
+[tasks.088]
+title = "Wire effort/thinking to dispatch, remove dead config fields, --global-config flag, workdir negotiation"
+track = "ide-acp"
+wave = "wave-2"
+blocked_by = [18, 19]
+touches = ["crates/roko-acp/src/types.rs", "crates/roko-acp/src/session.rs", "crates/roko-acp/src/handler.rs", "crates/roko-acp/src/config.rs", "crates/roko-acp/src/runner.rs", "crates/roko-acp/src/bridge_events.rs", "crates/roko-acp/src/pipeline.rs", "crates/roko-cli/src/main.rs"]
+exclusive_files = ["crates/roko-acp/src/handler.rs"]
+estimated_minutes = 240
+
+[tasks.089]
+title = "Replace raw rung integers, fix worktree config loading, address skipped rungs, delete resolve_enrichment_backend, remove hardcoded model strings"
+track = "cleanup"
+wave = "wave-2"
+blocked_by = [56]
+touches = ["crates/roko-cli/src/orchestrate.rs", "crates/roko-cli/src/runner/event_loop.rs", "crates/roko-core/src/config/schema.rs"]
+exclusive_files = []
+estimated_minutes = 300
+
+[tasks.090]
+title = "Human-readable provider errors, startup pre-flight, provider discovery, config-merge validation"
+track = "infrastructure"
+wave = "wave-2"
+blocked_by = [85]
+touches = ["crates/roko-agent/src/provider/mod.rs", "crates/roko-cli/src/commands/config_cmd.rs", "crates/roko-core/src/config/loader.rs"]
+exclusive_files = []
+estimated_minutes = 240
+
+[tasks.091]
+title = "Refuse chat without valid provider, init validation, plan progress, status --quick, doctor fixes"
+track = "cli-redesign"
+wave = "wave-2"
+blocked_by = [1, 90]
+touches = ["crates/roko-cli/src/main.rs", "crates/roko-cli/src/chat.rs", "crates/roko-cli/src/commands/init.rs", "crates/roko-cli/src/commands/status.rs", "crates/roko-cli/src/commands/doctor.rs", "crates/roko-cli/src/commands/config_cmd.rs"]
+exclusive_files = []
+estimated_minutes = 300
+
+[tasks.093]
+title = "Wire or delete three dead subsystems: context pressure watcher, Anthropic API tool loop, shell-prompt warning"
+track = "cleanup"
+wave = "wave-2"
+blocked_by = []
+touches = ["crates/roko-conductor/src/context_window_pressure.rs", "crates/roko-agent/src/provider/anthropic_api.rs", "demo/demo-app/src/hooks/useTerminal.ts"]
+exclusive_files = []
+estimated_minutes = 180
+
+# ─── Wave 3: Graph + Engine ──────────────────────────────────────────────
+
+[tasks.066]
+title = "Create roko-graph crate (Graph/Node/Edge types, TOML loader, CellRegistry, topo sort)"
+track = "graph-engine"
+wave = "wave-3"
+blocked_by = [35]
+touches = ["crates/roko-graph/Cargo.toml", "crates/roko-graph/src/lib.rs"]
+exclusive_files = ["crates/roko-graph/"]
+estimated_minutes = 240
+
+[tasks.067]
+title = "Graph Engine (sequential execution, roko graph run CLI, default cells)"
+track = "graph-engine"
+wave = "wave-3"
+blocked_by = [66, 36]
+touches = ["crates/roko-graph/src/engine.rs", "crates/roko-cli/src/commands/graph.rs"]
+exclusive_files = ["crates/roko-graph/src/engine.rs"]
+estimated_minutes = 300
+
+[tasks.068]
+title = "Graph fan-out/fan-in + conditional edges"
+track = "graph-engine"
+wave = "wave-3"
+blocked_by = [67]
+touches = ["crates/roko-graph/src/engine.rs", "crates/roko-graph/src/condition.rs"]
+exclusive_files = ["crates/roko-graph/src/condition.rs"]
+estimated_minutes = 180
+
+[tasks.069]
+title = "Graph sub-graph execution + flow snapshots/resume"
+track = "graph-engine"
+wave = "wave-3"
+blocked_by = [68]
+touches = ["crates/roko-graph/src/engine.rs", "crates/roko-graph/src/snapshot.rs"]
+exclusive_files = ["crates/roko-graph/src/snapshot.rs"]
+estimated_minutes = 240
+
+[tasks.070]
+title = "Graph budget + deadline enforcement"
+track = "graph-engine"
+wave = "wave-3"
+blocked_by = [68]
+touches = ["crates/roko-graph/src/engine.rs", "crates/roko-graph/src/budget.rs"]
+exclusive_files = ["crates/roko-graph/src/budget.rs"]
+estimated_minutes = 180
+
+[tasks.071]
+title = "AgentCell + ComposeCell wrappers, task-execution graph"
+track = "graph-engine"
+wave = "wave-3"
+blocked_by = [67, 68]
+touches = ["crates/roko-graph/src/cells/", "crates/roko-cli/src/commands/graph.rs"]
+exclusive_files = ["crates/roko-graph/src/cells/"]
+estimated_minutes = 300
+
+# Wave 3 additions from infrastructure-audit + redesign-plan gaps
+
+[tasks.092]
+title = "Add WalWriter to roko-learn and wire WAL appends into CascadeRouter, ExperimentStore, and gate threshold updates"
+track = "infrastructure"
+wave = "wave-3"
+blocked_by = [78]
+touches = ["crates/roko-learn/src/wal.rs", "crates/roko-learn/src/cascade_router.rs", "crates/roko-learn/src/model_experiment.rs", "crates/roko-learn/src/runtime_feedback.rs", "crates/roko-learn/src/lib.rs", "crates/roko-core/src/defaults.rs"]
+exclusive_files = ["crates/roko-learn/src/wal.rs", "crates/roko-learn/src/runtime_feedback.rs"]
+estimated_minutes = 300
+
+[tasks.094]
+title = "Redesign orchestration state persistence as a single checksummed StateSnapshot"
+track = "infrastructure"
+wave = "wave-3"
+blocked_by = [52]
+touches = ["crates/roko-cli/src/runner/event_loop.rs", "crates/roko-cli/src/runner/persist.rs", "crates/roko-runtime/src/state_snapshot.rs"]
+exclusive_files = ["crates/roko-runtime/src/state_snapshot.rs"]
+estimated_minutes = 180
+
+[tasks.095]
+title = "Add GET /metrics Prometheus endpoint and optional OTLP tracing export to roko-serve"
+track = "infrastructure"
+wave = "wave-3"
+blocked_by = []
+touches = ["crates/roko-serve/src/routes/metrics.rs", "crates/roko-serve/src/state.rs", "crates/roko-serve/Cargo.toml", "crates/roko-core/src/config/schema.rs"]
+exclusive_files = ["crates/roko-serve/src/routes/metrics.rs"]
+estimated_minutes = 300
+
+[tasks.096]
+title = "Wire real TTFT, gate verdicts, cost, error rates, and context utilization into MetricRegistry"
+track = "infrastructure"
+wave = "wave-3"
+blocked_by = [95, 82]
+touches = ["crates/roko-serve/src/routes/metrics.rs", "crates/roko-serve/src/routes/plans.rs", "crates/roko-agent/src/provider/mod.rs", "crates/roko-learn/src/runtime_feedback.rs"]
+exclusive_files = []
+estimated_minutes = 360
+
+# ─── Wave 4: Feeds + Graduation + Calibration ─────────────────────────────
+
+[tasks.097]
+title = "Add Feed trait to roko-core, implement FileWatchFeed and ProviderHealthFeed"
+track = "v2-core-abstractions"
+wave = "wave-4"
+blocked_by = [35, 39, 40, 41]
+touches = ["crates/roko-core/src/feed.rs", "crates/roko-core/src/traits.rs", "crates/roko-core/src/lib.rs", "crates/roko-cli/src/tui/fs_watch.rs", "crates/roko-cli/src/tui/mod.rs"]
+exclusive_files = ["crates/roko-core/src/feed.rs"]
+estimated_minutes = 300
+
+[tasks.098]
+title = "Add roko feed CLI commands and wire feeds into Engine and SSE layer"
+track = "v2-core-abstractions"
+wave = "wave-4"
+blocked_by = [97, 67]
+touches = ["crates/roko-cli/src/commands/mod.rs", "crates/roko-cli/src/commands/feed.rs", "crates/roko-cli/src/main.rs", "crates/roko-serve/src/routes/sse.rs", "crates/roko-serve/src/state.rs", "crates/roko-cli/src/tui/fs_watch.rs"]
+exclusive_files = ["crates/roko-cli/src/commands/feed.rs"]
+estimated_minutes = 180
+
+[tasks.099]
+title = "Add Pulse::graduate(), graduation policy config, and GraduationCell React Cell"
+track = "v2-core-abstractions"
+wave = "wave-4"
+blocked_by = [67, 97]
+touches = ["crates/roko-core/src/pulse.rs", "crates/roko-core/src/config/schema.rs", "crates/roko-core/src/config/mod.rs", "crates/roko-core/src/lib.rs", "crates/roko-graph/src/cells/graduation.rs", "crates/roko-graph/src/lib.rs", "crates/roko-graph/Cargo.toml"]
+exclusive_files = ["crates/roko-graph/src/cells/graduation.rs"]
+estimated_minutes = 240
+
+[tasks.100]
+title = "Wire predict-publish-correct calibration loop into CascadeRouter"
+track = "wiring"
+wave = "wave-4"
+blocked_by = [31, 99]
+touches = ["crates/roko-learn/src/cascade_router.rs", "crates/roko-learn/src/calibration_policy.rs", "crates/roko-cli/src/runner/event_loop.rs", "crates/roko-cli/src/runner/types.rs"]
+exclusive_files = []
+estimated_minutes = 240
+
+# ─── Wave 5: Migration + Hot Graphs ──────────────────────────────────────
+
+[tasks.101]
+title = "Implement tasks.toml → Graph converter, --engine graph flag for roko plan run, and integration tests comparing Engine vs Runner v2"
+track = "graph-engine"
+wave = "wave-5"
+blocked_by = [66, 67, 68, 71]
+touches = ["crates/roko-graph/src/convert.rs", "crates/roko-graph/src/lib.rs", "crates/roko-cli/src/runner/mod.rs", "crates/roko-cli/src/main.rs", "crates/roko-graph/tests/plan_conversion.rs"]
+exclusive_files = ["crates/roko-graph/src/convert.rs"]
+estimated_minutes = 360
+
+[tasks.102]
+title = "Make Graph Engine the default for roko plan run and feature-gate Runner v2 behind legacy-runner-v2 Cargo feature"
+track = "graph-engine"
+wave = "wave-5"
+blocked_by = [101]
+touches = ["crates/roko-cli/src/runner/mod.rs", "crates/roko-cli/src/main.rs", "crates/roko-cli/Cargo.toml"]
+exclusive_files = []
+estimated_minutes = 240
+
+[tasks.103]
+title = "Add Hot Graph support to Engine (tick-driven, resident) and define agent cognitive loop as declarative TOML Graph"
+track = "graph-engine"
+wave = "wave-5"
+blocked_by = [102]
+touches = ["crates/roko-graph/src/engine.rs", "crates/roko-graph/src/hot.rs", "crates/roko-cli/src/commands/agent.rs", "examples/graphs/cognitive-loop.toml"]
+exclusive_files = ["crates/roko-graph/src/hot.rs"]
+estimated_minutes = 480
+
+# ─── Wave 6: Architecture Batch Cleanup ─────────────────────────────────
+
+[tasks.104]
+title = "Move StateHub to a real crate boundary, remove path-included compatibility aliases"
+track = "architecture-cleanup"
+wave = "wave-6"
+blocked_by = []
+touches = ["crates/roko-core/src/state_hub.rs", "crates/roko-core/src/pulse_bus.rs", "crates/roko-runtime/src/", "crates/roko-serve/src/lib.rs", "crates/roko-serve/src/event_bus.rs", "crates/roko-cli/src/lib.rs", "docs/v1/12-interfaces/22-statehub-projection-layer.md"]
+exclusive_files = []
+estimated_minutes = 300
+
+[tasks.105]
+title = "Harden RuntimeEvent ingest, HttpEventSink, and ACP forwarding with E2E verification"
+track = "engine-events"
+wave = "wave-6"
+blocked_by = [104]
+touches = ["crates/roko-serve/src/routes/event_ingest.rs", "crates/roko-runtime/src/http_event_sink.rs", "crates/roko-acp/src/event_forward.rs", "crates/roko-acp/src/bridge_events.rs", "tmp/solutions/demo-running/01-WAVE-A-ENGINE.md", "tmp/solutions/demo-running/CHECKLIST.md"]
+exclusive_files = []
+estimated_minutes = 240

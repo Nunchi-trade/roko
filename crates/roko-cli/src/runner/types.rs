@@ -1307,6 +1307,9 @@ pub struct RunConfig {
     /// to warm the incremental cache. Makes subsequent compile gates fast.
     /// Default: true.
     pub warm_cache: bool,
+    /// Optional metric registry for emitting gate verdict counters.
+    /// Populated when running under `roko serve`.
+    pub metrics: Option<std::sync::Arc<roko_core::obs::metrics::MetricRegistry>>,
 }
 
 impl RunConfig {
@@ -1426,6 +1429,7 @@ impl RunConfig {
             feedback_facade: None,
             projection: None,
             http_event_sink: None,
+            metrics: None,
         }
     }
 }
@@ -1466,6 +1470,7 @@ impl Default for RunConfig {
             http_event_sink: None,
             output_sink: Arc::new(super::output_sink::NoopSink),
             warm_cache: true,
+            metrics: None,
         }
     }
 }

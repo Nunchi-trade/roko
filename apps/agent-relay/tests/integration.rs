@@ -303,3 +303,161 @@ async fn post_messages_forwards_and_returns_agent_response() {
     );
     assert!(!body.message_id.is_empty());
 }
+
+// ── Pub/sub integration tests (A3) ──────────────────────────────────────────
+
+#[tokio::test]
+async fn topic_subscribe_and_receive() {
+    let server = TestServer::spawn().await;
+
+    // Connect two agents using distinct IDs.
+    let mut publisher = connect_agent(
+        &server,
+        json!({
+            "type": "hello",
+            "agent_id": "publisher-1"
+        }),
+    )
+    .await;
+    let mut subscriber = connect_agent(
+        &server,
+        json!({
+            "type": "hello",
+            "agent_id": "subscriber-1"
+        }),
+    )
+    .await;
+
+    // Subscriber subscribes to "isfr:rates".
+    send_json(
+        &mut subscriber,
+        json!({"type": "subscribe", "topic": "isfr:rates"}),
+    )
+    .await;
+    let ack = recv_json(&mut subscriber).await;
+    assert_eq!(ack["type"], "ack");
+    assert_eq!(ack["event"], "subscribed:isfr:rates");
+
+    // Publisher publishes a rate update.
+    send_json(
+        &mut publisher,
+        json!({
+            "type": "publish",
+            "topic": "isfr:rates",
+            "msg_type": "rate_update",
+            "payload": { "bps": 620 }
+        }),
+    )
+    .await;
+    let pub_ack = recv_json(&mut publisher).await;
+    assert_eq!(pub_ack["type"], "ack");
+    assert!(
+        pub_ack["event"]
+            .as_str()
+            .unwrap()
+            .starts_with("published:isfr:rates:"),
+        "unexpected ack event: {}",
+        pub_ack["event"]
+    );
+
+    // Subscriber receives the message.
+    let msg = recv_json(&mut subscriber).await;
+    assert_eq!(msg["type"], "topic_message");
+    assert_eq!(msg["topic"], "isfr:rates");
+    assert_eq!(msg["msg_type"], "rate_update");
+    assert_eq!(msg["payload"]["bps"], 620);
+    assert_eq!(msg["publisher_id"], "publisher-1");
+}
+
+#[tokio::test]
+async fn topic_unsubscribe_stops_delivery() {
+    let server = TestServer::spawn().await;
+
+    let mut publisher =
+        connect_agent(&server, json!({"type": "hello", "agent_id": "pub-unsub-1"})).await;
+    let mut subscriber =
+        connect_agent(&server, json!({"type": "hello", "agent_id": "sub-unsub-1"})).await;
+
+    // Subscribe.
+    send_json(
+        &mut subscriber,
+        json!({"type": "subscribe", "topic": "test:topic"}),
+    )
+    .await;
+    let _ = recv_json(&mut subscriber).await; // ack
+
+    // Unsubscribe.
+    send_json(
+        &mut subscriber,
+        json!({"type": "unsubscribe", "topic": "test:topic"}),
+    )
+    .await;
+    let unack = recv_json(&mut subscriber).await;
+    assert_eq!(unack["type"], "ack");
+    assert_eq!(unack["event"], "unsubscribed:test:topic");
+
+    // Publisher sends a message — subscriber should NOT receive it.
+    send_json(
+        &mut publisher,
+        json!({
+            "type": "publish",
+            "topic": "test:topic",
+            "msg_type": "evt",
+            "payload": {}
+        }),
+    )
+    .await;
+    let _ = recv_json(&mut publisher).await; // publisher ack
+
+    // Give any spurious delivery a moment to arrive, then close.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    subscriber.close(None).await.expect("close subscriber");
+}
+
+#[tokio::test]
+async fn subscribe_receives_replay_messages() {
+    let server = TestServer::spawn().await;
+
+    let mut publisher = connect_agent(
+        &server,
+        json!({"type": "hello", "agent_id": "pub-replay-1"}),
+    )
+    .await;
+
+    // Publish a message before any subscriber exists.
+    send_json(
+        &mut publisher,
+        json!({
+            "type": "publish",
+            "topic": "replay:topic",
+            "msg_type": "first",
+            "payload": { "n": 1 }
+        }),
+    )
+    .await;
+    let _ = recv_json(&mut publisher).await; // ack
+
+    // Now a late subscriber joins — it should receive the replayed message
+    // before the subscription ACK.
+    let mut late = connect_agent(
+        &server,
+        json!({"type": "hello", "agent_id": "late-subscriber-1"}),
+    )
+    .await;
+    send_json(
+        &mut late,
+        json!({"type": "subscribe", "topic": "replay:topic"}),
+    )
+    .await;
+
+    // First frame should be the replayed message.
+    let replayed = recv_json(&mut late).await;
+    assert_eq!(replayed["type"], "topic_message");
+    assert_eq!(replayed["msg_type"], "first");
+    assert_eq!(replayed["payload"]["n"], 1);
+
+    // Second frame should be the subscription ACK.
+    let ack = recv_json(&mut late).await;
+    assert_eq!(ack["type"], "ack");
+    assert_eq!(ack["event"], "subscribed:replay:topic");
+}

@@ -1,0 +1,40 @@
+/* Crystallize — particle burst + shimmer on trigger */
+
+.crystallize {
+  position: relative;
+  display: inline-block;
+}
+
+.crystallize__shimmer {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  animation: crystallize-shimmer 250ms ease-out both;
+}
+
+.crystallize__particle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  pointer-events: none;
+  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+  animation: crystallize-burst 800ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--cx-delay, 0ms);
+}
+
+@keyframes crystallize-burst {
+  0% {
+    transform: translate(-50%, -50%) scale(0.5) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(
+        calc(-50% + var(--cx-angle, 30px)),
+        calc(-50% + var(--cy-angle, -30px))
+      )
+      scale(0.2)
+      rotate(180deg);
+    opacity: 0;
+  }
+}

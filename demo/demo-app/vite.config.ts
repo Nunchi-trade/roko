@@ -18,8 +18,21 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:6677',
-      '/ws': { target: 'http://localhost:6677', ws: true },
+      '/api': {
+        target: 'http://localhost:6677',
+        changeOrigin: true,
+        ws: true,
+      },
+      '/ws': {
+        target: 'http://localhost:6677',
+        changeOrigin: true,
+        ws: true,
+      },
+      '/relay': {
+        target: 'http://localhost:6677',
+        changeOrigin: true,
+        ws: true,
+      },
       '/health': 'http://localhost:6677',
     },
     // Prevent Vite from watching directories that roko-serve or CLI commands

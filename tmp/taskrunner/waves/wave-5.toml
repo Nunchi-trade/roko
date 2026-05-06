@@ -1,0 +1,38 @@
+# Wave 5: Migration + Hot Graphs
+#
+# Plan→Graph converter, Engine as default execution path,
+# Hot Graphs for persistent tick-driven agent cognitive loops.
+#
+# Gate: cargo build + test + clippy must pass at end.
+
+[wave]
+name = "wave-5"
+description = "Plan→Graph converter, Engine default, Hot Graphs cognitive loop"
+max_parallel = 5
+
+[[groups]]
+name = "migration"
+description = "Plan→Graph conversion, Engine as default, Runner v2 feature-gate"
+tasks = []
+shared_files = [
+    "crates/roko-graph/src/convert.rs",
+    "crates/roko-cli/src/runner/mod.rs",
+    "crates/roko-cli/src/main.rs",
+]
+
+[[groups]]
+name = "hot-graphs"
+description = "Tick-driven resident graphs, agent cognitive loop TOML"
+tasks = []
+shared_files = [
+    "crates/roko-graph/src/engine.rs",
+    "crates/roko-graph/src/hot.rs",
+]
+
+[gate]
+commands = [
+    "cargo +nightly fmt --all --check",
+    "cargo build --workspace",
+    "cargo test --workspace",
+    "cargo clippy --workspace --no-deps -- -D warnings",
+]

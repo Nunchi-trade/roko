@@ -8,6 +8,18 @@
 //! - TUI receives real-time updates via `StateHub`
 //! - Process groups ensure clean agent teardown on Ctrl+C
 //!
+//! # Config resolution
+//!
+//! Callers should build [`RunConfig`] from the effective [`RokoConfig`] via
+//! [`RunConfig::from_roko_config`] so that timeouts, gates, models, and budget
+//! limits all derive from the project config. If `RunConfig.roko_config` is
+//! `None` at run start, the event loop falls back to
+//! [`roko_core::config::loader::load_config_unified`] using `config.workdir`
+//! (ancestor walk + global merge + env overrides). The runner never performs
+//! its own ad-hoc project-root resolution.
+//!
+//! [`RokoConfig`]: roko_core::config::schema::RokoConfig
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -30,6 +42,7 @@ pub mod plan_loader;
 pub mod projection;
 pub mod resume;
 pub mod snapshot_writer;
+pub mod sse_stream;
 pub mod state;
 pub mod task_dag;
 pub mod tui_bridge;
@@ -38,4 +51,5 @@ pub mod types;
 // Re-export the primary entry points.
 pub use event_loop::{PlanReport, RunReport, run};
 pub use plan_loader::{Plan, load_plan, load_plans, scaffold_missing_crates};
+pub use sse_stream::SseStreamClient;
 pub use types::RunConfig;

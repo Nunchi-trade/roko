@@ -157,6 +157,8 @@ pub mod skill_library;
 pub mod task_metric;
 /// Verdict-aware scoring and routing history for gate-verdict re-entry (GATE-05).
 pub mod verdict_scorer;
+/// Write-Ahead Log for crash-safe learning state persistence.
+pub mod wal;
 
 pub use error::LearnError;
 pub use feedback_service::{FeedbackService, KnowledgeOutcome};

@@ -18,14 +18,16 @@ import KnowledgeFlowPanel from './KnowledgeFlowPanel';
 import EfficiencyBar from './EfficiencyBar';
 import ChainIntelPanel from './ChainIntelPanel';
 import ISFRPanel from './ISFRPanel';
-import CostComparisonPanel from './CostComparisonPanel';
+import CostComparisonPanel, { EMPTY_RUN_METRICS, type RunMetrics } from './CostComparisonPanel';
 import MemoryTransferPanel from './MemoryTransferPanel';
 import OracleFlowPanel from './OracleFlowPanel';
+import type { PipelineMetrics } from './PipelineStagesPanel';
 import RevealWhen from './RevealWhen';
 import InferenceTracePanel from './InferenceTracePanel';
 import type { InferenceCall, InferenceTraceTotals } from '../hooks/useInferenceTrace';
 import { ConfidenceMeter, ModelSlot, CrystallizeTransition } from './inference';
 import { AgentHandoff } from './agent';
+import ProvenanceCard from './ProvenanceCard';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -51,7 +53,7 @@ export interface SidebarRendererProps {
   allGatesPass: boolean;
 
   // Log
-  logEntries: { ts: string; text: string; type?: 'info' | 'success' | 'error' }[];
+  logEntries: { ts: string; text: string; type?: 'info' | 'success' | 'error' | 'warning' | 'dim' }[];
 
   // Pipeline (PRD)
   pipeline: PipelineDemoState;
@@ -86,6 +88,16 @@ export interface SidebarRendererProps {
   traceCalls?: InferenceCall[];
   traceTotals?: InferenceTraceTotals;
   traceCostSeries?: number[];
+
+  // Panel metrics (fed by scenario runners)
+  naiveCost?: RunMetrics;
+  cascadeCost?: RunMetrics;
+  coldCost?: RunMetrics;
+  warmCost?: RunMetrics;
+  dataCost?: RunMetrics;
+  strategyCost?: RunMetrics;
+  oracleChainChecked?: boolean;
+  pipelineMetrics?: PipelineMetrics;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,18 +142,33 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
     traceCalls = [],
     traceTotals = { cost: 0, tokens: 0, calls: 0, avgLatencyMs: 0 },
     traceCostSeries = [],
+    naiveCost = EMPTY_RUN_METRICS,
+    cascadeCost = EMPTY_RUN_METRICS,
+    coldCost = EMPTY_RUN_METRICS,
+    warmCost = EMPTY_RUN_METRICS,
+    dataCost = EMPTY_RUN_METRICS,
+    strategyCost = EMPTY_RUN_METRICS,
+    oracleChainChecked = false,
   } = props;
 
   // ── Cost scenario ────────────────────────────────────────────
   if (scenarioId === 'cost') {
     return (
       <>
-        <CostComparisonPanel isRunning={isRunning} />
+        <CostComparisonPanel naive={naiveCost} cascade={cascadeCost} isRunning={isRunning} />
         <InferenceTracePanel
           calls={traceCalls}
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -197,6 +224,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -205,7 +240,7 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
   if (scenarioId === 'memory' || scenarioId === 'knowledge-transfer') {
     return (
       <>
-        <MemoryTransferPanel isRunning={isRunning} />
+        <MemoryTransferPanel cold={coldCost} warm={warmCost} isRunning={isRunning} />
 
         <RevealWhen visible={activeHandoff !== null} mode="slide-up">
           {activeHandoff && (
@@ -258,6 +293,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -290,6 +333,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -298,7 +349,7 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
   if (scenarioId === 'oracle' || scenarioId === 'chain-intelligence') {
     return (
       <>
-        <OracleFlowPanel isRunning={isRunning} />
+        <OracleFlowPanel data={dataCost} strategy={strategyCost} chainChecked={oracleChainChecked} isRunning={isRunning} />
 
         <RevealWhen visible={ciInsights.length > 0 || chainConnected} mode="scale">
           <ChainIntelPanel
@@ -323,6 +374,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
           totals={traceTotals}
           costSeries={traceCostSeries}
         />
+        <RevealWhen visible={scenarioComplete} mode="blur">
+          <ProvenanceCard
+            model={stats.model}
+            cost={stats.cost}
+            tokens={stats.tokens}
+            duration={stats.time}
+          />
+        </RevealWhen>
       </>
     );
   }
@@ -391,6 +450,14 @@ export default function SidebarRenderer(props: SidebarRendererProps) {
         totals={traceTotals}
         costSeries={traceCostSeries}
       />
+      <RevealWhen visible={scenarioComplete} mode="blur">
+        <ProvenanceCard
+          model={stats.model}
+          cost={stats.cost}
+          tokens={stats.tokens}
+          duration={stats.time}
+        />
+      </RevealWhen>
     </>
   );
 }

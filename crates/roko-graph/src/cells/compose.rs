@@ -11,39 +11,37 @@ use serde::{Deserialize, Serialize};
 use crate::types::{Node, NodeOutput};
 
 /// Configuration for a ComposeCell.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ComposeCellConfig {
     /// The template string with `{{variable}}` placeholders.
+    #[serde(default)]
     pub template: String,
     /// Static variables to substitute into the template.
     #[serde(default)]
     pub variables: HashMap<String, String>,
 }
 
-impl Default for ComposeCellConfig {
-    fn default() -> Self {
-        Self {
-            template: String::new(),
-            variables: HashMap::new(),
-        }
-    }
-}
-
 impl ComposeCellConfig {
-    /// Parse config from a node's config map.
-    pub fn from_node_config(config: &HashMap<String, toml::Value>) -> Self {
-        let template = config
+    /// Parse config from a node's TOML config value.
+    ///
+    /// Expects a TOML table; returns defaults if the value is not a table.
+    pub fn from_node_config(config: &toml::Value) -> Self {
+        let table = match config.as_table() {
+            Some(t) => t,
+            None => return Self::default(),
+        };
+
+        let template = table
             .get("template")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
-        let variables = config
+        let variables = table
             .get("variables")
             .and_then(|v| v.as_table())
-            .map(|table| {
-                table
-                    .iter()
+            .map(|t| {
+                t.iter()
                     .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect()
             })
@@ -246,15 +244,14 @@ mod tests {
 
     #[test]
     fn config_from_node_config() {
-        // Parse a TOML snippet to get a proper config table.
+        // Parse a TOML snippet to get a proper config value.
         let toml_str = r#"
 template = "Task: {{task_description}}"
 
 [variables]
 task_description = "build the thing"
 "#;
-        let table: toml::Table = toml::from_str(toml_str).unwrap();
-        let config: HashMap<String, toml::Value> = table.into_iter().collect();
+        let config: toml::Value = toml::from_str(toml_str).unwrap();
 
         let parsed = ComposeCellConfig::from_node_config(&config);
         assert_eq!(parsed.template, "Task: {{task_description}}");

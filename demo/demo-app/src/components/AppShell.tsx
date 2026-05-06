@@ -48,6 +48,7 @@ export default function AppShell() {
     { keys: 'g m', description: 'Go to Demo', category: 'Navigation', action: () => navigate('/demo') },
     { keys: 'g s', description: 'Go to Settings', category: 'Navigation', action: () => navigate('/settings') },
     { keys: 'g p', description: 'Go to Builder', category: 'Navigation', action: () => navigate('/builder') },
+    { keys: 'g i', description: 'Go to ISFR', category: 'Navigation', action: () => navigate('/isfr') },
   ], [help.toggle, help.close, navigate]);
 
   useKeyboardShortcuts(shortcuts);

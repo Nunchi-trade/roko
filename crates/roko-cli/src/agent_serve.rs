@@ -214,7 +214,21 @@ impl AgentServeRuntimeConfig {
             bind = %startup.bind,
             "starting roko agent server"
         );
+
+        // ── Start the cognitive loop as a Hot Graph (task 103) ──
+        //
+        // The cognitive loop runs alongside the agent server in a background
+        // task. It uses stub cells for now -- real cell implementations will
+        // be wired in a future task. The loop is cancelled when the server
+        // shuts down.
+        let _cog_handle = self.try_start_cognitive_loop();
+
         let result = server.serve().await;
+
+        // Cancel the cognitive loop (if running) when the server exits.
+        if let Some(ref handle) = _cog_handle {
+            handle.cancel();
+        }
 
         // Cleanup: remove our entry from agents.json on shutdown.
         let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -355,6 +369,63 @@ impl AgentServeRuntimeConfig {
                 }
             })
             .build()
+    }
+
+    /// Attempt to start the cognitive loop as a background Hot Graph.
+    ///
+    /// Looks for the cognitive-loop TOML at the standard path
+    /// (`examples/graphs/cognitive-loop.toml` relative to the workspace root).
+    /// If the file exists, the graph is loaded with stub cells and started as a
+    /// Hot Graph with a 1-second tick interval and no tick limit (runs until
+    /// cancelled).
+    ///
+    /// Returns `Some(HotGraphHandle)` if the loop was started, `None` if the
+    /// TOML was not found or failed to load. Errors are logged but do not
+    /// prevent the agent server from starting.
+    fn try_start_cognitive_loop(&self) -> Option<roko_graph::HotGraphHandle> {
+        let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        // Try standard locations for the cognitive loop graph definition.
+        let candidates = [
+            workdir.join("examples/graphs/cognitive-loop.toml"),
+            workdir.join(".roko/graphs/cognitive-loop.toml"),
+        ];
+        let toml_path = candidates.iter().find(|p| p.exists())?;
+
+        let toml_str = match std::fs::read_to_string(toml_path) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    path = %toml_path.display(),
+                    error = %e,
+                    "failed to read cognitive-loop graph; skipping"
+                );
+                return None;
+            }
+        };
+
+        let graph = match roko_graph::loader::load_from_str(&toml_str) {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(error = %e, "failed to parse cognitive-loop graph; skipping");
+                return None;
+            }
+        };
+
+        let registry = roko_graph::default_registry();
+        let policy = roko_graph::HotPolicy {
+            tick_interval_ms: 1000,
+            max_ticks: None,
+            persist_tick_state: false,
+        };
+
+        info!(
+            agent_id = %self.agent_id,
+            graph = %graph.metadata.name,
+            "starting cognitive loop as Hot Graph"
+        );
+
+        Some(roko_graph::start_hot(graph, registry, policy, None))
     }
 
     fn try_build_dispatcher(&self) -> Result<Option<Arc<dyn DispatchLike>>> {

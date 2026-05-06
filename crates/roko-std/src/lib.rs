@@ -17,6 +17,7 @@
     clippy::unnecessary_literal_bound
 )]
 
+pub mod math;
 pub mod memory;
 pub mod noop;
 pub mod roles;

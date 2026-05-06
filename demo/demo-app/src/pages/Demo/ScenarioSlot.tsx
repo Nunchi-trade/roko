@@ -10,8 +10,8 @@ import {
 import type { Scenario, ClickableScenario, ScenarioContext } from '../../lib/scenarios';
 import { isClickableScenario } from '../../lib/scenarios';
 import { CommandList } from '../../components/CommandList';
-import PipelineStagesPanel from '../../components/PipelineStagesPanel';
-import CostComparisonPanel from '../../components/CostComparisonPanel';
+import PipelineStagesPanel, { EMPTY_PIPELINE_METRICS, type PipelineMetrics } from '../../components/PipelineStagesPanel';
+import CostComparisonPanel, { EMPTY_RUN_METRICS, type RunMetrics } from '../../components/CostComparisonPanel';
 import MemoryTransferPanel from '../../components/MemoryTransferPanel';
 import ISFRPanel from '../../components/ISFRPanel';
 import OracleFlowPanel from '../../components/OracleFlowPanel';
@@ -44,6 +44,8 @@ import { ConfettiBurst, SuccessRing } from '../../components/Celebration';
 import ScenarioPreview from '../../components/ScenarioPreview';
 import SidebarRenderer from '../../components/SidebarRenderer';
 import InferenceTracePanel from '../../components/InferenceTracePanel';
+import ProvenanceCard from '../../components/ProvenanceCard';
+import RevealWhen from '../../components/RevealWhen';
 import { useInferenceTrace } from '../../hooks/useInferenceTrace';
 import DemoStatusBar from '../../components/DemoStatusBar';
 import type { ToastOptions } from '../../components/Toast';
@@ -222,6 +224,31 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
   const [pipeline, setPipeline] = useState<PipelineDemoState>(
     () => initialPipeline(scenario.id, selectedPipelineExample),
   );
+
+  // ── Panel metric state (fed by scenario runners via setMetric) ──
+  const [naiveCost, setNaiveCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [cascadeCost, setCascadeCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [coldCost, setColdCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [warmCost, setWarmCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [dataCost, setDataCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [strategyCost, setStrategyCost] = useState<RunMetrics>(EMPTY_RUN_METRICS);
+  const [oracleChainChecked, setOracleChainChecked] = useState(false);
+  const [pipelineMetrics, setPipelineMetrics] = useState<PipelineMetrics>(EMPTY_PIPELINE_METRICS);
+
+  // Pipeline stage/gate state (fed by scenario runner via setMetric)
+  type StageStatus = 'pending' | 'active' | 'complete' | 'failed';
+  type GateStatus = 'pending' | 'done' | 'failed';
+  const [pipelineStages, setPipelineStages] = useState<{ id: string; label: string; status: StageStatus }[]>([
+    { id: 'classify', label: 'Classify', status: 'pending' },
+    { id: 'plan', label: 'Plan', status: 'pending' },
+    { id: 'execute', label: 'Execute', status: 'pending' },
+    { id: 'gate', label: 'Gate', status: 'pending' },
+  ]);
+  const [pipelineGates, setPipelineGates] = useState<{ name: string; status: GateStatus }[]>([
+    { name: 'compile', status: 'pending' },
+    { name: 'clippy', status: 'pending' },
+    { name: 'test', status: 'pending' },
+  ]);
 
   // Knowledge Transfer panel state
   const [kfInsights, setKfInsights] = useState<InsightEvent[]>([]);
@@ -491,6 +518,18 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     setKfLeftAgent(INITIAL_KF_LEFT);
     setKfRightAgent(INITIAL_KF_RIGHT);
     setKfMetrics(initialKfMetrics());
+    setPipelineStages([
+      { id: 'classify', label: 'Classify', status: 'pending' },
+      { id: 'plan', label: 'Plan', status: 'pending' },
+      { id: 'execute', label: 'Execute', status: 'pending' },
+      { id: 'gate', label: 'Gate', status: 'pending' },
+    ]);
+    setPipelineGates([
+      { name: 'compile', status: 'pending' },
+      { name: 'clippy', status: 'pending' },
+      { name: 'test', status: 'pending' },
+    ]);
+    setPipelineMetrics(EMPTY_PIPELINE_METRICS);
     inferenceTrace.reset();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scenario.id, selectedPipelineExample, inferenceTrace.reset]);
@@ -569,11 +608,93 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       signal: abortRef.current!.signal,
       pipeline: pipelineCtx,
       setMetric: (key: string, value: string) => {
+        // Route to sidebar stats (model/cost/tokens/time)
         setStats((prev) => {
           const k = key.replace('m-', '') as keyof typeof prev;
           if (k in prev) return { ...prev, [k]: value };
           return prev;
         });
+
+        // Route to panel-specific metric state
+        // Strip currency symbols ($) and commas before parsing —
+        // result.cost arrives as "$0.12", result.tokens as "1,234"
+        const num = parseFloat(value.replace(/[$,]/g, '')) || 0;
+        const updateMetric = (setter: React.Dispatch<React.SetStateAction<RunMetrics>>, field: keyof RunMetrics) => {
+          setter((prev) => ({ ...prev, [field]: field === 'calls' ? prev.calls + 1 : num }));
+        };
+
+        switch (key) {
+          // Cost scenario
+          case 'naive-cost': updateMetric(setNaiveCost, 'cost'); break;
+          case 'naive-tokens': updateMetric(setNaiveCost, 'tokens'); break;
+          case 'naive-elapsed': updateMetric(setNaiveCost, 'elapsed'); break;
+          case 'naive-calls': setNaiveCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'cascade-cost': updateMetric(setCascadeCost, 'cost'); break;
+          case 'cascade-tokens': updateMetric(setCascadeCost, 'tokens'); break;
+          case 'cascade-elapsed': updateMetric(setCascadeCost, 'elapsed'); break;
+          case 'cascade-calls': setCascadeCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          // Memory scenario
+          case 'cold-cost': updateMetric(setColdCost, 'cost'); break;
+          case 'cold-tokens': updateMetric(setColdCost, 'tokens'); break;
+          case 'cold-elapsed': updateMetric(setColdCost, 'elapsed'); break;
+          case 'cold-calls': setColdCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'warm-cost': updateMetric(setWarmCost, 'cost'); break;
+          case 'warm-tokens': updateMetric(setWarmCost, 'tokens'); break;
+          case 'warm-elapsed': updateMetric(setWarmCost, 'elapsed'); break;
+          case 'warm-calls': setWarmCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          // Oracle scenario
+          case 'data-cost': updateMetric(setDataCost, 'cost'); break;
+          case 'data-tokens': updateMetric(setDataCost, 'tokens'); break;
+          case 'data-elapsed': updateMetric(setDataCost, 'elapsed'); break;
+          case 'data-calls': setDataCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'strategy-cost': updateMetric(setStrategyCost, 'cost'); break;
+          case 'strategy-tokens': updateMetric(setStrategyCost, 'tokens'); break;
+          case 'strategy-elapsed': updateMetric(setStrategyCost, 'elapsed'); break;
+          case 'strategy-calls': setStrategyCost((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'chain-checked': setOracleChainChecked(true); break;
+          // Pipeline scenario
+          case 'pipeline-cost': setPipelineMetrics((prev) => ({ ...prev, cost: num })); break;
+          case 'pipeline-tokens': setPipelineMetrics((prev) => ({ ...prev, tokens: num })); break;
+          case 'pipeline-elapsed': setPipelineMetrics((prev) => ({ ...prev, elapsed: num })); break;
+          case 'pipeline-calls': setPipelineMetrics((prev) => ({ ...prev, calls: prev.calls + 1 })); break;
+          case 'pipeline-model': setPipelineMetrics((prev) => ({ ...prev, model: value })); break;
+
+          // Pipeline stage transitions
+          case 'pipeline-stage': {
+            const stageId = value;
+            setPipelineStages((prev) => prev.map((s) => {
+              if (s.id === stageId) return { ...s, status: 'active' as StageStatus };
+              if (s.status === 'active') return { ...s, status: 'complete' as StageStatus };
+              return s;
+            }));
+            break;
+          }
+          case 'pipeline-stage-done': {
+            setPipelineStages((prev) => prev.map((s) =>
+              s.status === 'active' || s.status === 'pending'
+                ? { ...s, status: 'complete' as StageStatus }
+                : s,
+            ));
+            break;
+          }
+          case 'pipeline-gate-pass': {
+            setPipelineGates((prev) => prev.map((g) =>
+              g.name === value ? { ...g, status: 'done' as GateStatus } : g,
+            ));
+            break;
+          }
+          case 'pipeline-gate-fail': {
+            setPipelineGates((prev) => prev.map((g) =>
+              g.name === value ? { ...g, status: 'failed' as GateStatus } : g,
+            ));
+            break;
+          }
+          case 'pipeline-gates-none': {
+            // "gates (none configured)" — mark all as done (skipped)
+            setPipelineGates((prev) => prev.map((g) => ({ ...g, status: 'done' as GateStatus })));
+            break;
+          }
+        }
       },
       setGate: (name: string, status: 'pass' | 'fail' | 'pending') => {
         if (status === 'pass') {
@@ -724,7 +845,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     }
     if (!entries) {
       const connected = getReadyTerminalEntries().length;
-      console.error(
+      console.warn(
         `Timed out waiting for terminals: need ${scenario.panes} but only ${connected} connected`,
       );
       runningRef.current = false;
@@ -756,7 +877,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
           throw new Error('Failed to create local workspace via mktemp');
         }
         wsPath = match[1];
-        console.log('[ScenarioSlot] created local workspace:', wsPath);
+        console.debug('[ScenarioSlot] created local workspace:', wsPath);
       }
       markEnd('workspace-create');
       const wsMs = measure('workspace-create');
@@ -813,13 +934,16 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       }, 1000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error('Scenario error:', err);
-      toast(msg, { type: 'error', duration: 5000 });
+      console.warn('Scenario error:', err);
+      const friendly = /fetch|network|ECONNREFUSED|Failed to fetch/i.test(msg)
+        ? 'Workspace unavailable \u2014 check that roko serve is running'
+        : msg;
+      toast(friendly, { type: 'error', duration: 5000 });
       setProgressLabel('Error');
-      setProgressText(msg);
+      setProgressText(friendly);
       setLogEntries((prev) => [
         ...prev,
-        { ts: now_ts(), text: `Workspace creation failed: ${msg}`, type: 'error' as const },
+        { ts: now_ts(), text: friendly, type: 'error' as const },
       ]);
     }
 
@@ -880,6 +1004,9 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       scenario.resetState?.();
     }
     workspaceEnteredRef.current = false;
+    // Clear stale workspace path so the next run creates a fresh one via the
+    // server API (which properly initialises git, roko.toml, .roko/ dirs).
+    workspaceDirRef.current = '';
   }, [playback, timeline, clearCompletionTimers, resetSidebarState, cmdReset, scenario]);
 
   // ── Imperative handle ──────────────────────────────────────
@@ -889,6 +1016,22 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
     step: handleStep,
     reset: handleReset,
   }), [handlePlay, handlePauseResume, handleStep, handleReset]);
+
+  // ── Detect clickable scenario completion ────────────────────
+  // When all commands have finished (success or failure), mark the scenario complete.
+  const allCmdsDone = isClickable && cmdItems.length > 0 && cmdItems.every(
+    (c) => c.status === 'success' || c.status === 'failure',
+  );
+  const prevAllDone = useRef(false);
+  useEffect(() => {
+    if (allCmdsDone && !prevAllDone.current) {
+      prevAllDone.current = true;
+      setScenarioComplete(true);
+      onComplete(scenarioIdx);
+    } else if (!allCmdsDone) {
+      prevAllDone.current = false;
+    }
+  }, [allCmdsDone, scenarioIdx, onComplete]);
 
   // ── Derived display values ─────────────────────────────────
   const timelineDisplay = timelineSteps.map((s) => ({
@@ -932,7 +1075,10 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
         workspaceDirRef.current = wsPath;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        toast(`Workspace creation failed: ${msg}`, { type: 'error' });
+        const friendly = /fetch|network|ECONNREFUSED|Failed to fetch/i.test(msg)
+          ? 'Workspace unavailable \u2014 check that roko serve is running'
+          : `Workspace creation failed: ${msg}`;
+        toast(friendly, { type: 'error' });
         return;
       }
     }
@@ -960,7 +1106,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
       if (result.ok) {
         cmdMarkSuccess(id);
       } else {
-        cmdMarkFailure(id, result.error ?? 'Command returned non-zero exit code');
+        cmdMarkFailure(id, result.error ?? 'Command failed (non-zero exit code)');
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1054,17 +1200,22 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
               </div>
               {scenario.id === 'pipeline' && (
                 <div className="demo-clickable-context demo-clickable-context--pipeline">
-                  <PipelineStagesPanel isRunning={isRunning} />
+                  <PipelineStagesPanel
+                    metrics={pipelineMetrics}
+                    stages={pipelineStages}
+                    gates={pipelineGates}
+                    isRunning={isRunning}
+                  />
                 </div>
               )}
               {scenario.id === 'cost' && (
                 <div className="demo-clickable-context">
-                  <CostComparisonPanel isRunning={isRunning} />
+                  <CostComparisonPanel naive={naiveCost} cascade={cascadeCost} isRunning={isRunning} />
                 </div>
               )}
               {scenario.id === 'memory' && (
                 <div className="demo-clickable-context">
-                  <MemoryTransferPanel isRunning={isRunning} />
+                  <MemoryTransferPanel cold={coldCost} warm={warmCost} isRunning={isRunning} />
                 </div>
               )}
               {scenario.id === 'isfr' && (
@@ -1077,7 +1228,7 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
               )}
               {scenario.id === 'oracle' && (
                 <div className="demo-clickable-context">
-                  <OracleFlowPanel isRunning={isRunning} />
+                  <OracleFlowPanel data={dataCost} strategy={strategyCost} chainChecked={oracleChainChecked} isRunning={isRunning} />
                 </div>
               )}
               <InferenceTracePanel
@@ -1085,6 +1236,16 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                 totals={inferenceTrace.totals}
                 costSeries={inferenceTrace.costSeries}
               />
+              <RevealWhen visible={scenarioComplete} mode="blur">
+                <div style={{ padding: '8px 10px 10px' }}>
+                  <ProvenanceCard
+                    model={stats.model}
+                    cost={stats.cost}
+                    tokens={stats.tokens}
+                    duration={stats.time}
+                  />
+                </div>
+              </RevealWhen>
             </div>
           </div>
         ) : (
@@ -1184,6 +1345,14 @@ const ScenarioSlot = forwardRef<ScenarioSlotHandle, ScenarioSlotProps>(function 
                   traceCalls={inferenceTrace.calls}
                   traceTotals={inferenceTrace.totals}
                   traceCostSeries={inferenceTrace.costSeries}
+                  naiveCost={naiveCost}
+                  cascadeCost={cascadeCost}
+                  coldCost={coldCost}
+                  warmCost={warmCost}
+                  dataCost={dataCost}
+                  strategyCost={strategyCost}
+                  oracleChainChecked={oracleChainChecked}
+                  pipelineMetrics={pipelineMetrics}
                 />
               </div>
             )}

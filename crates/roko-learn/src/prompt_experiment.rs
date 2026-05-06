@@ -597,6 +597,14 @@ impl ExperimentStore {
         }
     }
 
+    /// Apply a WAL-replayed experiment outcome. Does NOT write a WAL entry.
+    ///
+    /// Identical to [`Self::record_outcome`] but named distinctly so callers
+    /// cannot accidentally bypass WAL writes during normal operation.
+    pub fn replay_outcome(&mut self, variant_id: &str, success: bool) {
+        self.record_outcome(variant_id, success);
+    }
+
     /// Record a numeric metric for a variant within a specific experiment.
     pub fn record_metric(&mut self, experiment_id: &str, variant_id: &str, metric: f64) {
         if let Some(experiment) = self.experiments.get_mut(experiment_id) {
@@ -857,5 +865,26 @@ mod tests {
         assert_eq!(stats.last, Some(0.75));
         assert_eq!(stats.sum, 0.75);
         assert!(!experiment.metric_stats.contains_key("missing"));
+    }
+
+    #[test]
+    fn replay_outcome_updates_stats_identically_to_record_outcome() {
+        let mut store = ExperimentStore::default();
+        let exp = PromptExperiment::new("exp-1", "style", make_variants("style"));
+        store.register(exp);
+
+        // Use replay_outcome and verify it behaves like record_outcome.
+        store.replay_outcome("a", true);
+        store.replay_outcome("a", false);
+        store.replay_outcome("b", true);
+
+        let experiment = store.get("exp-1").expect("experiment exists");
+        let stats_a = experiment.stats.get("a").expect("variant a stats");
+        assert_eq!(stats_a.trials, 2);
+        assert_eq!(stats_a.successes, 1);
+
+        let stats_b = experiment.stats.get("b").expect("variant b stats");
+        assert_eq!(stats_b.trials, 1);
+        assert_eq!(stats_b.successes, 1);
     }
 }

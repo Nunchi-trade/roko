@@ -41,6 +41,7 @@ services:
       ROKO_AGENT_RELAY_URL: "http://127.0.0.1:9011"
       MIRAGE_STATE_DIR: "/workspace/.roko/state"
       MIRAGE_SNAPSHOT_INTERVAL_SECS: "15"
+      ETH_RPC_URL: "${ETH_RPC_URL:-}"
     volumes:
       - mirage-state:/workspace/.roko
     # Gate dependents on both the mirage RPC surface and the relayed one-origin path.
@@ -74,6 +75,7 @@ services:
     environment:
       RUST_LOG: "info,roko=debug"
       ROKO_MIRAGE_URL: "http://mirage:8545"
+      ROKO_AGENT_RELAY_URL: "http://mirage:8545"
     # roko is a CLI; keep the container alive with a long-running entrypoint
     # so operators can `docker compose exec roko roko <subcommand>`.
     entrypoint: ["/usr/local/bin/roko"]

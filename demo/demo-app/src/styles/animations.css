@@ -144,3 +144,46 @@
   0%   { background: color-mix(in srgb, var(--rose-dim) 20%, transparent); }
   100% { background: transparent; }
 }
+
+/* ── slot-roll-up ──
+   Per-digit upward roll for SlotNumber.
+*/
+@keyframes slot-roll-up {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* ── slot-roll-down ──
+   Per-digit downward roll for SlotNumber (decrement).
+*/
+@keyframes slot-roll-down {
+  from { transform: translateY(-100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* ── crystallize-burst ──
+   Radial particle explosion for Crystallize effect.
+*/
+@keyframes crystallize-burst {
+  0% { transform: translate(-50%, -50%) scale(0.5) rotate(0deg); opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* ── crystallize-shimmer ──
+   Brief highlight overlay for Crystallize.
+*/
+@keyframes crystallize-shimmer {
+  0% { opacity: 0; }
+  30% { opacity: 0.25; }
+  100% { opacity: 0; }
+}
+
+/* ── crt-flicker ──
+   Subtle CRT display flicker for ambient layer.
+*/
+@keyframes crt-flicker {
+  0%, 100% { opacity: 1; }
+  92% { opacity: 1; }
+  93% { opacity: 0.92; }
+  94% { opacity: 1; }
+}

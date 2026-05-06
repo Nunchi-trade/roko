@@ -68,10 +68,10 @@ impl AcpConfig {
         let mut sources = Vec::new();
 
         // 1. Explicit --global-config (highest-priority global layer).
-        if let Some(path) = self.global_config_path.as_ref() {
-            if path.is_file() {
-                sources.push(format!("global:{}", display_path(path)));
-            }
+        if let Some(path) = self.global_config_path.as_ref()
+            && path.is_file()
+        {
+            sources.push(format!("global:{}", display_path(path)));
         }
 
         // 2. Project config: explicit --config or workspace roko.toml.
@@ -131,10 +131,9 @@ impl AcpConfig {
                     check_opts.merge_global = false;
                     match roko_core::config::loader::load_config_file(path, &check_opts) {
                         Ok(_) => None,
-                        Err(e) => Some(format!(
-                            "roko.toml parse error ({}): {e:#}",
-                            path.display()
-                        )),
+                        Err(e) => {
+                            Some(format!("roko.toml parse error ({}): {e:#}", path.display()))
+                        }
                     }
                 } else {
                     None

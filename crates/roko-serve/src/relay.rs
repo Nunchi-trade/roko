@@ -184,6 +184,25 @@ fn resolve_public_url(config: &RelayConfig, port: u16) -> String {
     format!("http://localhost:{port}")
 }
 
+/// Extract `scheme://host:port` from a relay URL, stripping any path.
+/// Keeps the original scheme (ws/wss/http/https).
+pub fn normalize_relay_base_url(url: &str) -> String {
+    if let Some(idx) = url.find("://") {
+        let after_scheme = &url[idx + 3..];
+        if let Some(slash) = after_scheme.find('/') {
+            return url[..idx + 3 + slash].to_string();
+        }
+    }
+    url.to_string()
+}
+
+/// Extract `http(s)://host:port` from a WS relay URL, stripping any path.
+fn normalize_ws_to_http_base(ws_url: &str) -> String {
+    let base = normalize_relay_base_url(ws_url);
+    base.replace("wss://", "https://")
+        .replace("ws://", "http://")
+}
+
 /// Resolve the workspace name.
 ///
 /// Priority: config > hostname > "roko".
@@ -261,10 +280,8 @@ pub fn start_workspace_registration(
     );
 
     Some(tokio::spawn(async move {
-        // Convert relay WS URL to HTTP for REST calls.
-        let relay_http = relay_url
-            .replace("wss://", "https://")
-            .replace("ws://", "http://");
+        // Convert relay WS URL to HTTP base (scheme + authority only).
+        let relay_http = normalize_ws_to_http_base(&relay_url);
         let client = reqwest::Client::new();
 
         // Register workspace.

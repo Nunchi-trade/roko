@@ -196,33 +196,13 @@ fn main() {
         cli.upstream_burst,
     ));
 
-    #[allow(clippy::expect_used)]
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build Tokio runtime");
-
-    if let Err(error) = rt.block_on(run(cli, upstream)) {
-        let exit_code = startup_exit_code(&error).unwrap_or(1);
-        tracing::error!(error = %format!("{error:#}"), exit_code, "mirage startup failed");
-        std::process::exit(exit_code);
-    }
-}
-
-#[allow(clippy::cognitive_complexity)]
-async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
-    let follower_upstream = Arc::clone(&upstream);
-    let resource_model = ResourceModel::for_profile(
-        Profile::from(cli.profile),
-        Duration::from_secs(cli.cache_ttl_secs),
-    );
-    // --- Persistence: resolve state directory and load prior snapshot ---
+    // --- Persistence + fork init: all sync work runs BEFORE the Tokio runtime ---
+    // bootstrap_erc8004_contracts() and resolve_initial_head() use blocking I/O
+    // (reqwest::blocking::Client) that panics inside an async context. Keep them here.
     let state_dir = cli
         .state_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from(".roko/state"));
-    // Log persistence diagnostics so Railway deploy logs show the state dir
-    // and whether prior snapshots exist.
     tracing::info!(
         state_dir = %state_dir.display(),
         volume_mount = %std::env::var("RAILWAY_VOLUME_MOUNT_PATH").unwrap_or_else(|_| "(not set)".into()),
@@ -257,18 +237,24 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
     };
 
     let head = if let Some(ref snap) = loaded_snapshot {
-        // Use the snapshot's block number so the follower catches up from there.
         snap.fork.local_block_number
     } else {
-        let upstream = Arc::clone(&upstream);
         let require_probe = cli.rpc_url.is_some();
-        tokio::task::spawn_blocking(move || resolve_initial_head(&upstream, require_probe))
-            .await
-            .context("health check task panicked")??
+        match resolve_initial_head(&upstream, require_probe)
+            .context("upstream RPC health check failed")
+        {
+            Ok(h) => h,
+            Err(error) => {
+                let exit_code = startup_exit_code(&error).unwrap_or(1);
+                tracing::error!(error = %format!("{error:#}"), exit_code, "mirage startup failed");
+                std::process::exit(exit_code);
+            }
+        }
     };
+
     let mut fork = ForkState::new(
         HybridDB::new(
-            upstream,
+            Arc::clone(&upstream),
             cli.cache_size,
             Duration::from_secs(cli.cache_ttl_secs),
             resource_model.bytecode_cache_capacity(),
@@ -281,21 +267,53 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
     fork.strict_balance = cli.strict_balance;
     fork.verify_signatures = cli.verify_signatures;
 
-    // Apply fork snapshot if one was loaded.
     if let Some(ref snap) = loaded_snapshot {
         persist::apply_fork_snapshot(&mut fork, snap.fork.clone());
-        // CLI chain_id overrides the snapshot's — the operator may have
-        // changed the chain ID between restarts (e.g. migrating from 1 to 88888).
         fork.chain_id = cli.chain_id;
     }
 
-    // Prefund the synthetic ERC-8004 bootstrap deployer so contract creation
-    // succeeds even on a real mainnet fork (where the address has 0 balance).
     fork.db
         .set_balance(ERC8004_BOOTSTRAP_DEPLOYER, U256::from(10_u128.pow(18)));
 
-    let erc8004_contracts =
-        bootstrap_erc8004_contracts(&mut fork).context("bootstrap ERC-8004 contracts")?;
+    let erc8004_contracts = match bootstrap_erc8004_contracts(&mut fork)
+        .context("bootstrap ERC-8004 contracts")
+    {
+        Ok(c) => c,
+        Err(error) => {
+            let exit_code = startup_exit_code(&error).unwrap_or(1);
+            tracing::error!(error = %format!("{error:#}"), exit_code, "mirage startup failed");
+            std::process::exit(exit_code);
+        }
+    };
+
+    #[allow(clippy::expect_used)]
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build Tokio runtime");
+
+    if let Err(error) = rt.block_on(run(cli, upstream, fork, erc8004_contracts, loaded_snapshot, state_dir, head)) {
+        let exit_code = startup_exit_code(&error).unwrap_or(1);
+        tracing::error!(error = %format!("{error:#}"), exit_code, "mirage startup failed");
+        std::process::exit(exit_code);
+    }
+}
+
+#[allow(clippy::cognitive_complexity, clippy::too_many_arguments)]
+async fn run(
+    cli: Cli,
+    upstream: Arc<UpstreamRpc>,
+    fork: ForkState,
+    erc8004_contracts: Erc8004Contracts,
+    loaded_snapshot: Option<persist::MirageSnapshot>,
+    state_dir: PathBuf,
+    head: u64,
+) -> anyhow::Result<()> {
+    let follower_upstream = Arc::clone(&upstream);
+    let resource_model = ResourceModel::for_profile(
+        Profile::from(cli.profile),
+        Duration::from_secs(cli.cache_ttl_secs),
+    );
 
     let mode = MirageMode::from(cli.mode);
     let telemetry_bus = EventBus::<MirageTelemetryEvent>::new(TELEMETRY_BUS_CAPACITY);

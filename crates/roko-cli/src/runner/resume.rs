@@ -34,7 +34,7 @@ use tracing::info;
 
 use super::persist::{
     JsonlRecovery, PersistPaths, RUN_STATE_SCHEMA_VERSION, RunStateSnapshot, TaskDefFingerprint,
-    load_run_state, recover_jsonl,
+    load_run_state, load_state_snapshot, recover_jsonl,
 };
 use crate::task_parser::TaskDef;
 
@@ -148,7 +148,32 @@ pub(crate) fn prepare_resume_with_force(
     snapshot_fingerprints: &[TaskDefFingerprint],
     force_resume: bool,
 ) -> Result<ResumeReport, ResumeError> {
-    let snapshot = load_run_state(paths)?;
+    // Prefer the unified state snapshot; fall back to legacy run-state.json.
+    let snapshot: Option<RunStateSnapshot> = match load_state_snapshot(paths) {
+        Ok(Some(unified)) => {
+            match serde_json::from_str::<RunStateSnapshot>(&unified.run_state_json) {
+                Ok(rs) => Some(rs),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to parse run_state_json from unified snapshot; trying legacy"
+                    );
+                    load_run_state(paths)?
+                }
+            }
+        }
+        Ok(None) => {
+            // No unified snapshot -- try legacy.
+            load_run_state(paths)?
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "failed to load unified state snapshot; trying legacy"
+            );
+            load_run_state(paths)?
+        }
+    };
     let mut report = ResumeReport {
         resumed: snapshot.is_some(),
         prior_run_id: snapshot.as_ref().map(|s| s.run_id.clone()),

@@ -208,6 +208,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
         }
         PlanCmd::Run {
             plans_dir,
+            engine,
             workdir,
             resume_plan,
             approval,
@@ -242,6 +243,30 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 return cmd_plan_dry_run(&resolved_plans_dir, cli).await;
             }
 
+            // ── Graph Engine path (default) ──
+            if matches!(engine, PlanEngine::Graph) {
+                // Warn about unsupported flags on the Graph Engine path.
+                if resume_plan.is_some() {
+                    eprintln!("Note: --resume-plan is not yet supported by the Graph Engine; snapshots will be ignored.");
+                }
+
+                return cmd_plan_run_engine(&resolved_plans_dir, &wd, cli).await;
+            }
+
+            // ── Runner v2 path (legacy, feature-gated) ──
+            //
+            // When `legacy-runner-v2` is not enabled, PlanEngine only has
+            // `Graph` so the match above always returns. The block below
+            // is unreachable without the feature.
+            #[cfg(not(feature = "legacy-runner-v2"))]
+            {
+                let _ = (&resume_plan, &approval, &max_retries, &max_tasks, &fresh, &force_resume,
+                          &layout, &t_setup, &t_total);
+                bail!("Runner v2 is not available; enable the `legacy-runner-v2` feature to use --engine runner-v2");
+            }
+
+            #[cfg(feature = "legacy-runner-v2")]
+            {
             // Acquire exclusive workspace lock before mutating state.
             let _lock = roko_cli::workspace_lock::acquire_workspace_lock(layout.root())?;
 
@@ -515,13 +540,18 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 projection: Some(projection),
                 http_event_sink: None,
                 output_sink: if !approval && !cli.quiet && !cli.json {
-                    std::sync::Arc::new(roko_cli::runner::output_sink::StderrSink::new())
+                    std::sync::Arc::new(
+                        roko_cli::runner::output_sink::FormattedStderrSink::new(
+                            cli.color.should_color(),
+                        ),
+                    )
                         as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
                 } else {
                     std::sync::Arc::new(roko_cli::runner::output_sink::NoopSink)
                         as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
                 },
                 warm_cache: true,
+                metrics: None,
             };
 
             // Optionally spawn the approval TUI.
@@ -710,6 +740,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             } else {
                 EXIT_FAILURE
             })
+            } // end #[cfg(feature = "legacy-runner-v2")]
         }
         PlanCmd::Generate { source, from_file } => {
             use roko_cli::agent_config::load_gateway_env;
@@ -1475,6 +1506,158 @@ fn format_pre_validation_context(
         }
         Err(_) => String::new(),
     }
+}
+
+/// Execute plans via the Graph Engine path.
+///
+/// Loads plans using the Runner v2 plan_loader, converts each to a Graph
+/// via `roko_graph::convert::plan_to_graph`, and runs them through the
+/// GraphEngine with the default cell registry.
+async fn cmd_plan_run_engine(
+    plans_dir: &std::path::Path,
+    _workdir: &std::path::Path,
+    cli: &Cli,
+) -> Result<i32> {
+    use roko_graph::convert::{PlanTaskInfo, plan_to_graph};
+    use roko_graph::engine::GraphEngine;
+    use roko_graph::cell::CellContext;
+
+    let plans = roko_cli::runner::plan_loader::load_plans(plans_dir)?;
+
+    let total_tasks: usize = plans.iter().map(|p| p.tasks.tasks.len()).sum();
+    let plan_count = plans.len();
+
+    if !cli.quiet && !cli.json {
+        let plan_names: Vec<&str> = plans.iter().map(|p| p.id.as_str()).collect();
+        eprintln!(
+            "\u{25b8} Running plan{} via Graph Engine ({} task{}): {}",
+            if plan_count == 1 { "" } else { "s" },
+            total_tasks,
+            if total_tasks == 1 { "" } else { "s" },
+            plan_names.join(", "),
+        );
+    }
+
+    let mut all_succeeded = true;
+    let mut total_output_count = 0usize;
+
+    for plan in &plans {
+        if !cli.quiet && !cli.json {
+            eprintln!(
+                "  Running plan '{}' via Graph Engine ({} tasks)...",
+                plan.id,
+                plan.tasks.tasks.len()
+            );
+        }
+
+        // Convert Runner v2 tasks into PlanTaskInfo for the converter.
+        let tasks: Vec<(String, PlanTaskInfo)> = plan
+            .tasks
+            .tasks
+            .iter()
+            .map(|t| {
+                let info = PlanTaskInfo {
+                    title: t.title.clone(),
+                    description: t.description.clone(),
+                    role: t.role.clone(),
+                    tier: t.tier.clone(),
+                    model_hint: t.model_hint.clone(),
+                    files: t.files.clone(),
+                    depends_on: t.depends_on.clone(),
+                    depends_on_plan: t.depends_on_plan.clone(),
+                    timeout_secs: t.timeout_secs,
+                    max_retries: t.max_retries,
+                    domain: t.domain.as_ref().map(|d| format!("{d:?}")),
+                    sequence: t.sequence,
+                    full_config_json: serde_json::to_value(t).unwrap_or_default(),
+                };
+                (t.id.clone(), info)
+            })
+            .collect();
+
+        let max_parallel = plan.tasks.meta.max_parallel;
+        let plan_dir_str = plan.dir.display().to_string();
+
+        let graph = match plan_to_graph(&plan.id, &plan_dir_str, &tasks, max_parallel) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("  error: failed to convert plan '{}' to graph: {e}", plan.id);
+                all_succeeded = false;
+                continue;
+            }
+        };
+
+        let registry = roko_graph::default_registry();
+        let engine = GraphEngine::new(graph, registry);
+        let ctx = CellContext::new();
+
+        // Validate before running.
+        let issues = engine.validate();
+        if !issues.is_empty() {
+            eprintln!("  validation errors for plan '{}':", plan.id);
+            for issue in &issues {
+                eprintln!("    - {issue}");
+            }
+            all_succeeded = false;
+            continue;
+        }
+
+        match engine.execute(&ctx).await {
+            Ok(output) => {
+                let output_count = output
+                    .node_results
+                    .iter()
+                    .map(|r| r.output_count)
+                    .sum::<usize>();
+                total_output_count += output_count;
+
+                if !cli.quiet && !cli.json {
+                    eprintln!(
+                        "  Plan '{}' completed: {} nodes, {} output signals, {}",
+                        plan.id,
+                        output.node_results.len(),
+                        output_count,
+                        if output.success { "SUCCESS" } else { "FAILED" },
+                    );
+                }
+                if !output.success {
+                    all_succeeded = false;
+                }
+            }
+            Err(e) => {
+                eprintln!("  error: plan '{}' execution failed: {e}", plan.id);
+                all_succeeded = false;
+            }
+        }
+    }
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "engine": "graph",
+                "succeeded": all_succeeded,
+                "plan_count": plan_count,
+                "total_tasks": total_tasks,
+                "total_outputs": total_output_count,
+            }))
+            .unwrap_or_default()
+        );
+    } else if !cli.quiet {
+        eprintln!(
+            "\n\u{25b8} Graph Engine complete: {} plan{}, {} tasks, {} output signals",
+            plan_count,
+            if plan_count == 1 { "" } else { "s" },
+            total_tasks,
+            total_output_count,
+        );
+    }
+
+    Ok(if all_succeeded {
+        EXIT_SUCCESS
+    } else {
+        EXIT_FAILURE
+    })
 }
 
 #[cfg(test)]

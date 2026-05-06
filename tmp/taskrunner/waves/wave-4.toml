@@ -1,0 +1,46 @@
+# Wave 4: Feeds + Graduation + Calibration
+#
+# Feed trait and implementations, pulse graduation, and
+# the predict-publish-correct calibration loop.
+#
+# Gate: cargo build + test + clippy must pass before wave-5.
+
+[wave]
+name = "wave-4"
+description = "Feed trait, CLI, pulse graduation, predict-publish-correct calibration loop"
+max_parallel = 10
+
+[[groups]]
+name = "feeds"
+description = "Feed trait, FileWatchFeed, ProviderHealthFeed, CLI commands"
+tasks = []
+shared_files = [
+    "crates/roko-core/src/feed.rs",
+    "crates/roko-cli/src/commands/feed.rs",
+]
+
+[[groups]]
+name = "graduation"
+description = "Pulse graduation, GraduationCell"
+tasks = []
+shared_files = [
+    "crates/roko-core/src/pulse.rs",
+    "crates/roko-graph/src/cells/graduation.rs",
+]
+
+[[groups]]
+name = "calibration"
+description = "Predict-publish-correct loop wiring"
+tasks = []
+shared_files = [
+    "crates/roko-learn/src/cascade_router.rs",
+    "crates/roko-learn/src/calibration_policy.rs",
+]
+
+[gate]
+commands = [
+    "cargo +nightly fmt --all --check",
+    "cargo build --workspace",
+    "cargo test --workspace",
+    "cargo clippy --workspace --no-deps -- -D warnings",
+]

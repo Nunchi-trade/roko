@@ -1368,7 +1368,7 @@ function createPane(label, containerId) {
   const resizeObs = new ResizeObserver(() => debouncedFit(fitAddon));
   resizeObs.observe(document.getElementById(`term-${id}`));
 
-  const entry = { id, sessionId, term, ws: null, fitAddon, resizeObs, pane, _outBuf: '', _cmdStart: 0 };
+  const entry = { id, sessionId, term, ws: null, fitAddon, resizeObs, pane, _outBuf: '', _cmdStart: 0, _muted: false };
 
   function connectWs() {
     if (!serverUp) return;
@@ -1386,10 +1386,10 @@ function createPane(label, containerId) {
     ws.onmessage = (e) => {
       if (e.data instanceof ArrayBuffer) {
         const text = new TextDecoder().decode(e.data);
-        term.write(new Uint8Array(e.data));
+        if (!entry._muted) term.write(new Uint8Array(e.data));
         entry._outBuf += text;
       } else {
-        term.write(e.data);
+        if (!entry._muted) term.write(e.data);
         entry._outBuf += (typeof e.data === 'string') ? e.data : '';
       }
       if (entry._outBuf.length > 4096) entry._outBuf = entry._outBuf.slice(-2048);
@@ -1507,8 +1507,11 @@ async function resolveRoko(entry) {
   if (rokoResolved) return;
   const marker = '__ROKO_DONE__';
   entry._outBuf = '';
-  sendCmd(entry, 'command -v roko >/dev/null 2>&1 && echo __ROKO_PATH__ || { test -x ./target/release/roko && echo __ROKO_REL__ || { test -x ./target/debug/roko && echo __ROKO_DBG__ || echo __ROKO_NONE__; }; }; echo ' + marker);
+  // Mute terminal rendering and suppress shell echo so the probe is invisible.
+  entry._muted = true;
+  sendCmd(entry, 'stty -echo 2>/dev/null; command -v roko >/dev/null 2>&1 && echo __ROKO_PATH__ || { test -x ./target/release/roko && echo __ROKO_REL__ || { test -x ./target/debug/roko && echo __ROKO_DBG__ || echo __ROKO_NONE__; }; }; echo ' + marker + '; stty echo 2>/dev/null');
   await waitForMarker(entry, marker, 8000);
+  entry._muted = false;
   const buf = entry._outBuf || '';
   if (buf.includes('__ROKO_PATH__')) ROKO = 'roko';
   else if (buf.includes('__ROKO_REL__')) ROKO = './target/release/roko';

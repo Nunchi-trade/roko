@@ -6,7 +6,7 @@
 //! addressing key for Pulses), [`TopicFilter`] (subscription filters), and
 //! [`PolicyOutputs`] (the explicit outputs from a React's `decide()` call).
 
-use crate::{Body, Engram, Kind};
+use crate::{Body, Engram, Kind, Provenance, Score};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -111,6 +111,43 @@ impl Pulse {
     #[must_use]
     pub fn tag(&self, key: &str) -> Option<&str> {
         self.tags.get(key).map(String::as_str)
+    }
+
+    /// Promote this ephemeral Pulse to a durable Signal (Engram).
+    ///
+    /// This is the deliberate graduation path -- the only way to get a Pulse
+    /// into the Store. Unlike [`Engram::from_pulse_synthetic()`] (which is a
+    /// read-only scoring helper), `graduate()` carries explicit provenance
+    /// and score metadata for the audit trail.
+    ///
+    /// The graduated signal preserves the pulse's kind, body, creation time,
+    /// and all existing tags. Two additional audit tags are added:
+    /// - `pulse_topic`: the original topic string
+    /// - `pulse_seq`: the original sequence number
+    ///
+    /// These audit tags change the content hash (relative to `from_pulse_synthetic`),
+    /// which is intentional -- graduated signals are distinct from synthetic ones.
+    ///
+    /// No lineage is fabricated because there is no source engram content hash.
+    ///
+    /// # Arguments
+    ///
+    /// * `provenance` -- who or what decided to graduate this Pulse
+    /// * `score` -- the initial relevance/importance score for the Signal
+    #[must_use]
+    pub fn graduate(&self, provenance: Provenance, score: Score) -> Engram {
+        let mut builder = Engram::builder(self.kind.clone())
+            .body(self.body.clone())
+            .provenance(provenance)
+            .score(score)
+            .created_at_ms(self.created_at_ms)
+            .tag("pulse_topic", self.topic.to_string())
+            .tag("pulse_seq", self.seq.to_string());
+        // Copy all existing pulse tags onto the graduated engram.
+        for (key, value) in &self.tags {
+            builder = builder.tag(key.clone(), value.clone());
+        }
+        builder.build()
     }
 }
 
@@ -581,5 +618,108 @@ mod tests {
         let json = serde_json::to_string(&o).unwrap();
         let parsed: PolicyOutputs = serde_json::from_str(&json).unwrap();
         assert_eq!(o, parsed);
+    }
+}
+
+#[cfg(test)]
+mod graduation_tests {
+    use super::*;
+    use crate::{Body, Kind, Provenance, Score};
+
+    #[test]
+    fn graduate_preserves_kind_body_and_timestamp() {
+        let pulse = Pulse::builder(1, Topic::new("gate.verdict.emitted"), Kind::GateVerdict)
+            .body(Body::text("passed"))
+            .created_at_ms(99999)
+            .build();
+
+        let signal = pulse.graduate(Provenance::trusted("graduation-policy"), Score::default());
+
+        assert_eq!(signal.kind, Kind::GateVerdict);
+        assert_eq!(signal.body, Body::text("passed"));
+        assert_eq!(signal.created_at_ms, 99999);
+    }
+
+    #[test]
+    fn graduate_sets_provenance_and_score() {
+        let pulse = Pulse::builder(42, Topic::new("test"), Kind::Task)
+            .body(Body::text("data"))
+            .created_at_ms(12345)
+            .build();
+
+        let prov = Provenance::trusted("graduation-policy");
+        let score = Score::NEUTRAL;
+        let signal = pulse.graduate(prov.clone(), score);
+
+        assert_eq!(signal.provenance, prov);
+        assert_eq!(signal.score, score);
+    }
+
+    #[test]
+    fn graduate_adds_audit_tags() {
+        let pulse = Pulse::builder(7, Topic::new("gate.verdict.emitted"), Kind::GateVerdict)
+            .body(Body::text("ok"))
+            .created_at_ms(0)
+            .build();
+
+        let signal = pulse.graduate(Provenance::trusted("graduation-policy"), Score::default());
+
+        assert_eq!(signal.tag("pulse_topic"), Some("gate.verdict.emitted"));
+        assert_eq!(signal.tag("pulse_seq"), Some("7"));
+    }
+
+    #[test]
+    fn graduate_preserves_existing_pulse_tags() {
+        let pulse = Pulse::builder(1, Topic::new("gate.verdict"), Kind::GateVerdict)
+            .body(Body::text("pass"))
+            .created_at_ms(0)
+            .tag("plan_id", "plan-42")
+            .tag("gate", "compile")
+            .build();
+
+        let signal = pulse.graduate(Provenance::trusted("graduation-policy"), Score::default());
+
+        // Original tags preserved
+        assert_eq!(signal.tag("plan_id"), Some("plan-42"));
+        assert_eq!(signal.tag("gate"), Some("compile"));
+        // Audit tags also present
+        assert_eq!(signal.tag("pulse_topic"), Some("gate.verdict"));
+        assert_eq!(signal.tag("pulse_seq"), Some("1"));
+    }
+
+    #[test]
+    fn graduated_signals_have_distinct_content_hashes() {
+        let p1 = Pulse::builder(1, Topic::new("gate.verdict"), Kind::GateVerdict)
+            .body(Body::text("passed"))
+            .created_at_ms(0)
+            .build();
+        let p2 = Pulse::builder(2, Topic::new("gate.verdict"), Kind::GateVerdict)
+            .body(Body::text("failed"))
+            .created_at_ms(0)
+            .build();
+
+        let e1 = p1.graduate(Provenance::trusted("graduation-policy"), Score::default());
+        let e2 = p2.graduate(Provenance::trusted("graduation-policy"), Score::default());
+
+        // Different bodies -> different content hashes.
+        assert_ne!(e1.content_hash(), e2.content_hash());
+    }
+
+    #[test]
+    fn graduate_differs_from_synthetic_due_to_audit_tags() {
+        let pulse = Pulse::builder(1, Topic::new("test.topic"), Kind::Task)
+            .body(Body::text("data"))
+            .created_at_ms(0)
+            .build();
+
+        let graduated = pulse.graduate(
+            Provenance::agent("pulse_promotion"),
+            Score::default(),
+        );
+        let synthetic = Engram::from_pulse_synthetic(&pulse);
+
+        // The graduated engram has extra audit tags (pulse_topic, pulse_seq)
+        // that the synthetic one does not, so their content hashes differ.
+        assert_ne!(graduated.content_hash(), synthetic.content_hash());
     }
 }

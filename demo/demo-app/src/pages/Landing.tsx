@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router';
-import AmbientParticles from '../components/AmbientParticles';
+import AgentSwarm from '../components/three/AgentSwarm';
 import './Landing.css';
 
 const LOOP_PHASES = [
@@ -24,24 +24,8 @@ export default function Landing() {
 
   return (
     <div className="landing-page">
-      {/* Ambient particle background */}
-      <AmbientParticles
-        config={{
-          count: 60,
-          speed: 0.00008,
-          minSize: 0.4,
-          maxSize: 2.2,
-          baseAlpha: 0.14,
-          alphaSwing: 0.1,
-          glowRadius: 14,
-          colors: [
-            [220, 165, 189],
-            [200, 184, 144],
-            [136, 136, 168],
-            [170, 112, 136],
-          ],
-        }}
-      />
+      {/* 3D agent swarm background */}
+      <AgentSwarm mode="chaos" />
 
       {/* ── HERO ── */}
       <div className="landing-hero">

@@ -1,0 +1,60 @@
+.provenance-card {
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  font-family: var(--mono);
+}
+
+.provenance-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.provenance-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+
+.provenance-ts {
+  font-size: 10px;
+  color: var(--text-ghost);
+}
+
+.provenance-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.provenance-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 2px 0;
+}
+
+.provenance-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-ghost);
+}
+
+.provenance-value {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.provenance-value--model {
+  color: var(--rose);
+}
+
+.provenance-value--id {
+  color: var(--text-dim);
+  font-size: 10px;
+}

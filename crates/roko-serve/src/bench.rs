@@ -156,6 +156,8 @@ pub enum BenchStrategy {
     NeuroAugmented,
     /// Apply the full cascade of enrichments before dispatch.
     FullCascade,
+    /// Simulated results for demo — no LLM dispatch required.
+    Demo,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

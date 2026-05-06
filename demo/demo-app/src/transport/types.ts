@@ -151,6 +151,28 @@ export type ServerEvent =
        resolved: boolean; durationMs: number }
   | { type: 'SweRunCompleted'; runId: string; resolved: number;
        total: number; passRate: number }
+  // ISFR (interest-free secured rate)
+  | { type: 'isfr_rate_computed'; compositeBps: number; lendingBps: number;
+       structuredBps: number; fundingBps: number; stakingBps: number;
+       confidenceBps: number; sourceCount: number; timestampMs: number }
+  | { type: 'isfr_source_health_changed'; sourceId: string;
+       health: 'live' | 'stale' | 'offline'; lastRateBps: number | null }
+  | { type: 'isfr_keeper_state_changed'; running: boolean }
+  // Chain (block watcher)
+  | { type: 'chain_block'; number: number; hash: string; parentHash: string;
+       timestamp: number; gasUsed: number; gasLimit: number; txCount: number;
+       baseFeePerGas: number | null }
+  | { type: 'chain_tx'; blockNumber: number; txHash: string; from: string;
+       to: string | null; valueWei: string; gasUsed: number;
+       methodSig: string | null; success: boolean }
+  | { type: 'chain_contract_event'; blockNumber: number; txHash: string;
+       logIndex: number; contract: string; eventName: string;
+       decoded: Record<string, unknown> }
+  // Feed agents
+  | { type: 'feed_tick'; agentId: string; feedId: string; topic: string;
+       payload: unknown; timestampMs: number }
+  | { type: 'feed_agent_online'; agentId: string; name: string; feedCount: number }
+  | { type: 'feed_agent_offline'; agentId: string }
   // System
   | { type: 'server_shutdown' }
   | { type: 'error'; message: string };

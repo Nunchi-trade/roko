@@ -125,10 +125,16 @@ pub async fn cmd_unified_chat(
 
 /// One-shot inline mode: dispatch a bare prompt, print result, exit.
 ///
-/// Called for `roko "fix the bug"` (positional prompt, no subcommand).
+/// Called for `roko "fix the bug"` (positional prompt, no subcommand) and also
+/// by `commands/util::cmd_oneshot()` and `cmd_pipe()` for piped input.
 ///
-/// Uses `ChatAgentSession` for full system prompt, tools, MCP, and safety
-/// settings. Session initialization failures are user-visible errors; production
+/// **This is intentionally a separate chat path from `WorkflowEngine`.**
+/// It uses `ChatAgentSession` for interactive one-shot dispatch with full
+/// system prompt, tools, MCP, and safety settings. It does NOT go through
+/// the plan-based `WorkflowEngine` v2 runner because single-prompt dispatch
+/// does not need plan DAG execution, gate pipelines, or merge queues.
+///
+/// Session initialization failures are user-visible errors; production
 /// one-shot dispatch must not downgrade to deprecated raw dispatch.
 pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

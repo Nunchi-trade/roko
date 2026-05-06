@@ -23,6 +23,7 @@ pub use super::agent::*;
 pub use super::budget::*;
 pub use super::chain::*;
 pub use super::gates::*;
+pub use super::graduation::*;
 pub use super::learning::*;
 pub use super::project::*;
 pub use super::provider::*;
@@ -89,6 +90,9 @@ pub struct RokoConfig {
     pub models: IndexMap<String, ModelProfile>,
     #[serde(default)]
     pub gates: GatesConfig,
+    /// Graduation policies: which Bus topics get promoted to the Store.
+    #[serde(default)]
+    pub graduation: GraduationConfig,
     #[serde(default)]
     pub routing: RoutingConfig,
     #[serde(default)]
@@ -127,6 +131,12 @@ pub struct RokoConfig {
     pub chain: ChainConfig,
     #[serde(default)]
     pub relay: RelayConfig,
+    /// ISFR keeper configuration.
+    #[serde(default)]
+    pub isfr: ISFRSection,
+    /// Feed agent configuration.
+    #[serde(default)]
+    pub feed_agents: FeedAgentsConfig,
     #[serde(default)]
     pub runner: CoreRunnerConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -166,6 +176,7 @@ impl Default for RokoConfig {
             providers: IndexMap::new(),
             models: IndexMap::new(),
             gates: GatesConfig::default(),
+            graduation: GraduationConfig::default(),
             routing: RoutingConfig::default(),
             pipeline: PipelineConfig::default(),
             budget: BudgetConfig::default(),
@@ -185,6 +196,8 @@ impl Default for RokoConfig {
             tools: ToolsConfig::default(),
             chain: ChainConfig::default(),
             relay: RelayConfig::default(),
+            isfr: ISFRSection::default(),
+            feed_agents: FeedAgentsConfig::default(),
             runner: CoreRunnerConfig::default(),
             agents: Vec::new(),
             validation: ValidationConfig::default(),
@@ -246,6 +259,12 @@ impl RokoConfig {
     #[must_use]
     pub const fn is_stale(&self) -> bool {
         self.schema_version < CURRENT_SCHEMA_VERSION
+    }
+
+    /// Returns `true` if feed agents should be spawned at serve startup.
+    #[must_use]
+    pub const fn feed_agents_enabled(&self) -> bool {
+        self.feed_agents.enabled
     }
 
     // ---- provider / model synthesis --------------------------------------
@@ -1118,6 +1137,13 @@ pub struct ConductorConfig {
     pub max_auto_fix_attempts: u32,
     #[serde(default = "default_auto_fix_model")]
     pub auto_fix_model: String,
+    /// Whether the context window pressure watcher is active.
+    ///
+    /// Default `false`. The watcher emits `conductor.intervention` signals
+    /// but nothing in the runner event loop subscribes to them yet. Enable
+    /// only after wiring a subscriber in orchestrate.rs.
+    #[serde(default)]
+    pub context_pressure_enabled: bool,
     /// Per-watcher threshold overrides for the conductor anomaly ensemble.
     #[serde(default)]
     pub watchers: WatcherThresholds,
@@ -1144,6 +1170,7 @@ impl Default for ConductorConfig {
             express_mode: false,
             max_auto_fix_attempts: default_max_auto_fix(),
             auto_fix_model: default_auto_fix_model(),
+            context_pressure_enabled: false,
             watchers: WatcherThresholds::default(),
         }
     }

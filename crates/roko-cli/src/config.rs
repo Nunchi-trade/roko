@@ -1307,6 +1307,7 @@ impl ConfigLayer {
                         None => defaults.auto_start,
                     },
                     event_ingest_allowlist: defaults.event_ingest_allowlist,
+                    tracing: defaults.tracing,
                 }
             }
             None => ServeConfig::default(),

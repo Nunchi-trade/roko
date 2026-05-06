@@ -789,7 +789,13 @@ fn event_source(event: &RuntimeEvent) -> &'static str {
         | RuntimeEvent::FeedbackRecorded { .. }
         | RuntimeEvent::StateCheckpointed { .. }
         | RuntimeEvent::KnowledgeIngested { .. }
-        | RuntimeEvent::KnowledgeConsumed { .. } => "effect_driver",
+        | RuntimeEvent::KnowledgeConsumed { .. }
+        | RuntimeEvent::InferenceFirstToken { .. }
+        | RuntimeEvent::ToolCallStarted { .. }
+        | RuntimeEvent::ToolCallCompleted { .. }
+        | RuntimeEvent::TaskStarted { .. }
+        | RuntimeEvent::TaskCompleted { .. }
+        | RuntimeEvent::PipelinePhase { .. } => "effect_driver",
     }
 }
 

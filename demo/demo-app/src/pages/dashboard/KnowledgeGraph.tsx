@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useLiveApi } from '../../hooks/useLiveApi';
 import { DOMAIN_COLORS, domainColor } from '../../lib/palette';
 import { useContextEventSubscription } from '../../contexts/EventStreamContext';
 import { useDebouncedRefetch } from '../../hooks/useDebouncedRefetch';
 import Pane from '../../components/Pane';
 import Mosaic, { MosaicCell } from '../../components/Mosaic';
+import KnowledgeOrbit, { type KnowledgeNode as OrbitNode, type KnowledgeEdge as OrbitEdge } from '../../components/three/KnowledgeOrbit';
 import './dashboard.css';
 import './KnowledgeGraph.css';
 
@@ -23,118 +24,31 @@ interface KnowledgeEdge {
   frequency?: number;
 }
 
-/* ── Force graph simulation ──────────────────────────────── */
-
-interface SimNode {
-  id: string;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  domain: string;
-  label: string;
-  citations: number;
-}
-
-function buildSimulation(entries: KnowledgeEntry[], edges: KnowledgeEdge[], w: number, h: number) {
-  const nodes: SimNode[] = entries.map((e, i) => ({
-    id: e.id,
-    x: w / 2 + (Math.cos(i * 2.39996) * w * 0.3),
-    y: h / 2 + (Math.sin(i * 2.39996) * h * 0.3),
-    vx: 0,
-    vy: 0,
-    domain: e.domain ?? 'unknown',
-    label: e.label ?? e.id,
-    citations: e.citations ?? 1,
-  }));
-
-  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-
-  const links = edges
-    .filter((e) => nodeMap.has(e.source) && nodeMap.has(e.target))
-    .map((e) => ({
-      source: nodeMap.get(e.source)!,
-      target: nodeMap.get(e.target)!,
-      freq: e.frequency ?? 1,
-    }));
-
-  return { nodes, links };
-}
-
-function tick(nodes: SimNode[], links: { source: SimNode; target: SimNode; freq: number }[], w: number, h: number) {
-  const cx = w / 2;
-  const cy = h / 2;
-
-  // Repulsion between nodes
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      const a = nodes[i], b = nodes[j];
-      let dx = b.x - a.x;
-      let dy = b.y - a.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const force = 800 / (dist * dist);
-      dx = (dx / dist) * force;
-      dy = (dy / dist) * force;
-      a.vx -= dx;
-      a.vy -= dy;
-      b.vx += dx;
-      b.vy += dy;
-    }
-  }
-
-  // Spring attraction along edges
-  for (const link of links) {
-    const { source: a, target: b } = link;
-    let dx = b.x - a.x;
-    let dy = b.y - a.y;
-    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-    const force = (dist - 80) * 0.008;
-    dx = (dx / dist) * force;
-    dy = (dy / dist) * force;
-    a.vx += dx;
-    a.vy += dy;
-    b.vx -= dx;
-    b.vy -= dy;
-  }
-
-  // Gravity toward center
-  for (const n of nodes) {
-    n.vx += (cx - n.x) * 0.002;
-    n.vy += (cy - n.y) * 0.002;
-  }
-
-  // Apply velocity with damping
-  for (const n of nodes) {
-    n.vx *= 0.85;
-    n.vy *= 0.85;
-    n.x += n.vx;
-    n.y += n.vy;
-    // Keep in bounds
-    n.x = Math.max(30, Math.min(w - 30, n.x));
-    n.y = Math.max(30, Math.min(h - 30, n.y));
-  }
-}
-
 /* ── Component ───────────────────────────────────────────── */
 
 export default function KnowledgeGraph() {
   const { get } = useLiveApi();
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [edges, setEdges] = useState<KnowledgeEdge[]>([]);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const simRef = useRef<ReturnType<typeof buildSimulation> | null>(null);
-  const rafRef = useRef<number>(0);
-  const frameRef = useRef<number>(0);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchAll = useCallback(async () => {
-    const [eData, edData] = await Promise.all([
-      get<KnowledgeEntry[] | { items?: KnowledgeEntry[] }>('/api/knowledge/entries'),
-      get<KnowledgeEdge[] | { items?: KnowledgeEdge[] }>('/api/knowledge/edges'),
-    ]);
-    const e = Array.isArray(eData) ? eData : ((eData as { items?: KnowledgeEntry[] }).items ?? []);
-    const ed = Array.isArray(edData) ? edData : ((edData as { items?: KnowledgeEdge[] }).items ?? []);
-    setEntries(e);
-    setEdges(ed);
+    try {
+      const [eData, edData] = await Promise.all([
+        get<KnowledgeEntry[] | { items?: KnowledgeEntry[] }>('/api/knowledge/entries'),
+        get<KnowledgeEdge[] | { items?: KnowledgeEdge[] }>('/api/knowledge/edges'),
+      ]);
+      const e = Array.isArray(eData) ? eData : ((eData as { items?: KnowledgeEntry[] }).items ?? []);
+      const ed = Array.isArray(edData) ? edData : ((edData as { items?: KnowledgeEdge[] }).items ?? []);
+      setEntries(e);
+      setEdges(ed);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load knowledge graph');
+    } finally {
+      setInitialLoading(false);
+    }
   }, [get]);
 
   // Initial fetch + 60s fallback poll
@@ -151,90 +65,34 @@ export default function KnowledgeGraph() {
     debouncedRefetch,
   );
 
+  if (initialLoading) {
+    return (
+      <div className="dash-page progressive-reveal">
+        <div className="skeleton" style={{ height: 32, borderRadius: 6 }} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+          <div className="skeleton" style={{ height: 200, borderRadius: 6 }} />
+        </div>
+      </div>
+    );
+  }
+
   /* Unique domains */
   const domains = new Set(entries.map((e) => e.domain).filter(Boolean));
 
-  /* Canvas rendering */
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || entries.length === 0) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    const w = rect.width;
-    const h = rect.height;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    ctx.scale(dpr, dpr);
-
-    // Initialize simulation once
-    if (!simRef.current || simRef.current.nodes.length !== entries.length) {
-      simRef.current = buildSimulation(entries, edges, w, h);
-    }
-
-    const { nodes, links } = simRef.current;
-
-    // Tick physics
-    tick(nodes, links, w, h);
-
-    // Clear
-    ctx.clearRect(0, 0, w, h);
-
-    // Draw edges
-    ctx.lineWidth = 1;
-    for (const link of links) {
-      const alpha = Math.min(0.15 + link.freq * 0.03, 0.4);
-      ctx.strokeStyle = `rgba(180,160,180,${alpha})`;
-      ctx.beginPath();
-      ctx.moveTo(link.source.x, link.source.y);
-      ctx.lineTo(link.target.x, link.target.y);
-      ctx.stroke();
-    }
-
-    // Draw nodes
-    for (const node of nodes) {
-      const r = 8 + node.citations * 1.5;
-      const color = domainColor(node.domain);
-
-      // Glow effect
-      ctx.save();
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 14;
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.restore();
-
-      // Label
-      ctx.fillStyle = 'rgba(196,180,196,0.85)';
-      ctx.font = '10px "JetBrains Mono", monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(node.label, node.x, node.y + r + 14);
-    }
-
-    // Check energy — stop animation when settled
-    frameRef.current++;
-    const energy = nodes.reduce((sum, n) => sum + n.vx * n.vx + n.vy * n.vy, 0);
-    if (energy > 0.1 && frameRef.current < 300) {
-      rafRef.current = requestAnimationFrame(draw);
-    }
-  }, [entries, edges]);
-
-  useEffect(() => {
-    if (entries.length > 0) {
-      // Reset sim when data changes
-      simRef.current = null;
-      frameRef.current = 0;
-      rafRef.current = requestAnimationFrame(draw);
-    }
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  }, [draw, entries]);
+  /* Map API data to KnowledgeOrbit types */
+  const VALID_DOMAINS = new Set(['gate', 'agent', 'knowledge', 'plan', 'config']);
+  const orbitNodes: OrbitNode[] = entries.map((e) => ({
+    id: e.id,
+    label: e.label ?? e.id,
+    domain: (VALID_DOMAINS.has(e.domain ?? '') ? e.domain : 'knowledge') as OrbitNode['domain'],
+    weight: e.citations ?? 1,
+  }));
+  const orbitEdges: OrbitEdge[] = edges.map((e) => ({
+    source: e.source,
+    target: e.target,
+    strength: e.frequency,
+  }));
 
   /* Citation stats */
   const totalCitations = entries.reduce((s, e) => s + (e.citations ?? 0), 0);
@@ -249,7 +107,12 @@ export default function KnowledgeGraph() {
   const sortedDomains = Object.entries(domainCounts).sort(([, a], [, b]) => b - a);
 
   return (
-    <div className="dash-page">
+    <div className="dash-page" style={{ animation: 'fadeInUp 0.35s var(--ease) both' }}>
+      {error && (
+        <div style={{ padding: '8px 12px', background: 'var(--rose-deep)', border: '1px solid var(--rose-dim)', borderRadius: 'var(--radius-md)', fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)', color: 'var(--rose-bright)', marginBottom: 8 }}>
+          {error}
+        </div>
+      )}
       {/* TOP MOSAIC */}
       <div className="dash-stagger" style={{ '--stagger-i': 0 } as React.CSSProperties}>
         <Mosaic columns={5}>
@@ -264,14 +127,9 @@ export default function KnowledgeGraph() {
       {/* GRAPH + DOMAIN BREAKDOWN */}
       <div className="dash-grid-2-1">
         <div className="dash-stagger" style={{ '--stagger-i': 1 } as React.CSSProperties}>
-          <Pane title="KNOWLEDGE GRAPH" badge={<span className="dash-badge">force-directed</span>}>
+          <Pane title="KNOWLEDGE GRAPH" badge={<span className="dash-badge">3D orbital</span>}>
             <div className="dash-relative dash-chart-enter kg-canvas-wrap">
-              <canvas
-                ref={canvasRef}
-                role="img"
-                aria-label="Knowledge graph network visualization"
-                className="dash-canvas"
-              />
+              <KnowledgeOrbit nodes={orbitNodes} edges={orbitEdges} height={260} />
               {/* HUD overlays */}
               <div className="dash-hud-tl">
                 {entries.length} NODES / {edges.length} EDGES
@@ -288,7 +146,7 @@ export default function KnowledgeGraph() {
                 ))}
               </div>
               <div className="dash-hud-bl">
-                FORCE-DIRECTED / 2D
+                ORBITAL / 3D
               </div>
             </div>
           </Pane>

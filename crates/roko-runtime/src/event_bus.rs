@@ -234,6 +234,14 @@ pub struct EventBus<E: Clone + Send + Sync + 'static> {
     shared: Arc<Shared<E>>,
 }
 
+impl<E: Clone + Send + Sync + 'static> Clone for EventBus<E> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
 impl<E: Clone + Send + Sync + 'static> EventBus<E> {
     /// Creates a new event bus with the given capacity for both the broadcast
     /// channel and the replay ring.

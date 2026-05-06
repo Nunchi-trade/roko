@@ -4,10 +4,15 @@
 //! graphs (DAGs) of Cells. It includes:
 //!
 //! - **Cell** trait (universal computation unit for graph nodes)
-//! - **Types** (`Graph`, `Node`, `Edge`, `NodeId`, `EdgeCondition`, `GraphMetadata`)
+//! - **Types** (`Graph`, `Node`, `Edge`, `NodeId`, `EdgeCondition`, `GraphMetadata`,
+//!   `NodeOutput`, `NodeOutputStatus`, `GraphConfig`)
 //! - **Loader** (TOML parsing into `Graph` struct)
 //! - **Registry** (`CellRegistry` for mapping cell type names to factory functions)
 //! - **Topo** (topological sort, cycle detection, dependency resolution)
+//! - **Error** (error types and `Result` alias)
+//! - **Budget** (`BudgetTracker` for resource limit enforcement)
+//! - **Condition** (conditional edge evaluation with `CompareOp` and `Condition`)
+//! - **Cells** (built-in cell implementations: `AgentCell`, `ComposeCell`, `GraduationCell`)
 //!
 //! # Example
 //!
@@ -36,8 +41,14 @@
 //! assert_eq!(order, vec!["step1", "step2"]);
 //! ```
 
+pub mod budget;
 pub mod cell;
+pub mod cells;
+pub mod condition;
+pub mod convert;
 pub mod engine;
+pub mod error;
+pub mod hot;
 pub mod loader;
 pub mod registry;
 pub mod topo;
@@ -48,5 +59,13 @@ pub use cell::{Cell, CellContext, CellVersion};
 pub use engine::{GraphEngine, GraphOutput, NodeResult, NodeStatus, default_registry};
 pub use registry::{CellFactory, CellRegistry};
 pub use types::{
-    Edge, EdgeCondition, Graph, GraphError, GraphMetadata, GraphNodeIdx, Node, NodeId,
+    Edge, EdgeCondition, Graph, GraphConfig, GraphError, GraphMetadata, GraphNodeIdx, Node,
+    NodeId, NodeOutput, NodeOutputStatus,
 };
+
+// Re-export from new modules.
+pub use budget::{BudgetLimits, BudgetTracker, NodeCost};
+pub use condition::{CompareOp, Condition, evaluate};
+pub use convert::{PlanTaskInfo, plan_to_graph, plan_to_graph_with_endpoints};
+pub use error::Result as GraphResult;
+pub use hot::{HotGraphHandle, HotPolicy, start_hot};

@@ -57,8 +57,11 @@ pub mod metrics;
 pub mod pipeline_state;
 pub mod process;
 pub mod projection;
+pub mod pulse_bus;
 pub mod resource;
 pub mod run_ledger;
+pub mod state_hub;
+pub mod state_snapshot;
 pub mod task_scheduler;
 pub mod theta_consumer;
 pub mod workflow_engine;
@@ -86,6 +89,9 @@ pub use roko_core::foundation::{
     GateVerdict, MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler,
     PromptSpec, ShellGateCommand, TokenUsage,
 };
+pub use pulse_bus::{PulseBus, PulseBusReceiver};
+pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
+pub use state_snapshot::{StateSnapshot, STATE_SNAPSHOT_VERSION};
 pub use run_ledger::{
     AgentOutcome, ArtifactOutcome, CancellationOutcome, EffectErrorKind, EventPersistenceHealth,
     GateRunOutcome, PhaseTransitionRecord, RunLedger,
@@ -226,6 +232,45 @@ mod contract_guards {
                 outcome: WorkflowOutcome::Success {
                     commit_hash: Some("abc123".into()),
                 },
+            },
+            RuntimeEvent::InferenceFirstToken {
+                run_id: "run-1".into(),
+                request_id: "req-ft".into(),
+                model: "claude-sonnet".into(),
+                agent_id: "agent-1".into(),
+                ttft_ms: 1823,
+            },
+            RuntimeEvent::ToolCallStarted {
+                run_id: "run-1".into(),
+                agent_id: "agent-1".into(),
+                tool: "read_file".into(),
+                iteration: 1,
+            },
+            RuntimeEvent::ToolCallCompleted {
+                run_id: "run-1".into(),
+                agent_id: "agent-1".into(),
+                tool: "read_file".into(),
+                duration_ms: 12,
+                success: true,
+            },
+            RuntimeEvent::TaskStarted {
+                run_id: "run-1".into(),
+                plan_id: "plan-1".into(),
+                task_id: "task-1".into(),
+                task_title: "Wire progress events".into(),
+                role: "implementer".into(),
+            },
+            RuntimeEvent::TaskCompleted {
+                run_id: "run-1".into(),
+                plan_id: "plan-1".into(),
+                task_id: "task-1".into(),
+                passed: true,
+                duration_ms: 47200,
+            },
+            RuntimeEvent::PipelinePhase {
+                run_id: "run-1".into(),
+                phase: "execute".into(),
+                status: "started".into(),
             },
         ];
 

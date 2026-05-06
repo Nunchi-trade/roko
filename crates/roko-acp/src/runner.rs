@@ -466,6 +466,7 @@ pub async fn run_with_workflow_engine(
         cascade_enabled: true,
         run_id: Some(format!("acp_workflow_{session_id}")),
         inference_observer: None,
+        metrics: None,
     })
     .map_err(|error| anyhow::anyhow!("build workflow services: {error}"))?
     .effect_services();
@@ -715,12 +716,11 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
             CoreRuntimeEvent::AgentTrace {
                 run_id, reasoning, ..
             } => {
-                if self.accepts_run(run_id) {
-                    if let Some(reasoning) = reasoning {
-                        if !reasoning.trim().is_empty() {
-                            self.publish(CognitiveEvent::ThinkingChunk(reasoning.clone()));
-                        }
-                    }
+                if self.accepts_run(run_id)
+                    && let Some(reasoning) = reasoning
+                    && !reasoning.trim().is_empty()
+                {
+                    self.publish(CognitiveEvent::ThinkingChunk(reasoning.clone()));
                 }
             }
             CoreRuntimeEvent::WorkflowCompleted { run_id, outcome } => {
@@ -754,7 +754,13 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
             | CoreRuntimeEvent::KnowledgeIngested { .. }
             | CoreRuntimeEvent::KnowledgeConsumed { .. }
             | CoreRuntimeEvent::FeedbackRecorded { .. }
-            | CoreRuntimeEvent::StateCheckpointed { .. } => {}
+            | CoreRuntimeEvent::StateCheckpointed { .. }
+            | CoreRuntimeEvent::InferenceFirstToken { .. }
+            | CoreRuntimeEvent::ToolCallStarted { .. }
+            | CoreRuntimeEvent::ToolCallCompleted { .. }
+            | CoreRuntimeEvent::TaskStarted { .. }
+            | CoreRuntimeEvent::TaskCompleted { .. }
+            | CoreRuntimeEvent::PipelinePhase { .. } => {}
         }
     }
 }

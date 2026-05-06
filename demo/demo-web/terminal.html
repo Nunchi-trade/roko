@@ -132,9 +132,9 @@ async function addTerminal(cmd, label) {
   };
   ws.onmessage = (e) => {
     if (e.data instanceof ArrayBuffer) {
-      term.write(new Uint8Array(e.data));
+      if (!entry._muted) term.write(new Uint8Array(e.data));
     } else {
-      term.write(e.data);
+      if (!entry._muted) term.write(e.data);
     }
   };
   ws.onclose = () => {
@@ -170,7 +170,7 @@ async function addTerminal(cmd, label) {
   });
   resizeObserver.observe(document.getElementById(`term-${sessionId}`));
 
-  const entry = { sessionId, term, ws, fitAddon, resizeObserver, paneId };
+  const entry = { sessionId, term, ws, fitAddon, resizeObserver, paneId, _muted: false };
   terminals.push(entry);
   updateLayout();
   updateStatus();
@@ -262,19 +262,22 @@ async function runCommand(entry, cmd, timeoutMs = 60000) {
 }
 
 // Resolve the roko binary path inside a PTY shell.
+// Mutes terminal rendering and suppresses shell echo so the probe is invisible.
 async function resolveRokoPath(entry) {
+  entry._muted = true;
   entry._outBuf = '';
-  await typeCommand(entry, 'command -v roko >/dev/null 2>&1 && echo __OK__ || echo __MISS__');
+  await typeCommand(entry, 'stty -echo 2>/dev/null; command -v roko >/dev/null 2>&1 && echo __OK__ || echo __MISS__; stty echo 2>/dev/null');
   await waitForPrompt(entry, 5000);
-  if ((entry._outBuf || '').includes('__OK__')) return 'roko';
+  if ((entry._outBuf || '').includes('__OK__')) { entry._muted = false; return 'roko'; }
 
   // Try local builds
   for (const p of ['./target/release/roko', './target/debug/roko']) {
     entry._outBuf = '';
-    await typeCommand(entry, `test -x ${p} && echo __OK__ || echo __MISS__`);
+    await typeCommand(entry, `stty -echo 2>/dev/null; test -x ${p} && echo __OK__ || echo __MISS__; stty echo 2>/dev/null`);
     await waitForPrompt(entry, 3000);
-    if ((entry._outBuf || '').includes('__OK__')) return p;
+    if ((entry._outBuf || '').includes('__OK__')) { entry._muted = false; return p; }
   }
+  entry._muted = false;
   return 'roko';  // hope for the best
 }
 

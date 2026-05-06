@@ -104,6 +104,8 @@ pub mod heartbeat;
 pub mod immune;
 /// Atomic file I/O utilities for crash-safe state persistence.
 pub mod io;
+/// ISFRFeed — relay-to-bus bridge for ISFR rate data.
+pub mod isfr_feed;
 /// Marketplace job types shared between serve, TUI, and CLI.
 pub mod job;
 pub mod kind;
@@ -205,7 +207,8 @@ pub use dispatch_plan::{
 pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
-pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry};
+pub use config::graduation::{GraduationConfig, GraduationPolicy};
+pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry, FeedRuntimeStatus};
 pub use forensic::{
     ForensicReplay, ForensicReplayLogger, GateVerdictRecord, PolicyDecisionRecord, PolicyOutcome,
     ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,

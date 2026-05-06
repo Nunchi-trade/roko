@@ -147,6 +147,72 @@ pub enum DashboardEvent {
         /// Current rolling efficiency buckets for the Learning tab.
         buckets: Vec<EfficiencyBucket>,
     },
+    /// ISFR composite rate was computed.
+    IsfrRateComputed {
+        composite_bps: u64,
+        lending_bps: u64,
+        structured_bps: u64,
+        funding_bps: u64,
+        staking_bps: u64,
+        confidence_bps: u64,
+        source_count: usize,
+        timestamp_ms: i64,
+    },
+    /// ISFR source health changed.
+    IsfrSourceHealthChanged {
+        source_id: String,
+        health: String,
+        last_rate_bps: Option<u64>,
+    },
+    /// ISFR keeper started or stopped.
+    IsfrKeeperStateChanged { running: bool },
+    /// New block observed on the connected chain.
+    ChainBlock {
+        number: u64,
+        hash: String,
+        parent_hash: String,
+        timestamp: u64,
+        gas_used: u64,
+        gas_limit: u64,
+        tx_count: u32,
+        base_fee_per_gas: Option<u64>,
+    },
+    /// Transaction included in a block.
+    ChainTx {
+        block_number: u64,
+        tx_hash: String,
+        from: String,
+        to: Option<String>,
+        value_wei: String,
+        gas_used: u64,
+        method_sig: Option<String>,
+        success: bool,
+    },
+    /// Decoded contract event log.
+    ChainContractEvent {
+        block_number: u64,
+        tx_hash: String,
+        log_index: u32,
+        contract: String,
+        event_name: String,
+        decoded: serde_json::Value,
+    },
+    /// A feed agent published new data.
+    FeedTick {
+        agent_id: String,
+        feed_id: String,
+        topic: String,
+        payload: serde_json::Value,
+        timestamp_ms: i64,
+    },
+    /// A feed agent came online.
+    FeedAgentOnline {
+        agent_id: String,
+        name: String,
+        feed_count: usize,
+    },
+    /// A feed agent went offline.
+    FeedAgentOffline { agent_id: String },
     /// An error occurred.
     Error { message: String },
 }
@@ -1148,6 +1214,15 @@ impl DashboardSnapshot {
                 self.efficiency_trend = buckets.clone();
             }
             DashboardEvent::JobExecutionStarted { .. } | DashboardEvent::JobProgress { .. } => {}
+            DashboardEvent::IsfrRateComputed { .. }
+            | DashboardEvent::IsfrSourceHealthChanged { .. }
+            | DashboardEvent::IsfrKeeperStateChanged { .. } => {}
+            DashboardEvent::ChainBlock { .. }
+            | DashboardEvent::ChainTx { .. }
+            | DashboardEvent::ChainContractEvent { .. } => {}
+            DashboardEvent::FeedTick { .. }
+            | DashboardEvent::FeedAgentOnline { .. }
+            | DashboardEvent::FeedAgentOffline { .. } => {}
         }
     }
 

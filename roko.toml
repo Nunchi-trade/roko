@@ -52,6 +52,26 @@ timeout_ms = 120000
 ttft_timeout_ms = 15000
 connect_timeout_ms = 5000
 
+# Anthropic Messages API (direct HTTP, not Claude CLI subprocess).
+# Advantages over claude_cli: streaming via Messages API, no subprocess overhead,
+# proper token usage reporting, concurrent requests, finish_reason detection.
+# To activate: uncomment the block below and set ANTHROPIC_API_KEY.
+#
+# [providers.anthropic-api]
+# kind = "anthropic_api"
+# base_url = "https://api.anthropic.com/v1"
+# api_key_env = "ANTHROPIC_API_KEY"
+# timeout_ms = 120000
+# ttft_timeout_ms = 15000
+# connect_timeout_ms = 5000
+#
+# [models.claude-sonnet-api]
+# provider = "anthropic-api"
+# slug = "claude-sonnet-4-6"
+# context_window = 200000
+# supports_tools = true
+# tool_format = "anthropic_blocks"
+
 [providers.claude_cli]
 kind = "claude_cli"
 command = "claude"
@@ -950,6 +970,9 @@ parallel_enabled = false
 express_mode = false
 max_auto_fix_attempts = 3
 auto_fix_model = "claude-haiku-4-5"
+# Enable context window pressure watcher. Default false — the watcher emits
+# conductor.intervention signals but nothing subscribes to them yet.
+# context_pressure_enabled = true
 
 [conductor.watchers]
 
@@ -977,7 +1000,7 @@ share_ttl_days = 7
 terminal_enabled = true
 auto_orchestrate = true
 auto_start = false
-acknowledge_public_risk = false
+acknowledge_public_risk = true
 
 [serve.auth]
 enabled = false
@@ -1039,9 +1062,158 @@ chain_id = 31337
 wallet_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 agent_registry = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
 bounty_market = "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+auto_deploy_contracts = true
+contracts_dir = "contracts"
+
+[isfr]
+enabled = true
+poll_interval_secs = 10
+# Dev: 60s epochs → on-chain oracle submission every ~60s.
+# Production would use 28800 (8h) or similar.
+epoch_duration_secs = 60
+min_submissions = 2
+outlier_sigma = 3.0
+
+# ── Lending sources (4) ────────────────────────────────────
+[[isfr.sources]]
+name = "aave-v3-usdc"
+kind = "aave_v3"
+weight = 0.15
+class = "lending"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+rate_bps = 620
+jitter_bps = 15
+
+[[isfr.sources]]
+name = "compound-v3-usdc"
+kind = "compound_v3"
+weight = 0.12
+class = "lending"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xc3d688B66703497DAA19211EEdff47f25384cdc3"
+rate_bps = 540
+jitter_bps = 12
+
+[[isfr.sources]]
+name = "spark-dai"
+kind = "aave_v3"
+weight = 0.08
+class = "lending"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xC13e21B648A5Ee794902342038FF3aDAB66BE987"
+rate_bps = 580
+jitter_bps = 10
+
+[[isfr.sources]]
+name = "morpho-usdc"
+kind = "aave_v3"
+weight = 0.05
+class = "lending"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
+rate_bps = 710
+jitter_bps = 20
+
+# ── Staking sources (3) ────────────────────────────────────
+[[isfr.sources]]
+name = "lido-steth"
+kind = "eth_staking"
+weight = 0.12
+class = "staking"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+rate_bps = 350
+jitter_bps = 8
+
+[[isfr.sources]]
+name = "rocketpool-reth"
+kind = "eth_staking"
+weight = 0.08
+class = "staking"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xae78736Cd615f374D3085123A210448E74Fc6393"
+rate_bps = 330
+jitter_bps = 6
+
+[[isfr.sources]]
+name = "swell-sweth"
+kind = "eth_staking"
+weight = 0.05
+class = "staking"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xf951E335afb289353dc249e82926178EaC7DEd78"
+rate_bps = 370
+jitter_bps = 10
+
+# ── Structured yield sources (3) ───────────────────────────
+[[isfr.sources]]
+name = "ethena-susde"
+kind = "ethena"
+weight = 0.10
+class = "structured"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
+rate_bps = 850
+jitter_bps = 30
+
+[[isfr.sources]]
+name = "pendle-usde-jun25"
+kind = "ethena"
+weight = 0.05
+class = "structured"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0x19588F29f9402Bb508007FeADd415c875Ee3f19F"
+rate_bps = 1200
+jitter_bps = 50
+
+[[isfr.sources]]
+name = "yearn-usdc"
+kind = "ethena"
+weight = 0.05
+class = "structured"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xa354F35829Ae975e850e23e9615b11Da1B3dC4F2"
+rate_bps = 480
+jitter_bps = 15
+
+# ── Funding rate sources (3) ───────────────────────────────
+[[isfr.sources]]
+name = "eth-perp-funding"
+kind = "ethena"
+weight = 0.05
+class = "funding"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0x0000000000000000000000000000000000000001"
+rate_bps = 950
+jitter_bps = 80
+
+[[isfr.sources]]
+name = "btc-perp-funding"
+kind = "ethena"
+weight = 0.05
+class = "funding"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0x0000000000000000000000000000000000000002"
+rate_bps = 780
+jitter_bps = 60
+
+[[isfr.sources]]
+name = "dydx-eth-funding"
+kind = "ethena"
+weight = 0.05
+class = "funding"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0x0000000000000000000000000000000000000003"
+rate_bps = 1050
+jitter_bps = 90
 
 [relay]
+url = "ws://127.0.0.1:9011/relay/agents/ws"
 heartbeat_interval_secs = 30
+
+[feed_agents]
+enabled = true
 
 [runner]
 plan_timeout_secs = 3600

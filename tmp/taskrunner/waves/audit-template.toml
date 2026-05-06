@@ -1,0 +1,20 @@
+# Audit Wave Template
+#
+# After a code wave passes its gate, spawn audit agents.
+# Audit agents are FRESH — no implementation context.
+# They only read the task's wire target + verification, run it, confirm.
+
+[wave]
+name = "audit-wave-N"
+description = "Verify wiring for wave N tasks"
+max_parallel = 10  # audits are fast, but not too many at once
+
+# Audit tasks are auto-generated from completed tasks in the previous wave.
+# Each audit task:
+# 1. Reads the original task's Wire Target section
+# 2. Runs verification commands
+# 3. Greps for callsites (non-test)
+# 4. Marks as verified or flags issues
+
+[gate]
+commands = []  # audits don't change code, no gate needed

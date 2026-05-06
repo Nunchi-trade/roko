@@ -127,7 +127,8 @@ export class WsAdapter {
     };
 
     ws.onerror = () => {
-      // WebSocket fires onerror then onclose -- handle reconnect in onclose only
+      // WebSocket fires onerror then onclose — handle reconnect in onclose only.
+      // Suppress: browser DevTools already shows WS errors natively.
     };
 
     ws.onclose = () => {

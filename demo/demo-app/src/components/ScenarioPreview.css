@@ -185,6 +185,15 @@
   letter-spacing: 0.01em;
 }
 
+.sp-pane-note {
+  margin-top: 6px;
+  font-family: var(--sans);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-style: italic;
+  line-height: 1.5;
+}
+
 /* Key facts row */
 .sp-facts {
   display: flex;

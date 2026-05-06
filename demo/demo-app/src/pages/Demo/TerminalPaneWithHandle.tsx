@@ -55,8 +55,9 @@ export default function TerminalPaneWithHandle({
   scenarioCategory,
   isRunning,
 }: TerminalPaneWithHandleProps) {
-  const { attach, status, handle } = useTerminal(sessionId);
+  const { attach, status, handle, shellWarning } = useTerminal(sessionId);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const welcomeWritten = useRef(false);
   const [hasOutput, setHasOutput] = useState(false);
   const [cmdEcho, setCmdEcho] = useState<string | null>(null);
   const cmdEchoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -71,6 +72,20 @@ export default function TerminalPaneWithHandle({
       connected: status === 'connected' && handle.current?.ws?.readyState === WebSocket.OPEN,
     });
   }, [handleRef, handle, onStatusChange, paneIndex, status]);
+
+  // Write a subtle welcome banner once when the terminal first connects
+  useEffect(() => {
+    if (status === 'connected' && !welcomeWritten.current && handle.current?.terminal) {
+      welcomeWritten.current = true;
+      handle.current.terminal.write(
+        '\x1b[38;5;95m' +
+        '  \u256D\u2500 roko \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256E\r\n' +
+        '  \u2502  workspace: ' + (label || 'terminal').padEnd(18) + ' \u2502\r\n' +
+        '  \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256F\r\n' +
+        '\x1b[0m\r\n'
+      );
+    }
+  }, [status, handle, label]);
 
   // Detect output activity by polling the terminal handle's outputBuffer
   // (lightweight alternative to MutationObserver on xterm's DOM subtree)
@@ -162,6 +177,9 @@ export default function TerminalPaneWithHandle({
       </div>
       {cmdEcho && (
         <div className="demo-term-cmd-echo">{cmdEcho}</div>
+      )}
+      {shellWarning && (
+        <div className="demo-term-shell-warning">{shellWarning}</div>
       )}
       <div className="demo-term-body" ref={bodyCallbackRef} />
       <div className="demo-term-vignette" />

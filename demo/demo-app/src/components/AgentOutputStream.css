@@ -1,6 +1,6 @@
-/* ═══════════════════════════════════════════════════════════
-   AGENT OUTPUT STREAM
-   ═══════════════════════════════════════════════════════════ */
+/* =====================================================
+   AGENT OUTPUT STREAM — structured log viewer
+   ===================================================== */
 
 .agent-output-stream {
   display: flex;
@@ -38,20 +38,20 @@
   border: 1px solid var(--rose-dim);
 }
 
+.agent-output-count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, #fff 4%, transparent);
+}
+
 .agent-output-body {
   overflow-y: auto;
   max-height: 300px;
-  padding: 10px 12px;
-}
-
-.agent-output-pre {
-  margin: 0;
-  font-family: var(--mono);
-  font-size: var(--text-xs);
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.55;
+  padding: 6px 0;
 }
 
 .agent-output-empty {
@@ -61,4 +61,130 @@
   color: var(--text-ghost);
   text-align: center;
   letter-spacing: 0.04em;
+}
+
+/* ── Individual log line ─────────────────────────────── */
+
+.agent-output-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 3px 12px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  border-left: 2px solid transparent;
+  animation: aosSlideIn 0.25s ease-out both;
+}
+
+@keyframes aosSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.agent-output-line:hover {
+  background: color-mix(in srgb, #fff 2%, transparent);
+}
+
+/* ── Icon column ─────────────────────────────────────── */
+
+.agent-output-icon {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  margin-top: 1px;
+}
+
+/* ── Task label badge ────────────────────────────────── */
+
+.agent-output-label {
+  flex-shrink: 0;
+  color: var(--bone-bright);
+  opacity: 0.7;
+  font-size: var(--text-xs);
+}
+
+/* ── Text content ────────────────────────────────────── */
+
+.agent-output-text {
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* ── Type-specific styling ───────────────────────────── */
+
+.agent-output-line--success {
+  border-left-color: var(--success);
+}
+
+.agent-output-line--success .agent-output-icon {
+  color: var(--success);
+}
+
+.agent-output-line--success .agent-output-text {
+  color: var(--success);
+}
+
+.agent-output-line--error {
+  border-left-color: var(--rose-bright);
+}
+
+.agent-output-line--error .agent-output-icon {
+  color: var(--rose-bright);
+}
+
+.agent-output-line--error .agent-output-text {
+  color: var(--rose-bright);
+}
+
+.agent-output-line--warning {
+  border-left-color: var(--warning);
+}
+
+.agent-output-line--warning .agent-output-icon {
+  color: var(--warning);
+}
+
+.agent-output-line--warning .agent-output-text {
+  color: var(--warning);
+}
+
+.agent-output-line--info {
+  border-left-color: transparent;
+}
+
+.agent-output-line--info .agent-output-icon {
+  color: var(--status-active);
+}
+
+.agent-output-line--info .agent-output-text {
+  color: var(--text-primary);
+}
+
+.agent-output-line--muted {
+  border-left-color: transparent;
+}
+
+.agent-output-line--muted .agent-output-icon {
+  color: var(--text-ghost);
+}
+
+.agent-output-line--muted .agent-output-text {
+  color: var(--text-dim);
+}
+
+/* ── Reduced motion ──────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-output-line {
+    animation: none;
+  }
 }

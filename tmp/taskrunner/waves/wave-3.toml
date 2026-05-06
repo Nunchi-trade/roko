@@ -1,0 +1,43 @@
+# Wave 3: Graph Engine + Observability + WAL + State Persistence
+#
+# Graph crate creation and engine build, plus observability
+# foundation, write-ahead log, and atomic state snapshots.
+#
+# Gate: cargo build + test + clippy must pass before wave-4.
+
+[wave]
+name = "wave-3"
+description = "Graph+Engine crate, observability, WAL, atomic state persistence"
+max_parallel = 10
+
+[[groups]]
+name = "graph-engine"
+description = "roko-graph crate: types, engine, fan-out, sub-graphs, budget, cells"
+tasks = []
+shared_files = ["crates/roko-graph/"]
+
+[[groups]]
+name = "observability"
+description = "Prometheus metrics endpoint + OTLP tracing + metric wiring"
+tasks = []
+shared_files = [
+    "crates/roko-serve/src/routes/metrics.rs",
+    "crates/roko-serve/src/state.rs",
+]
+
+[[groups]]
+name = "durability"
+description = "WAL for learning state, atomic state snapshots"
+tasks = []
+shared_files = [
+    "crates/roko-learn/src/wal.rs",
+    "crates/roko-runtime/src/state_snapshot.rs",
+]
+
+[gate]
+commands = [
+    "cargo +nightly fmt --all --check",
+    "cargo build --workspace",
+    "cargo test --workspace",
+    "cargo clippy --workspace --no-deps -- -D warnings",
+]

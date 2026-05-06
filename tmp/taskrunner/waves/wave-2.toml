@@ -1,0 +1,90 @@
+# Wave 2: V2 Core + Wiring + CLI Redesign
+#
+# Larger redesign tasks: V2 core abstractions, CLI convergence,
+# error types, streaming backend, config architecture, and
+# infrastructure hardening.
+#
+# Gate: cargo build + test + clippy must pass before wave-3.
+
+[wave]
+name = "wave-2"
+description = "V2 Signal rename, Cell execute, protocol traits, CLI redesign, streaming backend, config architecture"
+max_parallel = 15
+
+[[groups]]
+name = "v2-core"
+description = "Cell execute, Signal rename, protocol traits"
+tasks = []
+shared_files = [
+    "crates/roko-core/src/cell.rs",
+    "crates/roko-core/src/engram.rs",
+    "crates/roko-core/src/traits.rs",
+    "crates/roko-core/src/lib.rs",
+]
+
+[[groups]]
+name = "cli-redesign"
+description = "Engine convergence, roko do/show, streaming output"
+tasks = []
+shared_files = [
+    "crates/roko-cli/src/runner/event_loop.rs",
+    "crates/roko-cli/src/orchestrate.rs",
+    "crates/roko-cli/src/main.rs",
+]
+
+[[groups]]
+name = "streaming"
+description = "Streaming LlmBackend + ProgressEvent bus (083 supersedes 006's RunOutputSink approach)"
+tasks = []
+shared_files = [
+    "crates/roko-agent/src/provider/mod.rs",
+    "crates/roko-agent/src/tool_loop/mod.rs",
+    "crates/roko-core/src/progress.rs",
+]
+
+[[groups]]
+name = "config-arch"
+description = "Config cache, validation, ACP watch"
+tasks = []
+shared_files = [
+    "crates/roko-core/src/config/loader.rs",
+    "crates/roko-core/src/config/cache.rs",
+]
+
+[[groups]]
+name = "wiring-wave2"
+description = "Floating module wiring (calibration, demurrage, gate reflection, section outcome)"
+tasks = []
+shared_files = ["crates/roko-learn/src/"]
+
+[[groups]]
+name = "infrastructure-wave2"
+description = "Concurrency, provider UX, workspace persistence (error types moved to wave-1)"
+tasks = []
+shared_files = []
+
+[[groups]]
+name = "demo-frontend-wave2"
+description = "Frontend architecture redesign"
+tasks = []
+shared_files = ["demo/demo-app/src/"]
+
+[[groups]]
+name = "ide-acp-wave2"
+description = "ACP architecture sweep"
+tasks = []
+shared_files = ["crates/roko-acp/"]
+
+[[groups]]
+name = "cleanup-wave2"
+description = "Orchestration cleanup, dead subsystem triage"
+tasks = []
+shared_files = []
+
+[gate]
+commands = [
+    "cargo +nightly fmt --all --check",
+    "cargo build --workspace",
+    "cargo test --workspace",
+    "cargo clippy --workspace --no-deps -- -D warnings",
+]

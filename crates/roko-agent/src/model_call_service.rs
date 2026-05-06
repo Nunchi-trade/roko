@@ -97,6 +97,9 @@ pub struct ModelCallService {
     cache: CacheCell,
     /// Service-lifetime cost budget tracker.
     budget: BudgetCell,
+    /// Optional Prometheus-compatible metric registry for emitting LLM call,
+    /// error, token, cost, context utilization, and throughput metrics.
+    metrics: Option<Arc<roko_core::obs::metrics::MetricRegistry>>,
     /// Caps reasoning-token budgets for thinking-capable models.
     thinking_cap: ThinkingCapCell,
     /// Detects repeated near-identical agent outputs for a run/role.
@@ -125,6 +128,7 @@ impl ModelCallService {
             fallback_models: Vec::new(),
             env: Vec::new(),
             mcp_config: None,
+            metrics: None,
             cache: CacheCell::new(128),
             budget: BudgetCell::new(None),
             thinking_cap: ThinkingCapCell::new(16_384),
@@ -269,6 +273,14 @@ impl ModelCallService {
     #[must_use]
     pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
         self.run_id = run_id.into();
+        self
+    }
+
+    /// Attach a metric registry for emitting LLM call/error/token/cost/
+    /// context/throughput metrics on every model call.
+    #[must_use]
+    pub fn with_metrics(mut self, registry: Arc<roko_core::obs::metrics::MetricRegistry>) -> Self {
+        self.metrics = Some(registry);
         self
     }
 
@@ -537,6 +549,149 @@ impl ModelCallService {
                 "force_backend override outcome was not accepted by cascade router"
             );
         }
+    }
+
+    /// Emit metrics for a completed model call (success, cache hit, or error).
+    fn emit_call_metrics(
+        &self,
+        provider: &str,
+        model: &str,
+        status: &str,
+        usage: &roko_core::foundation::TokenUsage,
+        duration_secs: f64,
+    ) {
+        use roko_core::obs::histograms::LLM_LATENCY_BUCKETS;
+        use roko_core::obs::metrics::LabelSet;
+        use roko_core::obs::schema;
+
+        let Some(registry) = &self.metrics else {
+            return;
+        };
+
+        // roko_llm_calls_total{provider, model, status}
+        let call_labels = LabelSet::from_pairs(&[
+            (schema::LABEL_PROVIDER, provider),
+            (schema::LABEL_MODEL, model),
+            (schema::LABEL_STATUS, status),
+        ]);
+        registry
+            .register_counter(schema::ROKO_LLM_CALLS_TOTAL, "Total LLM calls by provider, model, and status", call_labels)
+            .inc();
+
+        // roko_llm_tokens_total{provider, model, direction="input"|"output"}
+        if usage.input_tokens > 0 {
+            let in_labels = LabelSet::from_pairs(&[
+                (schema::LABEL_PROVIDER, provider),
+                (schema::LABEL_MODEL, model),
+                (schema::LABEL_DIRECTION, "input"),
+            ]);
+            registry
+                .register_counter(schema::ROKO_LLM_TOKENS_TOTAL, "LLM tokens consumed/produced, by provider, model, direction", in_labels)
+                .inc_by(usage.input_tokens);
+        }
+        if usage.output_tokens > 0 {
+            let out_labels = LabelSet::from_pairs(&[
+                (schema::LABEL_PROVIDER, provider),
+                (schema::LABEL_MODEL, model),
+                (schema::LABEL_DIRECTION, "output"),
+            ]);
+            registry
+                .register_counter(schema::ROKO_LLM_TOKENS_TOTAL, "LLM tokens consumed/produced, by provider, model, direction", out_labels)
+                .inc_by(usage.output_tokens);
+        }
+
+        // roko_llm_cost_usd_total{provider, model} -- microdollars to avoid float drift
+        if usage.cost_usd > 0.0 {
+            let cost_labels = LabelSet::from_pairs(&[
+                (schema::LABEL_PROVIDER, provider),
+                (schema::LABEL_MODEL, model),
+            ]);
+            let cost_micro = (usage.cost_usd * 1_000_000.0) as u64;
+            registry
+                .register_counter(schema::ROKO_LLM_COST_USD_TOTAL, "Cumulative LLM spend in microdollars, by provider and model", cost_labels)
+                .inc_by(cost_micro);
+        }
+
+        // roko_llm_request_duration_seconds{provider, model}
+        if duration_secs > 0.0 {
+            let dur_labels = LabelSet::from_pairs(&[
+                (schema::LABEL_PROVIDER, provider),
+                (schema::LABEL_MODEL, model),
+            ]);
+            registry
+                .register_histogram(
+                    schema::ROKO_LLM_REQUEST_DURATION_SECONDS,
+                    "LLM total request duration in seconds",
+                    dur_labels,
+                    LLM_LATENCY_BUCKETS.to_vec(),
+                )
+                .observe(duration_secs);
+        }
+
+        // roko_context_utilization{provider, model} -- basis points
+        if usage.input_tokens > 0 {
+            let models = self.config.effective_models();
+            let context_window = models
+                .get(model)
+                .or_else(|| {
+                    models
+                        .values()
+                        .find(|p| p.slug == model)
+                })
+                .map(|p| p.context_window)
+                .unwrap_or(0);
+            if context_window > 0 {
+                let utilization_bps =
+                    (usage.input_tokens as f64 / context_window as f64 * 10_000.0) as i64;
+                let ctx_labels = LabelSet::from_pairs(&[
+                    (schema::LABEL_PROVIDER, provider),
+                    (schema::LABEL_MODEL, model),
+                ]);
+                registry
+                    .register_gauge(
+                        schema::ROKO_CONTEXT_UTILIZATION,
+                        "Context window utilization in basis points (1 bp = 0.01%)",
+                        ctx_labels,
+                    )
+                    .set(utilization_bps);
+            }
+        }
+
+        // roko_token_throughput_per_second{provider, model} -- integer tokens/sec
+        if usage.output_tokens > 0 && duration_secs > 0.0 {
+            let throughput = (usage.output_tokens as f64 / duration_secs).round() as i64;
+            let tp_labels = LabelSet::from_pairs(&[
+                (schema::LABEL_PROVIDER, provider),
+                (schema::LABEL_MODEL, model),
+            ]);
+            registry
+                .register_gauge(
+                    schema::ROKO_TOKEN_THROUGHPUT_PER_SECOND,
+                    "Output token throughput for the latest call (integer tokens/sec)",
+                    tp_labels,
+                )
+                .set(throughput);
+        }
+    }
+
+    /// Emit error metrics for a failed model call.
+    fn emit_error_metrics(&self, provider: &str, model: &str, error: &RokoError) {
+        use roko_core::obs::metrics::LabelSet;
+        use roko_core::obs::schema;
+
+        let Some(registry) = &self.metrics else {
+            return;
+        };
+
+        let error_type = categorize_error(error);
+        let labels = LabelSet::from_pairs(&[
+            (schema::LABEL_PROVIDER, provider),
+            (schema::LABEL_MODEL, model),
+            (schema::LABEL_ERROR_TYPE, error_type),
+        ]);
+        registry
+            .register_counter(schema::ROKO_LLM_ERRORS_TOTAL, "Total LLM errors by provider, model, and error type", labels)
+            .inc();
     }
 
     fn fallback_models_for_request(&self, model: &str) -> Vec<String> {
@@ -809,6 +964,38 @@ fn knowledge_is_anti(entry: &serde_json::Value) -> bool {
                 || kind.eq_ignore_ascii_case("anti_knowledge")
                 || kind.eq_ignore_ascii_case("anti-knowledge")
         })
+}
+
+/// Categorize an error into a metric label value.
+///
+/// Returns a lowercase snake_case string suitable for the `error_type` label on
+/// `roko_llm_errors_total`.
+fn categorize_error(err: &RokoError) -> &'static str {
+    let msg = err.to_string().to_lowercase();
+    if msg.contains("rate limit") || msg.contains("rate_limit") || msg.contains("throttl") {
+        "rate_limit"
+    } else if msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("ttft timeout")
+        || msg.contains("deadline exceeded")
+    {
+        "timeout"
+    } else if msg.contains("model error")
+        || msg.contains("internal server error")
+        || msg.contains("model_error")
+        || msg.contains("500")
+    {
+        "model_error"
+    } else if msg.contains("network")
+        || msg.contains("connection")
+        || msg.contains("dns")
+        || msg.contains("tcp")
+        || msg.contains("tls")
+    {
+        "network_error"
+    } else {
+        "unknown"
+    }
 }
 
 fn output_text(output: &Signal) -> String {
@@ -1345,8 +1532,10 @@ impl ProviderCallCell {
     /// 1. Calls `create_agent_for_model()` to get a `Box<dyn Agent>`.
     /// 2. Runs `agent.run()` with the prompt.
     /// 3. Classifies the result as success or failure.
-    /// 4. On retryable failure, tries the next model in `fallback_models` (if any).
-    /// 5. Returns the response or the final error.
+    /// 4. On rate-limit failure, applies exponential backoff (2s / 4s / 8s)
+    ///    before trying the next fallback model.
+    /// 5. On other retryable failures, tries the next model immediately.
+    /// 6. Returns the response or the final error.
     async fn execute(
         &self,
         model: &str,
@@ -1355,16 +1544,37 @@ impl ProviderCallCell {
         options: AgentOptions,
         fallback_models: &[String],
     ) -> std::result::Result<CellOutput, CellError> {
+        use crate::retry::RetryPolicy;
+
         let total_start = Instant::now();
         let prompt = Signal::builder(Kind::Prompt)
             .body(Body::text(user_content))
             .build();
         let mut last_error = None;
+        let rate_limit_policy = RetryPolicy::for_rate_limit();
 
         for (attempt_index, attempt_model) in std::iter::once(model)
             .chain(fallback_models.iter().map(String::as_str))
             .enumerate()
         {
+            // On rate-limit errors, apply exponential backoff before the next
+            // attempt so we don't hammer the provider in a tight loop.
+            if attempt_index > 0 {
+                if let Some(CellError::Retryable { ref message }) = last_error {
+                    if is_rate_limit_message(message) {
+                        let delay_ms =
+                            rate_limit_policy.rate_limit_delay(attempt_index as u32 - 1, None);
+                        tracing::warn!(
+                            model = %attempt_model,
+                            delay_ms,
+                            attempt = attempt_index,
+                            "rate limited; backing off before fallback attempt"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                }
+            }
+
             let mut attempt_options = options.clone();
             attempt_options.system_prompt = system_prompt.map(ToOwned::to_owned);
 
@@ -1415,6 +1625,15 @@ impl ProviderCallCell {
     }
 }
 
+/// Returns `true` if the error message looks like a provider rate-limit rejection.
+fn is_rate_limit_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("429")
+        || lower.contains("too many requests")
+}
+
 struct CellOutput {
     content: String,
     model_used: String,
@@ -1434,6 +1653,12 @@ enum CellError {
     Terminal { message: String },
     /// Agent construction failed (missing credentials, bad config).
     Construction { message: String },
+}
+
+impl std::fmt::Display for CellError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message())
+    }
 }
 
 impl CellError {
@@ -1532,6 +1757,13 @@ impl ModelCaller for ModelCallService {
                         true,
                     )
                     .await?;
+                    self.emit_call_metrics(
+                        cached_provider.as_deref().unwrap_or("unknown"),
+                        &cached.model,
+                        "cache_hit",
+                        &cached.usage,
+                        latency_ms as f64 / 1000.0,
+                    );
                     return Ok(ModelCallResponse {
                         content: cached.content,
                         model: cached.model,
@@ -1620,7 +1852,7 @@ impl ModelCaller for ModelCallService {
             Err(error) => {
                 let latency_ms = start.elapsed().as_millis() as u64;
                 let usage = token_usage(&Usage::zero(), 0.0);
-                let message = error.message().to_string();
+                let message = error.to_string();
                 self.inference_failed(&request_id, &model, &agent_id, &message);
                 self.emit(RuntimeEvent::AgentFailed {
                     run_id: self.run_id.clone(),
@@ -1647,6 +1879,13 @@ impl ModelCaller for ModelCallService {
                     false,
                 )
                 .await?;
+                let prov = provider.as_deref().unwrap_or("unknown");
+                self.emit_call_metrics(prov, &model, "error", &usage, latency_ms as f64 / 1000.0);
+                let roko_err = RokoError::Agent {
+                    backend: model.clone(),
+                    message: message.clone(),
+                };
+                self.emit_error_metrics(prov, &model, &roko_err);
                 return Err(RokoError::Agent {
                     backend: model,
                     message,
@@ -1692,7 +1931,17 @@ impl ModelCaller for ModelCallService {
                 false,
             )
             .await?;
-            return Err(RokoError::from(error));
+            let convergence_err = RokoError::from(error);
+            let conv_prov = output_provider.as_deref().unwrap_or("unknown");
+            self.emit_call_metrics(
+                conv_prov,
+                &output.model_used,
+                "error",
+                &usage,
+                latency_ms as f64 / 1000.0,
+            );
+            self.emit_error_metrics(conv_prov, &output.model_used, &convergence_err);
+            return Err(convergence_err);
         }
         self.convergence
             .record(&convergence_key, output.content.clone());
@@ -1740,6 +1989,13 @@ impl ModelCaller for ModelCallService {
             true,
         )
         .await?;
+        self.emit_call_metrics(
+            output_provider.as_deref().unwrap_or("unknown"),
+            &output.model_used,
+            "success",
+            &usage,
+            output.latency_ms as f64 / 1000.0,
+        );
 
         Ok(ModelCallResponse {
             content: output.content,
@@ -2375,5 +2631,56 @@ mod tests {
     #[test]
     fn similarity_identical_strings() {
         assert_eq!(similarity("abc", "abc"), 1.0);
+    }
+
+    #[test]
+    fn categorize_error_maps_known_patterns() {
+        // Timeout variant: display includes "timeout"
+        let timeout = RokoError::timeout("request", 30_000);
+        assert_eq!(super::categorize_error(&timeout), "timeout");
+
+        // RateLimited variant: display includes "rate limit"
+        let rate_limit = RokoError::rate_limited("429 Too Many Requests");
+        assert_eq!(super::categorize_error(&rate_limit), "rate_limit");
+
+        // Model error: message includes "model error"
+        let model_err = RokoError::invalid("model error: context length exceeded");
+        assert_eq!(super::categorize_error(&model_err), "model_error");
+
+        // Network error: transport message includes "connection"
+        let network = RokoError::transport("connection reset by peer");
+        assert_eq!(super::categorize_error(&network), "network_error");
+
+        // Unknown: generic invalid without matching patterns
+        let generic = RokoError::invalid("something else");
+        assert_eq!(super::categorize_error(&generic), "unknown");
+    }
+
+    #[test]
+    fn emit_call_metrics_increments_counters() {
+        use roko_core::obs::metrics::MetricRegistry;
+        use std::sync::Arc;
+
+        let registry = Arc::new(MetricRegistry::new());
+        let svc = ModelCallService::new("test-model".to_string())
+            .with_metrics(Arc::clone(&registry));
+
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 200,
+            total_tokens: 1200,
+            cost_usd: 0.048,
+        };
+        svc.emit_call_metrics("test-provider", "test-model", "success", &usage, 1.5);
+
+        let output = registry.render_prometheus();
+        assert!(
+            output.contains("roko_llm_calls_total"),
+            "should contain roko_llm_calls_total: {output}"
+        );
+        assert!(
+            output.contains("roko_llm_request_duration_seconds"),
+            "should contain request duration: {output}"
+        );
     }
 }

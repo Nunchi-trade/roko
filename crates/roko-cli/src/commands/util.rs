@@ -48,30 +48,9 @@ pub(crate) fn cmd_repl(cli: &Cli) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-pub(crate) async fn cmd_oneshot(cli: &Cli, prompt: &str) -> Result<i32> {
-    let mode = OneshotMode::new(prompt.to_string())
-        .with_json(cli.json)
-        .with_quiet(cli.quiet);
-
-    let workdir = resolve_workdir(cli);
-    prepare_runtime_hooks(&workdir, cli.quiet);
-    let mut config = resolve_config(cli)?;
-    apply_resume_session_override(&mut config, cli.resume.clone());
-
-    let report = run_once(&workdir, &config, &mode.prepare().prompt, None, None).await?;
-    let result = mode.format_result(
-        report.overall_success(),
-        &format!(
-            "episode={} signals={}",
-            report.episode_id, report.total_signals
-        ),
-    );
-    if !result.summary.is_empty() {
-        println!("{}", result.summary);
-    }
-    Ok(result.exit_code)
-}
-
+/// Read piped stdin and dispatch as a one-shot prompt.
+///
+/// Routes through the v2 inline path, not the legacy `run_once()` stub.
 pub(crate) async fn cmd_pipe(cli: &Cli) -> Result<i32> {
     let pipe = PipeMode::new().with_json(cli.json).with_quiet(cli.quiet);
 
@@ -93,8 +72,8 @@ pub(crate) async fn cmd_pipe(cli: &Cli) -> Result<i32> {
         );
     }
 
-    // Dispatch the piped text as a one-shot prompt.
-    cmd_oneshot(cli, &input.text).await
+    // Dispatch the piped text via the v2 inline chat path.
+    roko_cli::unified::cmd_oneshot_inline(&input.text, cli.quiet).await
 }
 
 pub(crate) async fn cmd_headless(cli: &Cli) -> Result<i32> {
@@ -216,6 +195,24 @@ pub(crate) async fn cmd_init(
             "resume with: roko plan run plans/ --resume {}",
             snapshot.display()
         );
+    }
+
+    // Validate provider readiness (informational only — never fail init).
+    let auth = roko_cli::auth_detect::detect_auth_from_config(&target);
+    println!();
+    match &auth {
+        roko_cli::auth_detect::AuthMethod::NeedsSetup => {
+            println!("warning: no provider credentials found.");
+            println!();
+            println!("The workspace is initialized but roko cannot dispatch agents yet.");
+            println!("Next step:");
+            println!("  roko config providers available   # see what providers are supported");
+            println!("  export ANTHROPIC_API_KEY=sk-ant-...");
+            println!("Or add a [providers.*] block to roko.toml with an API key.");
+        }
+        other => {
+            println!("provider: {} \u{2014} ready", other.label());
+        }
     }
 
     Ok(())
@@ -357,14 +354,44 @@ pub(crate) async fn cmd_run(
 pub(crate) async fn cmd_status(
     cli: &Cli,
     workdir: Option<PathBuf>,
+    quick: bool,
     cfactor: bool,
     surfaces: bool,
-) -> Result<()> {
+) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+
+    // --quick: compact 3-line health summary, no substrate I/O.
+    if quick {
+        let auth = roko_cli::auth_detect::detect_auth_from_config(&workdir);
+        let provider_line = match &auth {
+            roko_cli::auth_detect::AuthMethod::NeedsSetup => {
+                "provider:   NONE — run `roko config providers available`".to_string()
+            }
+            other => format!("provider:   {}", other.label()),
+        };
+        let learn_line = if workdir.join(".roko/learn/cascade-router.json").exists() {
+            "learning:   active (cascade router data present)"
+        } else {
+            "learning:   no data yet"
+        };
+        let workspace_line = if workdir.join("roko.toml").exists() {
+            format!("workspace:  {}", workdir.display())
+        } else {
+            "workspace:  no roko.toml — run `roko init`".to_string()
+        };
+        println!("{provider_line}");
+        println!("{learn_line}");
+        println!("{workspace_line}");
+
+        let healthy = !matches!(auth, roko_cli::auth_detect::AuthMethod::NeedsSetup)
+            && workdir.join("roko.toml").exists();
+        return Ok(if healthy { EXIT_SUCCESS } else { EXIT_FAILURE });
+    }
+
     if surfaces {
         let inventory = roko_cli::surface_inventory::full_inventory();
         roko_cli::surface_inventory::print_table(&inventory, cli.json);
-        return Ok(());
+        return Ok(EXIT_SUCCESS);
     }
 
     if !cli.quiet {
@@ -502,7 +529,7 @@ pub(crate) async fn cmd_status(
                 );
             }
         }
-        return Ok(());
+        return Ok(EXIT_SUCCESS);
     }
 
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -707,7 +734,7 @@ pub(crate) async fn cmd_status(
         }
     }
 
-    Ok(())
+    Ok(EXIT_SUCCESS)
 }
 
 pub(crate) async fn cmd_doctor(
@@ -1580,6 +1607,7 @@ pub(crate) fn preflight_provider_for_model(
 /// Check that the gate pipeline tools (cargo, git, clippy) are available.
 /// Returns the names of any missing tools. The caller should warn but not
 /// necessarily abort — some gate rungs may not need all tools.
+#[cfg(feature = "legacy-runner-v2")]
 pub(crate) fn preflight_gate_deps() -> Vec<String> {
     let mut missing = Vec::new();
     for tool in &["cargo", "git"] {

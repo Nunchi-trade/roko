@@ -49,6 +49,7 @@ use crate::provider_model_outcome::{
 use crate::regression::{RegressionReport, RegressionThresholds, detect_regressions};
 use crate::section_effect::SectionEffectivenessRegistry;
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
+use crate::wal::{self, WalEntry, WalWriter};
 use roko_core::ConductorDecision;
 use roko_core::DaimonPolicy;
 use roko_core::agent::AgentRole;
@@ -168,6 +169,8 @@ pub struct LearningPaths {
     pub post_gate_reflections_json: PathBuf,
     /// Append-only provider/model outcome telemetry for future bandits.
     pub provider_model_outcomes_jsonl: PathBuf,
+    /// Write-Ahead Log for crash-safe learning state durability.
+    pub wal_jsonl: PathBuf,
 }
 
 impl LearningPaths {
@@ -197,6 +200,7 @@ impl LearningPaths {
             section_effects_json: root.join("section-effects.json"),
             post_gate_reflections_json: root.join("post-gate-reflections.json"),
             provider_model_outcomes_jsonl: root.join("provider-model-outcomes.jsonl"),
+            wal_jsonl: root.join("wal.jsonl"),
             root,
         }
     }
@@ -1268,6 +1272,97 @@ pub struct LearningRuntime {
     section_effectiveness: parking_lot::Mutex<SectionEffectivenessRegistry>,
     provider_model_outcomes: ProviderModelOutcomeStore,
     episode_completion_hook: Option<EpisodeCompletionHook>,
+    wal: Option<parking_lot::Mutex<WalWriter>>,
+}
+
+/// Replay any pending WAL entries into in-memory state, save snapshots to
+/// promote the replayed state, then truncate the WAL and open the writer.
+///
+/// Returns `Some(Mutex<WalWriter>)` on success, `None` if the WAL cannot be
+/// opened (non-fatal: the runtime proceeds without WAL durability).
+fn replay_and_open_wal(
+    wal_path: &Path,
+    cascade_router: &CascadeRouter,
+    experiment_store: &mut ExperimentStore,
+    cascade_router_json: &Path,
+    experiments_json: &Path,
+) -> Option<parking_lot::Mutex<WalWriter>> {
+    let entries = match wal::replay_wal(wal_path) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(error = %e, "[wal] replay failed -- proceeding without WAL recovery");
+            return match WalWriter::open(wal_path) {
+                Ok(w) => Some(parking_lot::Mutex::new(w)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "[wal] open failed -- running without WAL durability");
+                    None
+                }
+            };
+        }
+    };
+
+    let entry_count = entries.len();
+    if entry_count > 0 {
+        tracing::info!(entries = entry_count, "[wal] replaying learning WAL");
+    }
+
+    for entry in &entries {
+        match entry {
+            WalEntry::CascadeObservation {
+                model_slug,
+                context_features,
+                model_idx,
+                reward,
+                success,
+                ..
+            } => {
+                cascade_router.replay_observation(
+                    model_slug,
+                    context_features,
+                    *model_idx,
+                    *reward,
+                    *success,
+                );
+            }
+            WalEntry::ExperimentOutcome {
+                variant_id,
+                success,
+                ..
+            } => {
+                experiment_store.replay_outcome(variant_id, *success);
+            }
+            WalEntry::GateThresholdUpdate { .. } => {
+                // Gate thresholds are owned by roko-gate / the runner persist
+                // layer. The WAL records them for auditability but replay is
+                // handled by the gate threshold owner at its own startup.
+            }
+        }
+    }
+
+    // After replay, promote to durable snapshots and truncate.
+    if entry_count > 0 {
+        if let Err(e) = cascade_router.save(cascade_router_json) {
+            tracing::warn!(error = %e, "[wal] cascade-router snapshot after replay failed");
+        }
+        if let Err(e) = experiment_store.save(experiments_json) {
+            tracing::warn!(error = %e, "[wal] experiment snapshot after replay failed");
+        }
+    }
+
+    match WalWriter::open(wal_path) {
+        Ok(mut w) => {
+            if entry_count > 0 {
+                if let Err(e) = w.truncate() {
+                    tracing::warn!(error = %e, "[wal] truncate after replay failed");
+                }
+            }
+            Some(parking_lot::Mutex::new(w))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "[wal] open failed -- running without WAL durability");
+            None
+        }
+    }
 }
 
 /// Bootstrap a [`ProviderHealthTracker`] from the persisted provider-health
@@ -1343,6 +1438,17 @@ impl LearningRuntime {
 
         let provider_health = provider_health_tracker_from_persisted(&paths.root);
 
+        // Replay WAL entries accumulated since the last snapshot, then
+        // promote to snapshots and truncate.
+        let mut experiment_store = experiment_store;
+        let wal = replay_and_open_wal(
+            &paths.wal_jsonl,
+            &cascade_router,
+            &mut experiment_store,
+            &paths.cascade_router_json,
+            &paths.experiments_json,
+        );
+
         Ok(Self {
             paths,
             episode_logger,
@@ -1366,6 +1472,7 @@ impl LearningRuntime {
             section_effectiveness: parking_lot::Mutex::new(section_effectiveness),
             provider_model_outcomes,
             episode_completion_hook: None,
+            wal,
         })
     }
 
@@ -1413,6 +1520,17 @@ impl LearningRuntime {
 
         let provider_health = provider_health_tracker_from_persisted(&paths.root);
 
+        // Replay WAL entries accumulated since the last snapshot, then
+        // promote to snapshots and truncate.
+        let mut experiment_store = experiment_store;
+        let wal = replay_and_open_wal(
+            &paths.wal_jsonl,
+            &cascade_router,
+            &mut experiment_store,
+            &paths.cascade_router_json,
+            &paths.experiments_json,
+        );
+
         Ok(Self {
             paths,
             episode_logger,
@@ -1436,6 +1554,7 @@ impl LearningRuntime {
             section_effectiveness: parking_lot::Mutex::new(section_effectiveness),
             provider_model_outcomes,
             episode_completion_hook: None,
+            wal,
         })
     }
 
@@ -2015,6 +2134,52 @@ impl LearningRuntime {
         Ok(snapshot)
     }
 
+    /// Append a learning event to the WAL for crash-safe durability.
+    ///
+    /// If the WAL entry count reaches [`roko_core::defaults::DEFAULT_LEARN_WAL_MAX_ENTRIES`],
+    /// an automatic compaction (snapshot + truncate) is triggered.
+    fn wal_append(&self, entry: WalEntry) {
+        let Some(ref wal) = self.wal else { return };
+        let mut w = wal.lock();
+        if let Err(e) = w.append(&entry) {
+            tracing::warn!(error = %e, "[wal] append failed -- learning not durable this entry");
+            return;
+        }
+        if w.entry_count() >= roko_core::defaults::DEFAULT_LEARN_WAL_MAX_ENTRIES {
+            self.compact_wal_locked(&mut w);
+        }
+    }
+
+    /// Record a gate threshold EMA update in the WAL.
+    ///
+    /// Gate thresholds live in `roko-gate` which must not depend on
+    /// `roko-learn`. This public method lets `orchestrate.rs` (or the
+    /// runner event loop) write a gate threshold WAL entry after
+    /// updating the in-memory threshold state.
+    pub fn wal_append_gate_threshold(&self, rung: u32, passed: bool) {
+        self.wal_append(WalEntry::GateThresholdUpdate {
+            rung,
+            passed,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+        });
+    }
+
+    /// Save snapshots for all WAL-covered subsystems then truncate.
+    ///
+    /// Called both from automatic compaction (entry count threshold) and
+    /// from explicit snapshot save paths.
+    fn compact_wal_locked(&self, wal: &mut WalWriter) {
+        if let Err(e) = self.cascade_router.save(&self.paths.cascade_router_json) {
+            tracing::warn!(error = %e, "[wal] cascade-router snapshot failed during compaction");
+        }
+        if let Err(e) = self.experiment_store.lock().save(&self.paths.experiments_json) {
+            tracing::warn!(error = %e, "[wal] experiment snapshot failed during compaction");
+        }
+        if let Err(e) = wal.truncate() {
+            tracing::warn!(error = %e, "[wal] truncate failed during compaction");
+        }
+    }
+
     /// Save cascade router observations to disk.
     ///
     /// # Errors
@@ -2022,6 +2187,19 @@ impl LearningRuntime {
     /// Returns an error if the cascade router snapshot cannot be written.
     pub fn save_cascade_router(&self) -> Result<(), LearningRuntimeError> {
         self.cascade_router.save(&self.paths.cascade_router_json)?;
+        // Truncate WAL after successful cascade-router save (combined with
+        // experiment store save to avoid losing pending experiment entries).
+        if let Some(ref wal) = self.wal {
+            let mut w = wal.lock();
+            // Also save experiment store so we don't lose experiment entries
+            // when truncating the WAL after a cascade-only snapshot.
+            if let Err(e) = self.experiment_store.lock().save(&self.paths.experiments_json) {
+                tracing::warn!(error = %e, "[wal] experiment snapshot failed during cascade-router save");
+            }
+            if let Err(e) = w.truncate() {
+                tracing::warn!(error = %e, "[wal] truncate after cascade-router save failed");
+            }
+        }
         Ok(())
     }
 
@@ -2043,8 +2221,21 @@ impl LearningRuntime {
             return false;
         }
 
+        let context_features = routing_context.to_features();
+        let model_idx = self
+            .cascade_router
+            .model_index_for_slug(model_slug)
+            .unwrap_or(0);
         self.cascade_router
             .record_observation(routing_context, model_slug, 0.0, false);
+        self.wal_append(WalEntry::CascadeObservation {
+            model_slug: model_slug.to_string(),
+            context_features,
+            model_idx,
+            reward: 0.0,
+            success: false,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+        });
         if let Err(err) = self.save_cascade_router() {
             eprintln!("[learn] cascade router save failed after conductor intervention: {err}");
         }
@@ -2328,6 +2519,15 @@ impl LearningRuntime {
                 .find(|experiment| experiment.stats.contains_key(variant_id))
                 .is_some_and(|experiment| experiment.status == ExperimentStatus::Running);
             store.record_outcome(variant_id, input.episode.success);
+            // Drop the experiment store lock before calling wal_append
+            // (which may trigger compaction that re-acquires it).
+            drop(store);
+            self.wal_append(WalEntry::ExperimentOutcome {
+                variant_id: variant_id.clone(),
+                success: input.episode.success,
+                ts_ms: chrono::Utc::now().timestamp_millis(),
+            });
+            let store = self.experiment_store.lock();
             let static_table_updated = was_running
                 && store
                     .iter()
@@ -2477,8 +2677,21 @@ impl LearningRuntime {
             &slug,
             &provider,
         );
+        let context_features = ctx.to_features();
+        let model_idx = self
+            .cascade_router
+            .model_index_for_slug(&slug)
+            .unwrap_or(0);
         self.cascade_router
             .record_observation(&ctx, &slug, reward, episode.success);
+        self.wal_append(WalEntry::CascadeObservation {
+            model_slug: slug,
+            context_features,
+            model_idx,
+            reward,
+            success: episode.success,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+        });
         true
     }
 
@@ -5144,5 +5357,82 @@ mod tests {
             runtime2.provider_health().is_healthy("zai"),
             "provider with persisted Closed state should be healthy on construction"
         );
+    }
+
+    #[tokio::test]
+    async fn wal_replay_on_open_restores_cascade_observations() {
+        use crate::wal::{WalEntry, WalWriter};
+
+        let dir = TempDir::new().unwrap();
+        let learn_root = dir.path().join("learn");
+        std::fs::create_dir_all(&learn_root).unwrap();
+
+        // Pre-populate a WAL with cascade observations.
+        let wal_path = learn_root.join("wal.jsonl");
+        {
+            let mut w = WalWriter::open(&wal_path).unwrap();
+            for i in 0..5 {
+                w.append(&WalEntry::CascadeObservation {
+                    model_slug: "claude-sonnet-4-5".into(),
+                    context_features: vec![0.0; 18],
+                    model_idx: 0,
+                    reward: 0.8,
+                    success: i % 2 == 0,
+                    ts_ms: 1000 + i as i64,
+                })
+                .unwrap();
+            }
+            assert_eq!(w.entry_count(), 5);
+        }
+
+        // Open the LearningRuntime -- it should replay the WAL.
+        let runtime = LearningRuntime::open_under(&learn_root).await.unwrap();
+
+        // After replay + snapshot, the WAL should be truncated.
+        let reopened = WalWriter::open(&wal_path).unwrap();
+        assert_eq!(
+            reopened.entry_count(),
+            0,
+            "WAL should be truncated after replay"
+        );
+
+        // The cascade router should reflect 5 observations (from the replay).
+        let obs = runtime.cascade_router().total_observations();
+        assert!(
+            obs >= 5,
+            "cascade router should have at least 5 observations from WAL replay, got {obs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wal_append_gate_threshold_writes_entry() {
+        use crate::wal::{WalEntry, replay_wal};
+
+        let dir = TempDir::new().unwrap();
+        let learn_root = dir.path().join("learn");
+
+        let runtime = LearningRuntime::open_under(&learn_root).await.unwrap();
+        runtime.wal_append_gate_threshold(2, true);
+        runtime.wal_append_gate_threshold(3, false);
+
+        let wal_path = learn_root.join("wal.jsonl");
+        let entries = replay_wal(&wal_path).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(
+            entries[0],
+            WalEntry::GateThresholdUpdate {
+                rung: 2,
+                passed: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            entries[1],
+            WalEntry::GateThresholdUpdate {
+                rung: 3,
+                passed: false,
+                ..
+            }
+        ));
     }
 }

@@ -15,12 +15,14 @@ mod deployments;
 mod diagnosis;
 mod dream;
 mod event_ingest;
-mod feeds;
+pub(crate) mod feeds;
 mod gateway;
 mod heartbeats;
 mod integrations;
+mod isfr;
 mod jobs;
 mod learning;
+mod metrics;
 mod middleware;
 mod neuro;
 mod plans;
@@ -170,6 +172,7 @@ pub fn build_router(
         .merge(chain::routes())
         .merge(connectors::routes())
         .merge(feeds::routes())
+        .merge(isfr::routes())
         .merge(auth::routes())
         .merge(secrets::routes())
         .merge(vision_loop::routes())
@@ -232,6 +235,8 @@ pub fn build_router(
         .route("/health", get(top_level_health))
         // Top-level readiness probe — no auth, no /api prefix.
         .route("/ready", get(top_level_ready))
+        // Standard Prometheus scrape endpoint — no auth, no /api prefix.
+        .route("/metrics", get(metrics::metrics_handler))
         .merge(webhooks::public_routes())
         // Public share-receipt reader: no auth required so recipients can
         // open share links without a roko API key.
