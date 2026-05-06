@@ -84,6 +84,57 @@ pub struct FeedDescriptor {
     pub schema: Option<Value>,
 }
 
+/// Simple line-based protocol command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Get(String),
+    Set(String, String),
+    Del(String),
+    Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolError(pub String);
+
+impl core::fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProtocolError {}
+
+pub fn parse_command(input: &str) -> Result<Command, ProtocolError> {
+    let line = input.strip_suffix('\n').unwrap_or(input);
+    let mut parts = line.splitn(3, ' ');
+    let cmd = parts.next().unwrap_or("");
+
+    match cmd {
+        "QUIT" => {
+            if line == "QUIT" { Ok(Command::Quit) } else { Err(ProtocolError("QUIT takes no arguments".into())) }
+        }
+        "GET" => parse_one_arg(parts.next(), parts.next(), "GET").map(Command::Get),
+        "DEL" => parse_one_arg(parts.next(), parts.next(), "DEL").map(Command::Del),
+        "SET" => {
+            let key = parts.next().ok_or_else(|| ProtocolError("SET requires key and value".into()))?;
+            let value = parts.next().ok_or_else(|| ProtocolError("SET requires key and value".into()))?;
+            if key.is_empty() || value.is_empty() {
+                return Err(ProtocolError("SET requires non-empty key and value".into()));
+            }
+            Ok(Command::Set(key.to_string(), value.to_string()))
+        }
+        _ => Err(ProtocolError("unknown command".into())),
+    }
+}
+
+fn parse_one_arg(arg1: Option<&str>, arg2: Option<&str>, name: &str) -> Result<String, ProtocolError> {
+    match (arg1, arg2) {
+        (Some(a), None) if !a.is_empty() => Ok(a.to_string()),
+        (Some(_), Some(_)) => Err(ProtocolError(format!("{name} takes exactly one argument"))),
+        _ => Err(ProtocolError(format!("{name} requires one argument"))),
+    }
+}
+
 /// Frames the relay receives from agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -272,4 +323,34 @@ pub enum RelayEvent {
         agent_id: String,
         feed_id: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_get() {
+        assert_eq!(parse_command("GET foo\n").unwrap(), Command::Get("foo".into()));
+    }
+
+    #[test]
+    fn parses_set() {
+        assert_eq!(parse_command("SET foo bar\n").unwrap(), Command::Set("foo".into(), "bar".into()));
+    }
+
+    #[test]
+    fn parses_del_and_quit() {
+        assert_eq!(parse_command("DEL foo\n").unwrap(), Command::Del("foo".into()));
+        assert_eq!(parse_command("QUIT\n").unwrap(), Command::Quit);
+    }
+
+    #[test]
+    fn rejects_malformed_input() {
+        assert!(parse_command("").is_err());
+        assert!(parse_command("GET\n").is_err());
+        assert!(parse_command("SET foo\n").is_err());
+        assert!(parse_command("QUIT now\n").is_err());
+        assert!(parse_command("NOPE x y\n").is_err());
+    }
 }

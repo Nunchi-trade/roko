@@ -419,7 +419,8 @@
 
 .benchlive-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: auto auto;
   gap: 16px;
   min-height: 0;
 }
@@ -435,23 +436,26 @@
   padding: 16px;
 }
 
-/* Live visualizations row */
-.bench-live-visualizations {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 16px;
-  margin-top: 16px;
-}
-.bench-live-visualizations .pane {
-  margin-top: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
 @media (max-width: 900px) {
-  .bench-live-visualizations {
+  .benchlive-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── Results section dividers ── */
+.bench-results-section {
+  border-top: 1px solid var(--glass-border);
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-4);
+}
+.bench-section-header {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin: 0 0 var(--sp-3);
+  font-weight: 400;
 }
 
 /* Task grid */

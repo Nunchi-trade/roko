@@ -86,7 +86,7 @@ function CountdownOverlay({ onDone }: { onDone: () => void }) {
   );
 }
 
-type Tab = 'configure' | 'live' | 'results' | 'history' | 'compare' | 'analysis' | 'learning';
+type Tab = 'setup' | 'live' | 'results';
 
 const STRATEGIES: { id: AgentStrategy; label: string; desc: string }[] = [
   { id: 'demo', label: 'Demo', desc: 'Simulated results, no LLM needed' },
@@ -97,13 +97,9 @@ const STRATEGIES: { id: AgentStrategy; label: string; desc: string }[] = [
 ];
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'configure', label: 'Configure' },
+  { id: 'setup', label: 'Setup' },
   { id: 'live', label: 'Live' },
   { id: 'results', label: 'Results' },
-  { id: 'history', label: 'History' },
-  { id: 'compare', label: 'Compare' },
-  { id: 'analysis', label: 'Analysis' },
-  { id: 'learning', label: 'Learning' },
 ];
 
 const RUN_COLORS = [
@@ -122,7 +118,7 @@ type ConfigureMode = 'single' | 'matrix';
 type LiveViewMode = 'race' | 'detail';
 
 export default function Bench() {
-  const [tab, setTab] = useState<Tab>('configure');
+  const [tab, setTab] = useState<Tab>('setup');
   const [configureMode, setConfigureMode] = useState<ConfigureMode>('single');
   const [liveViewMode, setLiveViewMode] = useState<LiveViewMode>('race');
   const [showCountdown, setShowCountdown] = useState(false);
@@ -175,9 +171,9 @@ export default function Bench() {
     prevRunStatus.current = activeRun?.status;
   }, [activeRun?.status, toast]);
 
-  // Fetch pareto data when analysis tab opens
+  // Fetch pareto data when results tab opens (analysis section)
   useEffect(() => {
-    if (tab === 'analysis') fetchPareto();
+    if (tab === 'results') fetchPareto();
   }, [tab, fetchPareto]);
 
   // Hero stats
@@ -232,7 +228,7 @@ export default function Bench() {
         <div className="bench-hero-header">
           <h1 className="bench-page-title text-gradient-cool text-glow">Benchmark Lab</h1>
           <p className="bench-page-sub">
-            Configure, run, and analyze agent evaluations
+            Run agent evaluations against test suites. Pick a strategy, choose a suite, and hit Run.
             {connectionState === 'offline' && <span className="bench-offline-badge">OFFLINE</span>}
           </p>
         </div>
@@ -251,7 +247,7 @@ export default function Bench() {
           <button key={t.id} className={`bench-tab btn-ghost-reveal${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}
             {t.id === 'live' && activeRun?.status === 'running' && <span className="bench-tab-dot" />}
-            {t.id === 'learning' && activeRun?.status === 'running' && <span className="bench-tab-dot" style={{ background: 'var(--dream-bright)' }} />}
+            {t.id === 'results' && activeRun?.status === 'running' && <span className="bench-tab-dot" style={{ background: 'var(--dream-bright)' }} />}
           </button>
         ))}
       </div>
@@ -262,8 +258,8 @@ export default function Bench() {
         emptyLabel="Server offline. Start roko serve to use benchmarks."
       >
       <div className="bench-body">
-        {/* ── Configure ── */}
-        {tab === 'configure' && (
+        {/* ── Setup ── */}
+        {tab === 'setup' && (
           <>
             <div className="bench-mode-toggle">
               <button className={`bench-mode-btn btn-ghost-reveal${configureMode === 'single' ? ' active' : ''}`} onClick={() => setConfigureMode('single')}>Single</button>
@@ -468,8 +464,8 @@ export default function Bench() {
               </>
             ) : !activeRun ? (
               <div className="bench-empty--no-runs">
-                <p className="bench-empty-text">No active run.</p>
-                <button className="btn" onClick={() => setTab('configure')}>Start from Configure</button>
+                <p className="bench-empty-text">No active run — go to Setup to start one.</p>
+                <button className="btn" onClick={() => setTab('setup')}>Go to Setup</button>
               </div>
             ) : (
               /* Single run live view (unchanged) */
@@ -540,9 +536,11 @@ export default function Bench() {
                       })}
                     </div>
                   </Pane>
-                  <Pane title="COST CHART">
-                    <CostChart data={activeRun.results.map((r, i) => ({ label: `T${i + 1}`, value: r.cost_usd }))} height={260} color="var(--bone)" />
-                  </Pane>
+                  <ComponentErrorBoundary name="AgentOutputStream">
+                    <Pane title="AGENT OUTPUT">
+                      <AgentOutputStream lines={agentOutput} agentId={currentAgentId} />
+                    </Pane>
+                  </ComponentErrorBoundary>
                   <Pane title="ACTIVITY FEED">
                     <div className="feed-list">
                       {feed.map((item, i) => (
@@ -554,14 +552,9 @@ export default function Bench() {
                       ))}
                     </div>
                   </Pane>
-                </div>
-
-                <div className="bench-live-visualizations">
-                  <ComponentErrorBoundary name="AgentOutputStream">
-                    <Pane title="AGENT OUTPUT">
-                      <AgentOutputStream lines={agentOutput} agentId={currentAgentId} />
-                    </Pane>
-                  </ComponentErrorBoundary>
+                  <Pane title="COST CHART">
+                    <CostChart data={activeRun.results.map((r, i) => ({ label: `T${i + 1}`, value: r.cost_usd }))} height={260} color="var(--bone)" />
+                  </Pane>
                   <ComponentErrorBoundary name="GateVerdictTicker">
                     <Pane title="GATE VERDICTS">
                       <GateVerdictTicker
@@ -589,11 +582,12 @@ export default function Bench() {
           </div>
         )}
 
-        {/* ── Results ── */}
+        {/* ── Results (merged: results + history + compare + analysis + learning) ── */}
         {tab === 'results' && (
           <div className="bench-results">
+            {/* Latest Run Summary */}
             {displayResults.length === 0 ? (
-              <div className="bench-empty--no-runs"><p className="bench-empty-text">No results yet. Run a benchmark first.</p></div>
+              <div className="bench-empty--no-runs"><p className="bench-empty-text">No results yet. Run a benchmark from Setup.</p></div>
             ) : (
               <>
                 <div className="bench-results-stats">
@@ -646,103 +640,72 @@ export default function Bench() {
                 )}
               </>
             )}
-          </div>
-        )}
 
-        {/* ── History ── */}
-        {tab === 'history' && (
-          <div className="bench-history">
-            <div className="bench-history-toolbar">
-              <div className="bench-history-filters">
-                <select className="config-input input-focus-glow" style={{ maxWidth: 160 }} value={historyFilter.suite} onChange={(e) => setHistoryFilter({ ...historyFilter, suite: e.target.value })}>
-                  <option value="">All suites</option>
-                  {[...new Set(history.map((r) => r.suite_id))].map((sid) => <option key={sid} value={sid}>{history.find((r) => r.suite_id === sid)?.suite_name ?? sid}</option>)}
-                </select>
-                <select className="config-input input-focus-glow" style={{ maxWidth: 160 }} value={historyFilter.model} onChange={(e) => setHistoryFilter({ ...historyFilter, model: e.target.value })}>
-                  <option value="">All models</option>
-                  {[...new Set(history.map((r) => r.config.model))].map((m) => <option key={m} value={m}>{m.split('-').slice(0, 2).join('-')}</option>)}
-                </select>
-              </div>
-              <div className="bench-history-actions">
-                {historySelected.size >= 2 && (
-                  <button className="btn btn-sm" onClick={() => { setCompareIds([...historySelected]); setTab('compare'); }}>Compare ({historySelected.size})</button>
-                )}
-                <label className="btn btn-sm" style={{ cursor: 'pointer' }}>Import<input type="file" accept=".json" style={{ display: 'none' }} onChange={(e) => { const file = e.target.files?.[0]; if (file) importRun(file); e.target.value = ''; }} /></label>
+            {/* ── History Section ── */}
+            <div className="bench-results-section">
+              <h3 className="bench-section-header">HISTORY</h3>
+              <div className="bench-history">
+                <div className="bench-history-toolbar">
+                  <div className="bench-history-filters">
+                    <select className="config-input input-focus-glow" style={{ maxWidth: 160 }} value={historyFilter.suite} onChange={(e) => setHistoryFilter({ ...historyFilter, suite: e.target.value })}>
+                      <option value="">All suites</option>
+                      {[...new Set(history.map((r) => r.suite_id))].map((sid) => <option key={sid} value={sid}>{history.find((r) => r.suite_id === sid)?.suite_name ?? sid}</option>)}
+                    </select>
+                    <select className="config-input input-focus-glow" style={{ maxWidth: 160 }} value={historyFilter.model} onChange={(e) => setHistoryFilter({ ...historyFilter, model: e.target.value })}>
+                      <option value="">All models</option>
+                      {[...new Set(history.map((r) => r.config.model))].map((m) => <option key={m} value={m}>{m.split('-').slice(0, 2).join('-')}</option>)}
+                    </select>
+                  </div>
+                  <div className="bench-history-actions">
+                    {historySelected.size >= 2 && (
+                      <button className="btn btn-sm" onClick={() => setCompareIds([...historySelected])}>Compare ({historySelected.size})</button>
+                    )}
+                    <label className="btn btn-sm" style={{ cursor: 'pointer' }}>Import<input type="file" accept=".json" style={{ display: 'none' }} onChange={(e) => { const file = e.target.files?.[0]; if (file) importRun(file); e.target.value = ''; }} /></label>
+                  </div>
+                </div>
+
+                {historyLoading ? <div className="bench-skeleton skeleton" style={{ height: 200 }} />
+                  : filteredHistory.length === 0 ? <div className="bench-empty--no-runs"><p className="bench-empty-text">No runs recorded yet.</p></div>
+                  : (
+                    <Pane title={`RUN HISTORY (${filteredHistory.length})`}>
+                      <div className="task-table-wrap">
+                        <table className="task-table">
+                          <thead><tr><th style={{ width: 32 }}></th><th>Date</th><th>Suite</th><th>Model</th><th>Strategy</th><th>Pass Rate</th><th>Cost</th><th>Duration</th><th>Status</th><th>Actions</th></tr></thead>
+                          <tbody>
+                            {filteredHistory.map((run) => (
+                              <tr key={run.id} tabIndex={0} role="row" className={historySelected.has(run.id) ? 'diff-changed' : ''} onKeyDown={(e) => handleRowKeyDown(e, () => toggleHistorySelect(run.id))}>
+                                <td><input type="checkbox" checked={historySelected.has(run.id)} onChange={() => toggleHistorySelect(run.id)} style={{ accentColor: 'var(--rose-bright)' }} /></td>
+                                <td className="mono">{new Date(run.started_at).toLocaleDateString()}</td>
+                                <td>{run.suite_name}</td>
+                                <td className="mono">{run.config.model.split('-').slice(0, 2).join('-')}</td>
+                                <td>{run.config.strategy.replace(/_/g, ' ')}</td>
+                                <td className="mono">{run.summary ? `${(run.summary.pass_rate * 100).toFixed(0)}%` : '-'}</td>
+                                <td className="mono">{run.summary ? `$${run.summary.total_cost_usd.toFixed(3)}` : '-'}</td>
+                                <td className="mono">{run.summary ? `${(run.summary.total_duration_ms / 1000).toFixed(1)}s` : '-'}</td>
+                                <td>
+                                  <span className={`status-badge status-${run.status === 'completed' ? 'pass' : run.status}`}>
+                                    {run.status === 'completed' ? <CheckmarkIcon size={12} color="var(--success)" /> : run.status === 'failed' ? <CrossIcon size={12} color="var(--rose-bright)" /> : run.status === 'running' ? <SpinnerIcon size={12} /> : null}
+                                    {' '}{run.status.toUpperCase()}
+                                  </span>
+                                </td>
+                                <td style={{ display: 'flex', gap: 'var(--sp-1)' }}>
+                                  <Link to={`/bench/run/${run.id}`} className="btn btn-sm" style={{ textDecoration: 'none', fontSize: 'var(--text-sm)', padding: '2px var(--sp-1)' }}>View</Link>
+                                  <button className="btn btn-sm" onClick={() => exportRun(run.id)} style={{ fontSize: 'var(--text-sm)', padding: '2px var(--sp-1)' }}>Export</button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </Pane>
+                  )}
               </div>
             </div>
 
-            {historyLoading ? <div className="bench-skeleton skeleton" style={{ height: 200 }} />
-              : filteredHistory.length === 0 ? <div className="bench-empty--no-runs"><p className="bench-empty-text">No runs recorded yet.</p></div>
-              : (
-                <Pane title={`RUN HISTORY (${filteredHistory.length})`}>
-                  <div className="task-table-wrap">
-                    <table className="task-table">
-                      <thead><tr><th style={{ width: 32 }}></th><th>Date</th><th>Suite</th><th>Model</th><th>Strategy</th><th>Pass Rate</th><th>Cost</th><th>Duration</th><th>Status</th><th>Actions</th></tr></thead>
-                      <tbody>
-                        {filteredHistory.map((run) => (
-                          <tr key={run.id} tabIndex={0} role="row" className={historySelected.has(run.id) ? 'diff-changed' : ''} onKeyDown={(e) => handleRowKeyDown(e, () => toggleHistorySelect(run.id))}>
-                            <td><input type="checkbox" checked={historySelected.has(run.id)} onChange={() => toggleHistorySelect(run.id)} style={{ accentColor: 'var(--rose-bright)' }} /></td>
-                            <td className="mono">{new Date(run.started_at).toLocaleDateString()}</td>
-                            <td>{run.suite_name}</td>
-                            <td className="mono">{run.config.model.split('-').slice(0, 2).join('-')}</td>
-                            <td>{run.config.strategy.replace(/_/g, ' ')}</td>
-                            <td className="mono">{run.summary ? `${(run.summary.pass_rate * 100).toFixed(0)}%` : '-'}</td>
-                            <td className="mono">{run.summary ? `$${run.summary.total_cost_usd.toFixed(3)}` : '-'}</td>
-                            <td className="mono">{run.summary ? `${(run.summary.total_duration_ms / 1000).toFixed(1)}s` : '-'}</td>
-                            <td>
-                              <span className={`status-badge status-${run.status === 'completed' ? 'pass' : run.status}`}>
-                                {run.status === 'completed' ? <CheckmarkIcon size={12} color="var(--success)" /> : run.status === 'failed' ? <CrossIcon size={12} color="var(--rose-bright)" /> : run.status === 'running' ? <SpinnerIcon size={12} /> : null}
-                                {' '}{run.status.toUpperCase()}
-                              </span>
-                            </td>
-                            <td style={{ display: 'flex', gap: 'var(--sp-1)' }}>
-                              <Link to={`/bench/run/${run.id}`} className="btn btn-sm" style={{ textDecoration: 'none', fontSize: 'var(--text-sm)', padding: '2px var(--sp-1)' }}>View</Link>
-                              <button className="btn btn-sm" onClick={() => exportRun(run.id)} style={{ fontSize: 'var(--text-sm)', padding: '2px var(--sp-1)' }}>Export</button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </Pane>
-              )}
-          </div>
-        )}
-
-        {/* ── Compare ── */}
-        {tab === 'compare' && (
-          <div className="bench-compare">
-            <Pane title="SELECT RUNS TO COMPARE">
-              <div className="bench-compare-chips">
-                {compareIds.map((id) => {
-                  const run = history.find((r) => r.id === id);
-                  return (
-                    <div key={id} className="bench-chip chip-interactive">
-                      <span>{run ? `${run.id.slice(0, 8)} · ${run.suite_name}` : id.slice(0, 8)}</span>
-                      <button className="bench-chip-x" onClick={() => setCompareIds(compareIds.filter((x) => x !== id))}>&times;</button>
-                    </div>
-                  );
-                })}
-                {compareIds.length < 6 && (
-                  <select className="config-input input-focus-glow" style={{ maxWidth: 200 }} value="" onChange={(e) => {
-                    if (e.target.value && !compareIds.includes(e.target.value)) setCompareIds([...compareIds, e.target.value]);
-                  }}>
-                    <option value="">Add run...</option>
-                    {history.filter((r) => !compareIds.includes(r.id)).map((r) => (
-                      <option key={r.id} value={r.id}>{r.id.slice(0, 8)} - {r.suite_name} ({r.config.model.split('-').slice(0, 2).join('-')})</option>
-                    ))}
-                  </select>
-                )}
-              </div>
-              <div className="bench-compare-quick">
-                <button className="btn btn-sm" onClick={() => { if (history.length >= 2) setCompareIds(history.slice(0, 2).map((r) => r.id)); }}>Last 2</button>
-                <button className="btn btn-sm" onClick={() => { const sid = history[0]?.suite_id; if (sid) setCompareIds(history.filter((r) => r.suite_id === sid).slice(0, 4).map((r) => r.id)); }}>Same Suite</button>
-                <button className="btn btn-sm" onClick={() => { const m = history[0]?.config.model; if (m) setCompareIds(history.filter((r) => r.config.model === m).slice(0, 4).map((r) => r.id)); }}>Same Model</button>
-              </div>
-            </Pane>
-
-            {compareRuns.length >= 2 ? (
-              <>
+            {/* ── Compare Section (inline, only when 2+ selected) ── */}
+            {compareRuns.length >= 2 && (
+              <div className="bench-results-section">
+                <h3 className="bench-section-header">COMPARE</h3>
                 <Pane title="CONFIG DIFF"><ConfigDiff runs={compareRuns} /></Pane>
 
                 {(() => {
@@ -760,95 +723,95 @@ export default function Bench() {
                   }).filter((d): d is NonNullable<typeof d> => d != null);
                   return datasets.length >= 2 ? <Pane title="RADAR COMPARISON"><RadarChart axes={axes} datasets={datasets} height={350} /></Pane> : null;
                 })()}
-              </>
-            ) : (
-              <div className="bench-empty--no-runs"><p className="bench-empty-text">Select at least 2 runs to compare.</p></div>
-            )}
-          </div>
-        )}
-
-        {/* ── Analysis ── */}
-        {tab === 'analysis' && (
-          <div className="bench-analysis">
-            <ComponentErrorBoundary name="ParetoFrontier">
-              <Pane title="PARETO FRONTIER">
-                {(() => {
-                  const pts = pareto?.points ?? [];
-                  const histPts = history.filter((r) => r.summary);
-                  const scatterData = pts.length > 0
-                    ? pts.map((p) => ({ x: p.cost_usd, y: p.pass_rate, label: p.label ?? p.run_id.slice(0, 8), color: p.provider?.includes('Anthropic') ? 'var(--rose-bright)' : 'var(--success)' }))
-                    : histPts.map((r) => ({ x: r.summary!.total_cost_usd, y: r.summary!.pass_rate, label: r.config.model.split('-').slice(0, 2).join('-'), color: modelColor(r.config.model) }));
-                  return scatterData.length > 0
-                    ? <ScatterChart points={scatterData} xLabel="Cost (USD)" yLabel="Pass Rate" showTrendLine height={400} />
-                    : <p className="bench-empty-text">Run benchmarks to see the Pareto frontier.</p>;
-                })()}
-              </Pane>
-            </ComponentErrorBoundary>
-
-            {history.filter((r) => r.summary).length > 0 && (
-              <>
-                <Pane title="MODEL LEADERBOARD">
-                  <div className="task-table-wrap">
-                    <table className="task-table">
-                      <thead><tr><th>#</th><th>Model</th><th>Runs</th><th>Avg Pass Rate</th><th>Avg Cost</th><th>Avg Duration</th></tr></thead>
-                      <tbody>
-                        {(() => {
-                          const byModel = new Map<string, BenchRun[]>();
-                          for (const r of history.filter((r) => r.summary)) { const l = byModel.get(r.config.model) ?? []; l.push(r); byModel.set(r.config.model, l); }
-                          return [...byModel.entries()].map(([model, runs]) => ({
-                            model, runs: runs.length,
-                            avgPass: runs.reduce((s, r) => s + (r.summary?.pass_rate ?? 0), 0) / runs.length,
-                            avgCost: runs.reduce((s, r) => s + (r.summary?.total_cost_usd ?? 0), 0) / runs.length,
-                            avgDur: runs.reduce((s, r) => s + (r.summary?.total_duration_ms ?? 0), 0) / runs.length,
-                          })).sort((a, b) => b.avgPass - a.avgPass || a.avgCost - b.avgCost).map((row, i) => (
-                            <tr key={row.model}><td className="mono">{i + 1}</td><td className="mono">{row.model}</td><td className="mono">{row.runs}</td><td className="mono">{(row.avgPass * 100).toFixed(1)}%</td><td className="mono">${row.avgCost.toFixed(3)}</td><td className="mono">{(row.avgDur / 1000).toFixed(1)}s</td></tr>
-                          ));
-                        })()}
-                      </tbody>
-                    </table>
-                  </div>
-                </Pane>
-
-                <Pane title="STRATEGY LEADERBOARD">
-                  <div className="task-table-wrap">
-                    <table className="task-table">
-                      <thead><tr><th>#</th><th>Strategy</th><th>Runs</th><th>Avg Pass Rate</th><th>Avg Cost</th></tr></thead>
-                      <tbody>
-                        {(() => {
-                          const byStrat = new Map<string, BenchRun[]>();
-                          for (const r of history.filter((r) => r.summary)) { const l = byStrat.get(r.config.strategy) ?? []; l.push(r); byStrat.set(r.config.strategy, l); }
-                          return [...byStrat.entries()].map(([strat, runs]) => ({
-                            strat, runs: runs.length,
-                            avgPass: runs.reduce((s, r) => s + (r.summary?.pass_rate ?? 0), 0) / runs.length,
-                            avgCost: runs.reduce((s, r) => s + (r.summary?.total_cost_usd ?? 0), 0) / runs.length,
-                          })).sort((a, b) => b.avgPass - a.avgPass).map((row, i) => (
-                            <tr key={row.strat}><td className="mono">{i + 1}</td><td>{row.strat.replace(/_/g, ' ')}</td><td className="mono">{row.runs}</td><td className="mono">{(row.avgPass * 100).toFixed(1)}%</td><td className="mono">${row.avgCost.toFixed(3)}</td></tr>
-                          ));
-                        })()}
-                      </tbody>
-                    </table>
-                  </div>
-                </Pane>
-              </>
+              </div>
             )}
 
-            <ComponentErrorBoundary name="ModelCostRace">
-              <Pane title="MODEL COST RACE">
-                <CostRace height={300} />
-              </Pane>
-            </ComponentErrorBoundary>
-          </div>
-        )}
+            {/* ── Analysis Section ── */}
+            <div className="bench-results-section">
+              <h3 className="bench-section-header">ANALYSIS</h3>
+              <ComponentErrorBoundary name="ParetoFrontier">
+                <Pane title="PARETO FRONTIER">
+                  {(() => {
+                    const pts = pareto?.points ?? [];
+                    const histPts = history.filter((r) => r.summary);
+                    const scatterData = pts.length > 0
+                      ? pts.map((p) => ({ x: p.cost_usd, y: p.pass_rate, label: p.label ?? p.run_id.slice(0, 8), color: p.provider?.includes('Anthropic') ? 'var(--rose-bright)' : 'var(--success)' }))
+                      : histPts.map((r) => ({ x: r.summary!.total_cost_usd, y: r.summary!.pass_rate, label: r.config.model.split('-').slice(0, 2).join('-'), color: modelColor(r.config.model) }));
+                    return scatterData.length > 0
+                      ? <ScatterChart points={scatterData} xLabel="Cost (USD)" yLabel="Pass Rate" showTrendLine height={400} />
+                      : <p className="bench-empty-text">Run benchmarks to see the Pareto frontier.</p>;
+                  })()}
+                </Pane>
+              </ComponentErrorBoundary>
 
-        {/* ── Learning ── */}
-        {tab === 'learning' && (
-          <ComponentErrorBoundary name="BenchLearningInsights">
-            <BenchLearningInsights
-              history={history}
-              learningEvents={activeRunLearning}
-              isRunning={activeRun?.status === 'running'}
-            />
-          </ComponentErrorBoundary>
+              {history.filter((r) => r.summary).length > 0 && (
+                <>
+                  <Pane title="MODEL LEADERBOARD">
+                    <div className="task-table-wrap">
+                      <table className="task-table">
+                        <thead><tr><th>#</th><th>Model</th><th>Runs</th><th>Avg Pass Rate</th><th>Avg Cost</th><th>Avg Duration</th></tr></thead>
+                        <tbody>
+                          {(() => {
+                            const byModel = new Map<string, BenchRun[]>();
+                            for (const r of history.filter((r) => r.summary)) { const l = byModel.get(r.config.model) ?? []; l.push(r); byModel.set(r.config.model, l); }
+                            return [...byModel.entries()].map(([model, runs]) => ({
+                              model, runs: runs.length,
+                              avgPass: runs.reduce((s, r) => s + (r.summary?.pass_rate ?? 0), 0) / runs.length,
+                              avgCost: runs.reduce((s, r) => s + (r.summary?.total_cost_usd ?? 0), 0) / runs.length,
+                              avgDur: runs.reduce((s, r) => s + (r.summary?.total_duration_ms ?? 0), 0) / runs.length,
+                            })).sort((a, b) => b.avgPass - a.avgPass || a.avgCost - b.avgCost).map((row, i) => (
+                              <tr key={row.model}><td className="mono">{i + 1}</td><td className="mono">{row.model}</td><td className="mono">{row.runs}</td><td className="mono">{(row.avgPass * 100).toFixed(1)}%</td><td className="mono">${row.avgCost.toFixed(3)}</td><td className="mono">{(row.avgDur / 1000).toFixed(1)}s</td></tr>
+                            ));
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Pane>
+
+                  <Pane title="STRATEGY LEADERBOARD">
+                    <div className="task-table-wrap">
+                      <table className="task-table">
+                        <thead><tr><th>#</th><th>Strategy</th><th>Runs</th><th>Avg Pass Rate</th><th>Avg Cost</th></tr></thead>
+                        <tbody>
+                          {(() => {
+                            const byStrat = new Map<string, BenchRun[]>();
+                            for (const r of history.filter((r) => r.summary)) { const l = byStrat.get(r.config.strategy) ?? []; l.push(r); byStrat.set(r.config.strategy, l); }
+                            return [...byStrat.entries()].map(([strat, runs]) => ({
+                              strat, runs: runs.length,
+                              avgPass: runs.reduce((s, r) => s + (r.summary?.pass_rate ?? 0), 0) / runs.length,
+                              avgCost: runs.reduce((s, r) => s + (r.summary?.total_cost_usd ?? 0), 0) / runs.length,
+                            })).sort((a, b) => b.avgPass - a.avgPass).map((row, i) => (
+                              <tr key={row.strat}><td className="mono">{i + 1}</td><td>{row.strat.replace(/_/g, ' ')}</td><td className="mono">{row.runs}</td><td className="mono">{(row.avgPass * 100).toFixed(1)}%</td><td className="mono">${row.avgCost.toFixed(3)}</td></tr>
+                            ));
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Pane>
+                </>
+              )}
+
+              <ComponentErrorBoundary name="ModelCostRace">
+                <Pane title="MODEL COST RACE">
+                  <CostRace height={300} />
+                </Pane>
+              </ComponentErrorBoundary>
+            </div>
+
+            {/* ── Learning Insights Section ── */}
+            {(history.length > 0 || activeRunLearning.length > 0) && (
+              <div className="bench-results-section">
+                <h3 className="bench-section-header">LEARNING INSIGHTS</h3>
+                <ComponentErrorBoundary name="BenchLearningInsights">
+                  <BenchLearningInsights
+                    history={history}
+                    learningEvents={activeRunLearning}
+                    isRunning={activeRun?.status === 'running'}
+                  />
+                </ComponentErrorBoundary>
+              </div>
+            )}
+          </div>
         )}
 
       </div>
