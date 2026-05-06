@@ -17,6 +17,7 @@ mod dry_run_fs;
 #[path = "plan_validate.rs"]
 mod plan_validate;
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -990,6 +991,44 @@ pub async fn generate_plan_from_prd_with_failure_context(
     Ok(plans_root)
 }
 
+/// Default model escalation chain: haiku → sonnet → opus.
+const DEFAULT_ESCALATION_CHAIN: &[&str] = &[
+    "claude-haiku-4-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+];
+
+/// Return the next-tier model for escalation on validation failures.
+///
+/// Checks `tier_models` config first (keys: `"haiku"`, `"sonnet"`, `"opus"`),
+/// falling back to [`DEFAULT_ESCALATION_CHAIN`]. Returns `None` if the current
+/// model is already at the highest tier.
+fn next_tier_model(
+    current: Option<&str>,
+    tier_models: &HashMap<String, String>,
+) -> Option<String> {
+    // Build the chain from config or defaults.
+    let chain: Vec<&str> = if tier_models.is_empty() {
+        DEFAULT_ESCALATION_CHAIN.to_vec()
+    } else {
+        // Config keys in escalation order.
+        ["haiku", "sonnet", "opus"]
+            .iter()
+            .filter_map(|k| tier_models.get(*k).map(String::as_str))
+            .collect()
+    };
+
+    let current_slug = current.unwrap_or("");
+    // Find position of the current model in the chain.
+    let pos = chain.iter().position(|m| *m == current_slug);
+    match pos {
+        Some(i) if i + 1 < chain.len() => Some(chain[i + 1].to_string()),
+        // Current model not in chain — escalate to the last (strongest) tier.
+        None if !chain.is_empty() => Some(chain[chain.len() - 1].to_string()),
+        _ => None,
+    }
+}
+
 async fn generate_plan_from_prd_with_outcome(
     slug: &str,
     prd_path: &Path,
@@ -1221,14 +1260,41 @@ async fn generate_plan_from_prd_with_outcome(
         // First attempt uses the output we already have.
         let mut validated_toml = try_extract_and_validate(&output);
 
-        // Retry up to 2 times on extraction/validation failure.
+        // Retry up to 2 times on extraction/validation failure, escalating
+        // to a higher-tier model when TOML validation keeps failing.
         if validated_toml.is_err() {
             let max_retries = 2u32;
+            let mut escalated_model: Option<String> = None;
             for attempt in 1..=max_retries {
                 let t_retry = Instant::now();
+
+                // Escalate model on format/validation failures (not auth/network).
+                let current_model = escalated_model
+                    .as_deref()
+                    .or(effective_model);
+                if resolved.config.agent.escalation.escalate_model {
+                    if let Some(next) =
+                        next_tier_model(current_model, &resolved.config.agent.tier_models)
+                    {
+                        tracing::info!(
+                            from = current_model.unwrap_or("<default>"),
+                            to = next.as_str(),
+                            attempt,
+                            "prd plan: escalating model tier on validation failure"
+                        );
+                        eprintln!(
+                            "⬆️  Escalating model: {} → {next}",
+                            current_model.unwrap_or("<default>"),
+                        );
+                        escalated_model = Some(next);
+                    }
+                }
+                let retry_model = escalated_model.as_deref().or(effective_model);
+
                 tracing::warn!(
                     attempt,
                     max_retries,
+                    model = retry_model.unwrap_or("<default>"),
                     err = validated_toml.as_ref().unwrap_err().as_str(),
                     "prd plan: TOML extraction/validation failed, retrying"
                 );
@@ -1246,7 +1312,7 @@ async fn generate_plan_from_prd_with_outcome(
                 let retry_result = run_agent_capture_silent(AgentExecOpts {
                     prompt: &retry_prompt,
                     workdir: workdir_ref,
-                    model: effective_model,
+                    model: retry_model,
                     effort: Some(resolved.config.agent.effort.as_str()),
                     system_prompt: Some(&system),
                     resume_session: None,
@@ -1262,6 +1328,7 @@ async fn generate_plan_from_prd_with_outcome(
                         if validated_toml.is_ok() {
                             tracing::info!(
                                 attempt,
+                                model = retry_model.unwrap_or("<default>"),
                                 retry_ms = t_retry.elapsed().as_millis() as u64,
                                 "prd plan: retry succeeded"
                             );
@@ -1269,21 +1336,27 @@ async fn generate_plan_from_prd_with_outcome(
                             break;
                         }
                     }
+                    // Non-zero exit (auth/network errors) — do NOT escalate model,
+                    // just log and retry with the same model.
                     Ok((code, _)) => {
                         tracing::warn!(
                             attempt,
                             code,
                             retry_ms = t_retry.elapsed().as_millis() as u64,
-                            "prd plan: retry agent failed"
+                            "prd plan: retry agent failed (not escalating — agent error)"
                         );
+                        // Revert escalation: auth/network failures won't be fixed
+                        // by a different model.
+                        escalated_model = None;
                     }
                     Err(err) => {
                         tracing::warn!(
                             attempt,
                             %err,
                             retry_ms = t_retry.elapsed().as_millis() as u64,
-                            "prd plan: retry agent error"
+                            "prd plan: retry agent error (not escalating — transport error)"
                         );
+                        escalated_model = None;
                     }
                 }
             }
@@ -3347,7 +3420,7 @@ model_hint = "gpt-nonexistent"
     }
 
     #[test]
-    fn validate_normalizes_model_alias() {
+    fn validate_removes_model_alias_hint() {
         let toml = r#"
 [meta]
 plan = "test"
@@ -3365,10 +3438,9 @@ model_hint = "haiku"
         let models = sample_models();
         let result = validate_and_fix_generated_plan(toml, "test", &models, None).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
-        assert_eq!(
-            parsed["task"][0]["model_hint"].as_str().unwrap(),
-            "claude-haiku-4-5",
-            "alias should be normalized to full name"
+        assert!(
+            parsed["task"][0].get("model_hint").is_none(),
+            "model_hint aliases should be removed so runtime selects"
         );
     }
 
