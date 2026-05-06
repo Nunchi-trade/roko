@@ -320,6 +320,73 @@ pub async fn persist_capture_episode(
     Ok(())
 }
 
+/// Classification of agent crash from stderr output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCrashClass {
+    AuthenticationError,
+    RateLimited,
+    ContextOverflow,
+    ModelNotFound,
+    NetworkError,
+    Unknown,
+}
+
+impl AgentCrashClass {
+    /// Whether this crash class is worth retrying automatically.
+    pub fn is_retriable(&self) -> bool {
+        matches!(self, Self::RateLimited | Self::NetworkError)
+    }
+
+    /// Human-readable hint for recovering from this crash class.
+    pub fn recovery_hint(&self) -> &str {
+        match self {
+            Self::AuthenticationError => {
+                "Check your API key: ensure the correct key is set in the environment or roko.toml"
+            }
+            Self::RateLimited => {
+                "Rate limited by the provider; wait a moment and retry, or switch models"
+            }
+            Self::ContextOverflow => {
+                "Prompt exceeds the model's context window; reduce input size or switch to a larger-context model"
+            }
+            Self::ModelNotFound => {
+                "The requested model was not found; check the model name in roko.toml or provider docs"
+            }
+            Self::NetworkError => {
+                "Network error reaching the provider; check your connection and try again"
+            }
+            Self::Unknown => "Agent crashed for an unknown reason; inspect the full stderr output",
+        }
+    }
+}
+
+/// Classify an agent crash from its stderr output.
+///
+/// Uses simple `contains()` checks — no regex needed.
+pub fn classify_agent_crash(stderr: &str) -> AgentCrashClass {
+    // Check most-specific patterns first.
+    if stderr.contains("401")
+        || stderr.contains("invalid_api_key")
+        || stderr.contains("Missing API key")
+    {
+        return AgentCrashClass::AuthenticationError;
+    }
+    if stderr.contains("429") || stderr.contains("rate_limit") {
+        return AgentCrashClass::RateLimited;
+    }
+    if stderr.contains("context_length_exceeded") || stderr.contains("too many tokens") {
+        return AgentCrashClass::ContextOverflow;
+    }
+    if stderr.contains("model_not_found") || stderr.contains("does not exist") {
+        return AgentCrashClass::ModelNotFound;
+    }
+    if stderr.contains("connection") || stderr.contains("timeout") || stderr.contains("ECONNREFUSED")
+    {
+        return AgentCrashClass::NetworkError;
+    }
+    AgentCrashClass::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,5 +548,106 @@ tool_format = "openai_json"
             prd_rs.contains("prd-plan-generate") && prd_rs.contains("persist_capture_episode"),
             "generate_plan_from_prd_with_model must persist a prd-plan-generate episode"
         );
+    }
+
+    #[test]
+    fn classify_agent_crash_auth() {
+        assert_eq!(
+            classify_agent_crash("error: 401 Unauthorized"),
+            AgentCrashClass::AuthenticationError
+        );
+        assert_eq!(
+            classify_agent_crash("invalid_api_key: check your key"),
+            AgentCrashClass::AuthenticationError
+        );
+        assert_eq!(
+            classify_agent_crash("Missing API key"),
+            AgentCrashClass::AuthenticationError
+        );
+    }
+
+    #[test]
+    fn classify_agent_crash_rate_limit() {
+        assert_eq!(
+            classify_agent_crash("HTTP 429 Too Many Requests"),
+            AgentCrashClass::RateLimited
+        );
+        assert_eq!(
+            classify_agent_crash("rate_limit exceeded"),
+            AgentCrashClass::RateLimited
+        );
+    }
+
+    #[test]
+    fn classify_agent_crash_context() {
+        assert_eq!(
+            classify_agent_crash("context_length_exceeded"),
+            AgentCrashClass::ContextOverflow
+        );
+        assert_eq!(
+            classify_agent_crash("too many tokens for this model"),
+            AgentCrashClass::ContextOverflow
+        );
+    }
+
+    #[test]
+    fn classify_agent_crash_model() {
+        assert_eq!(
+            classify_agent_crash("model_not_found: gpt-99"),
+            AgentCrashClass::ModelNotFound
+        );
+        assert_eq!(
+            classify_agent_crash("The model does not exist"),
+            AgentCrashClass::ModelNotFound
+        );
+    }
+
+    #[test]
+    fn classify_agent_crash_network() {
+        assert_eq!(
+            classify_agent_crash("connection refused"),
+            AgentCrashClass::NetworkError
+        );
+        assert_eq!(
+            classify_agent_crash("request timeout after 30s"),
+            AgentCrashClass::NetworkError
+        );
+        assert_eq!(
+            classify_agent_crash("ECONNREFUSED 127.0.0.1:443"),
+            AgentCrashClass::NetworkError
+        );
+    }
+
+    #[test]
+    fn classify_agent_crash_unknown() {
+        assert_eq!(
+            classify_agent_crash("segfault at 0xdeadbeef"),
+            AgentCrashClass::Unknown
+        );
+    }
+
+    #[test]
+    fn retriable_variants() {
+        assert!(!AgentCrashClass::AuthenticationError.is_retriable());
+        assert!(AgentCrashClass::RateLimited.is_retriable());
+        assert!(!AgentCrashClass::ContextOverflow.is_retriable());
+        assert!(!AgentCrashClass::ModelNotFound.is_retriable());
+        assert!(AgentCrashClass::NetworkError.is_retriable());
+        assert!(!AgentCrashClass::Unknown.is_retriable());
+    }
+
+    #[test]
+    fn recovery_hints_non_empty() {
+        let variants = [
+            AgentCrashClass::AuthenticationError,
+            AgentCrashClass::RateLimited,
+            AgentCrashClass::ContextOverflow,
+            AgentCrashClass::ModelNotFound,
+            AgentCrashClass::NetworkError,
+            AgentCrashClass::Unknown,
+        ];
+        for v in variants {
+            assert!(!v.recovery_hint().is_empty(), "{v:?} hint must not be empty");
+        }
     }
 }
