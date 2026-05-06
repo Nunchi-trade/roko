@@ -100,6 +100,9 @@ pub struct RunState {
     // ─── Task DAG ───────────────────────────────────────────────────
     /// Completed task IDs per plan (for DAG dependency resolution).
     pub completed_tasks: HashMap<String, Vec<String>>,
+    /// Failed task IDs per plan. Tasks depending on a failed task are
+    /// skipped rather than blocking the entire plan.
+    pub failed_tasks: HashMap<String, HashSet<String>>,
     /// Files created or modified by each completed task.
     /// Key: `"{plan_id}:{task_id}"`, value: list of file paths.
     pub task_outputs: HashMap<String, Vec<String>>,
@@ -179,6 +182,7 @@ impl RunState {
             last_failure_kind: HashMap::new(),
             active_gate_effects: HashSet::new(),
             completed_tasks: HashMap::new(),
+            failed_tasks: HashMap::new(),
             task_outputs: HashMap::new(),
             snapshot_fail_streak: 0,
             snapshot_degraded: false,
@@ -586,6 +590,21 @@ impl RunState {
             .get(plan_id)
             .map(|v| v.as_slice())
             .unwrap_or_default()
+    }
+
+    /// Mark a task as permanently failed for DAG tracking.
+    pub fn mark_task_failed(&mut self, plan_id: &str, task_id: &str) {
+        self.failed_tasks
+            .entry(plan_id.to_string())
+            .or_default()
+            .insert(task_id.to_string());
+    }
+
+    /// Get the set of failed task IDs for a plan.
+    pub fn plan_failed_tasks(&self, plan_id: &str) -> &HashSet<String> {
+        static EMPTY: std::sync::LazyLock<HashSet<String>> =
+            std::sync::LazyLock::new(HashSet::new);
+        self.failed_tasks.get(plan_id).unwrap_or(&EMPTY)
     }
 
     /// Record the files produced by a completed task.

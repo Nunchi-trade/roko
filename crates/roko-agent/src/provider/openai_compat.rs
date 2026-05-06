@@ -235,6 +235,13 @@ pub(crate) fn build_extra_body_params(
     extra_body_params
 }
 
+/// Returns `true` for model slugs that require `max_completion_tokens`
+/// instead of `max_tokens` in the request body (modern OpenAI models).
+pub(crate) fn should_use_max_completion_tokens(slug: &str) -> bool {
+    const PREFIXES: &[&str] = &["gpt-4o", "gpt-5", "o1", "o3", "o4", "codex"];
+    PREFIXES.iter().any(|p| slug.starts_with(p))
+}
+
 pub(crate) fn max_tokens_for_model(model: &ModelProfile) -> u32 {
     model
         .max_output
@@ -413,7 +420,10 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .with_base_url(base_url_for_codex(provider))
             .with_timeout_ms(timeout)
             .with_max_tokens(max_tokens)
-            .with_use_max_completion_tokens(model.use_max_completion_tokens)
+            .with_use_max_completion_tokens(
+                model.use_max_completion_tokens
+                    || should_use_max_completion_tokens(&model.slug),
+            )
             .with_extra_headers(extra_headers)
             .with_extra_body_params(extra_body_params)
             .with_name(agent_name);

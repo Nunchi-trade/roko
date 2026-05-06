@@ -6022,6 +6022,7 @@ dependencies = [
  "roko-neuro",
  "roko-orchestrator",
  "roko-runtime",
+ "roko-std",
  "serde",
  "serde_json",
  "tempfile",

@@ -1351,6 +1351,7 @@ pub async fn run(
                     );
 
                     let completed = state.plan_completed_tasks(&completion.plan_id);
+                    let failed = state.plan_failed_tasks(&completion.plan_id);
                     let completed_plans = completed_plan_ids(&executor, &task_index);
                     let has_more = task_index
                         .get(completion.plan_id.as_str())
@@ -1359,6 +1360,7 @@ pub async fn run(
                                 .values()
                                 .any(|t| {
                                     !completed.contains(&t.id)
+                                        && !failed.contains(&t.id)
                                         && t.is_ready_with_plan_deps(completed, &completed_plans)
                                 })
                         })
@@ -1372,7 +1374,7 @@ pub async fn run(
                             ps.current_phase = PlanPhase::Implementing;
                         }
                         let remaining = task_index.get(completion.plan_id.as_str())
-                            .map(|t| t.len().saturating_sub(completed.len())).unwrap_or(0);
+                            .map(|t| t.len().saturating_sub(completed.len() + failed.len())).unwrap_or(0);
                         info!(
                             plan_id = %completion.plan_id,
                             remaining,
@@ -1591,11 +1593,50 @@ pub async fn run(
                             false,
                             &reason,
                         );
-                        let _ = executor.apply_event(
-                            &completion.plan_id,
-                            &ExecutorEvent::Fatal(reason.clone()),
-                        );
-                        tui.error(&reason);
+
+                        // Track this task as failed so dependents are skipped.
+                        state.mark_task_failed(&completion.plan_id, &completion.task_id);
+
+                        // Check if there are still runnable tasks in this plan
+                        // (tasks whose deps don't include the failed task).
+                        let completed = state.plan_completed_tasks(&completion.plan_id);
+                        let failed = state.plan_failed_tasks(&completion.plan_id);
+                        let completed_plans = completed_plan_ids(&executor, &task_index);
+                        let has_runnable = task_index
+                            .get(completion.plan_id.as_str())
+                            .map(|tasks| {
+                                tasks.values().any(|t| {
+                                    !completed.contains(&t.id)
+                                        && !failed.contains(&t.id)
+                                        && t.is_ready_with_plan_deps(completed, &completed_plans)
+                                })
+                            })
+                            .unwrap_or(false);
+
+                        if has_runnable {
+                            // Keep the plan in Implementing so the next tick
+                            // picks up the next independent task.
+                            if let Some(ps) = executor.plan_state_mut(&completion.plan_id) {
+                                ps.gate_results.clear();
+                                ps.current_phase = PlanPhase::Implementing;
+                            }
+                            warn!(
+                                plan_id = %completion.plan_id,
+                                task_id = %completion.task_id,
+                                "task failed — skipping, other tasks remain"
+                            );
+                            tui.error(&format!(
+                                "task {} failed (skipped) — continuing with remaining tasks",
+                                completion.task_id
+                            ));
+                        } else {
+                            // No more runnable tasks — fail the plan.
+                            let _ = executor.apply_event(
+                                &completion.plan_id,
+                                &ExecutorEvent::Fatal(reason.clone()),
+                            );
+                            tui.error(&reason);
+                        }
                     }
                 }
 
@@ -3212,6 +3253,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             // by walking the plan's DAG and finding the first ready task.
             let resolved_task = if task == "next" || task == "fix" || task == "regen-verify" {
                 let completed = ctx.state.plan_completed_tasks(plan_id);
+                let failed = ctx.state.plan_failed_tasks(plan_id);
                 let completed_plans = completed_plan_ids(ctx.executor, ctx.task_index);
                 let plan_tasks = ctx.task_index.get(plan_id.as_str());
                 plan_tasks.and_then(|tasks| {
@@ -3222,6 +3264,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         .iter()
                         .find(|t| {
                             !completed.contains(&t.id)
+                                && !failed.contains(&t.id)
                                 && t.is_ready_with_plan_deps(completed, &completed_plans)
                         })
                         .map(|t| t.id.clone())

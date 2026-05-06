@@ -1168,25 +1168,44 @@ fn build_config_options(
     provider_options.sort_by(|a, b| a.value.cmp(&b.value));
 
     // ── Model options filtered by selected provider ──
-    let mut model_options: Vec<ConfigOptionValue> = roko_config
+    // Build full list first, then filter out unavailable models.
+    // If ALL would be filtered, keep them all but marked as unavailable.
+    let mut all_model_options: Vec<ConfigOptionValue> = roko_config
         .models
         .iter()
         .filter(|(_, profile)| profile.provider == state.provider)
-        .map(|(key, profile)| ConfigOptionValue {
-            value: key.clone(),
-            name: capitalize_model_key(key),
-            description: Some(format!(
-                "{} (max output: {})",
-                profile.slug,
-                profile.effective_max_output()
-            )),
-            ready: roko_config
+        .map(|(key, profile)| {
+            let provider_available = roko_config
                 .providers
                 .get(&profile.provider)
-                .is_some_and(|provider| roko_config.is_provider_available(provider)),
+                .is_some_and(|provider| roko_config.is_provider_available(provider));
+            ConfigOptionValue {
+                value: key.clone(),
+                name: capitalize_model_key(key),
+                description: Some(format!(
+                    "{} (max output: {})",
+                    profile.slug,
+                    profile.effective_max_output()
+                )),
+                ready: provider_available,
+            }
         })
         .collect();
-    model_options.sort_by(|a, b| a.value.cmp(&b.value));
+    all_model_options.sort_by(|a, b| a.value.cmp(&b.value));
+
+    let available_model_options: Vec<ConfigOptionValue> = all_model_options
+        .iter()
+        .filter(|opt| opt.ready)
+        .cloned()
+        .collect();
+
+    // If at least one model is available, show only available ones;
+    // otherwise keep all (marked unavailable) so the dropdown isn't empty.
+    let mut model_options = if available_model_options.is_empty() {
+        all_model_options
+    } else {
+        available_model_options
+    };
 
     vec![
         // 1. Provider

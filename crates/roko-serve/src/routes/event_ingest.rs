@@ -412,7 +412,7 @@ mod tests {
             .body(Body::from(agent_output_body().to_string()))
             .expect("build request");
 
-        let resp = _router.oneshot(req).await.expect("oneshot");
+        let resp = router.oneshot(req).await.expect("oneshot");
         assert_eq!(
             resp.status(),
             StatusCode::FORBIDDEN,

@@ -177,6 +177,7 @@ fn summarize_content_block(block: &ContentBlock) -> String {
             .or(old_text.as_ref())
             .cloned()
             .unwrap_or_else(|| format!("diff: {path}")),
+        ContentBlock::Image { .. } => "[image]".to_string(),
     }
 }
 

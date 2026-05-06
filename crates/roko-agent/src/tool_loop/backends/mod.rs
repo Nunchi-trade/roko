@@ -12,6 +12,7 @@ use roko_core::defaults::DEFAULT_REQUEST_TIMEOUT_MS;
 use crate::http::{HttpPostError, HttpPoster};
 use crate::provider::openai_compat::{
     base_url_for_tool_loop, build_extra_body_params, max_tokens_for_model, resolve_api_key,
+    should_use_max_completion_tokens,
 };
 use crate::provider::{AgentCreationError, current_safety_layer};
 use crate::tool_loop::LlmBackend;
@@ -59,7 +60,10 @@ pub fn create_openai_compat_backend(
                 .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                 .with_extra_body_params(build_extra_body_params(provider, model))
                 .with_skip_session_fields(true)
-                .with_use_max_completion_tokens(model.use_max_completion_tokens)
+                .with_use_max_completion_tokens(
+                    model.use_max_completion_tokens
+                        || should_use_max_completion_tokens(&model.slug),
+                )
                 .with_ttft_timeout_ms(provider.ttft_timeout_ms)
                 .with_poster(Box::new(SharedHttpPoster { inner: poster }))
                 .with_provider_kind(provider.kind);
@@ -95,7 +99,10 @@ pub fn create_openai_compat_backend(
                 .with_max_tokens(max_tokens_for_model(model))
                 .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
                 .with_skip_session_fields(true)
-                .with_use_max_completion_tokens(model.use_max_completion_tokens)
+                .with_use_max_completion_tokens(
+                    model.use_max_completion_tokens
+                        || should_use_max_completion_tokens(&model.slug),
+                )
                 .with_ttft_timeout_ms(provider.ttft_timeout_ms)
                 .with_poster(Box::new(SharedHttpPoster { inner: poster }))
                 .with_provider_kind(ProviderKind::PerplexityApi);
@@ -127,7 +134,10 @@ pub fn create_openai_compat_backend(
                 .with_skip_session_fields(true)
                 .with_disable_parallel_tool_calls(true)
                 .with_normalize_tool_call_content(true)
-                .with_use_max_completion_tokens(model.use_max_completion_tokens)
+                .with_use_max_completion_tokens(
+                    model.use_max_completion_tokens
+                        || should_use_max_completion_tokens(&model.slug),
+                )
                 .with_ttft_timeout_ms(provider.ttft_timeout_ms)
                 .with_poster(Box::new(SharedHttpPoster { inner: poster }))
                 .with_provider_kind(ProviderKind::CerebrasApi);

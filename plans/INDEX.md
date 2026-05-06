@@ -12,5 +12,7 @@
 | `dry-run-flag` | 10 | 0 | 10 | 📋 ready | 3 |
 | `live-demo-phase1` | 2 | 0 | 2 | 📋 ready | 1 |
 | `live-demo-phase2` | 2 | 0 | 2 | 📋 ready | 1 |
+| `self-dev-extras` | 11 | 0 | 11 | 📋 ready | 20 |
+| `self-dev-ux` | 55 | 0 | 55 | 📋 ready | 20 |
 
-**Total**: 7 plans, 54 tasks, 15 done (28%)
+**Total**: 9 plans, 120 tasks, 15 done (12%)

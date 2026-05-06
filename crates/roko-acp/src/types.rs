@@ -462,6 +462,14 @@ pub enum ContentBlock {
         /// Referenced resource.
         resource: ResourceRef,
     },
+    /// An inline image content block (base64-encoded).
+    Image {
+        /// Base64-encoded image data.
+        data: String,
+        /// MIME type (e.g. `image/png`).
+        #[serde(alias = "mimeType")]
+        mime_type: String,
+    },
     /// A textual diff content block.
     Diff {
         /// Path the diff applies to.

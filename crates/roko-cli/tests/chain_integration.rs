@@ -252,6 +252,9 @@ fn chain_config_round_trips_through_toml() {
         deployer: Some(DEPLOYER.to_string()),
         agent_registry: None,
         bounty_market: None,
+        profile: "mirage".to_string(),
+        auto_deploy_contracts: false,
+        contracts_dir: None,
     };
 
     let toml_str = toml::to_string_pretty(&config).expect("serialize to TOML");

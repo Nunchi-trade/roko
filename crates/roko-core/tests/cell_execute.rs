@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use roko_core::error::{Result, RokoError};
-use roko_core::traits::Substrate;
+use roko_core::traits::{Store, Substrate};
 use roko_core::{
     Body, BusErased, Cell, CellContext, CellVersion, ContentHash, Context, Engram, HdcVector, Kind,
     MemoryBus, Query, TypeSchema,
@@ -19,7 +19,7 @@ use roko_core::{
 struct TestStore;
 
 #[async_trait]
-impl Substrate for TestStore {
+impl Store for TestStore {
     async fn put(&self, engram: Engram) -> Result<ContentHash> {
         Ok(engram.id)
     }

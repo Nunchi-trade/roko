@@ -1,0 +1,2312 @@
+[meta]
+plan = "self-dev-ux"
+total = 55
+done = 0
+status = "ready"
+max_parallel = 20
+estimated_total_minutes = 720
+skip_enrichment = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CRITICAL PRIORITY — Blocks basic ACP usability
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Doc 21: Cross-Provider Cascade Error (--model passthrough) ───────────────
+
+[[task]]
+id = "C01"
+title = "Pass model_key (not resolved.slug) to run_slash_command"
+description = """
+In bridge_events.rs handle_session_prompt_inner(), the call to run_slash_command()
+currently passes `resolved.slug.clone()` (the API slug like "gpt-4o-mini").
+Change it to pass `model_key.clone()` (the config key like "gpt54-mini") which is
+what the CLI's --model flag expects.
+
+The model_key is already in scope at ~line 969:
+  let model_key = session.config_state.model.clone();
+
+The call site at ~line 1143 currently does:
+  resolved.slug.clone()
+Change to:
+  model_key.clone()
+
+Also rename the parameter in run_slash_command from model_slug to model_key for clarity.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 10
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "960-980", why = "Find model_key definition" },
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1135-1160", why = "Find run_slash_command call site" },
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "2689-2710", why = "Find run_slash_command signature" },
+]
+symbols = [
+    "run_slash_command — async fn that dispatches CLI subcommands, receives model_slug: String param",
+    "handle_session_prompt_inner — main prompt dispatch, has model_key in scope",
+]
+anti_patterns = [
+    "Do NOT change how model_key is computed — just pass it instead of resolved.slug",
+    "Do NOT rename model_key in handle_session_prompt_inner — only rename in run_slash_command",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -n 'model_key' crates/roko-acp/src/bridge_events.rs | grep -q 'run_slash_command'"
+fail_msg = "run_slash_command should reference model_key"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "roko-acp must compile"
+
+[[task]]
+id = "C02"
+title = "Add --model flag to all agent-dispatching slash commands"
+description = """
+In bridge_events.rs run_slash_command(), the match block at ~lines 2726-2898 maps
+slash command names to CLI arg vectors. Add "--model" and model_key.clone() to every
+command that dispatches an agent:
+
+- "plan-generate" => vec!["plan", "generate", "--model", model_key, args]
+- "plan-regenerate" => vec!["plan", "regenerate", "--model", model_key, args]
+- "prd-draft" => vec!["prd", "draft", "new", "--model", model_key, args]
+- "prd-plan" => vec!["prd", "plan", "--model", model_key, args]
+- "run" => vec!["run", "--model", model_key, args]
+- "research" => vec!["research", "topic", "--model", model_key, args]
+- "enhance-prd" => vec!["research", "enhance-prd", "--model", model_key, args]
+- "agent-chat" => vec!["agent", "chat", "--agent", args, "--model", model_key]
+
+Do NOT add --model to non-agent commands: status, doctor, config, build, test,
+clippy, fmt, gate, review, prd-list, prd-status, plan-list, plan-validate,
+knowledge-stats, knowledge-gc, agents, audit, index.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 60
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["C01"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "2726-2900", why = "The match block mapping slash commands to CLI args" },
+]
+symbols = [
+    "run_slash_command — match block dispatches ~30 commands to CLI arg vectors",
+]
+anti_patterns = [
+    "Do NOT add --model to commands that don't dispatch agents (build, test, status, etc.)",
+    "Do NOT change the order of args — --model must come BEFORE the positional args",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -c '\"--model\"' crates/roko-acp/src/bridge_events.rs | awk '{if ($1 >= 8) exit 0; else exit 1}'"
+fail_msg = "Expected at least 8 occurrences of --model in bridge_events.rs"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "roko-acp must compile"
+
+[[task]]
+id = "C03"
+title = "Guard cascade router selection against unavailable providers"
+description = """
+In crates/roko-cli/src/model_selection.rs, in select_candidate(), after the cascade
+router selects a model, verify the selected model's provider has its API key set.
+Use config.provider_available_for_model_key(model) which already exists in schema.rs.
+
+If unavailable, log a warning and fall through to the next selection stage.
+
+Also guard the default_model fallback: if config.agent.default_model points to a
+provider without an API key, find the first available model from config.models.keys().
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-cli/src/model_selection.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/model_selection.rs", lines = "200-280", why = "select_candidate function" },
+    { path = "crates/roko-core/src/config/schema.rs", lines = "473-502", why = "provider_available_for_model_key method" },
+]
+symbols = [
+    "select_candidate — picks model from CLI flag, role override, cascade router, or default",
+    "provider_available_for_model_key — checks if env var for provider is set",
+    "ModelCandidate — return type with source and model fields",
+]
+anti_patterns = [
+    "Do NOT remove the cascade router path — just add a guard after selection",
+    "Do NOT panic on unavailable provider — log warning and fall through",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'provider_available_for_model_key' crates/roko-cli/src/model_selection.rs"
+fail_msg = "Must call provider_available_for_model_key in model_selection.rs"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "roko-cli must compile"
+
+# ─── Doc 19: ACP Model Has No Tools ──────────────────────────────────────────
+
+[[task]]
+id = "C04"
+title = "Add roko-std dependency to roko-acp Cargo.toml"
+description = """
+Add roko-std as a workspace dependency to crates/roko-acp/Cargo.toml.
+This gives access to the builtin tool definitions (BuiltinTool enum, tool schemas).
+Also add roko-agent if not already present (for ToolLoop and tool execution).
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 5
+files = ["crates/roko-acp/Cargo.toml"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/Cargo.toml", why = "Check existing deps" },
+    { path = "Cargo.toml", lines = "1-50", why = "Workspace deps definition" },
+]
+anti_patterns = [
+    "Do NOT add version numbers if workspace = true is the pattern",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'roko-std' crates/roko-acp/Cargo.toml"
+fail_msg = "roko-std dependency not in roko-acp Cargo.toml"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "roko-acp must compile with new deps"
+
+[[task]]
+id = "C05"
+title = "Create acp_builtin_tools() returning 8 tool definitions"
+description = """
+Create a new file crates/roko-acp/src/builtin_tools.rs that exports a function
+acp_builtin_tools() -> Vec<ToolDefinition> returning definitions for:
+
+1. read_file(path, lines?) — reads file content
+2. write_file(path, content) — writes file
+3. edit_file(path, old_string, new_string) — surgical edit
+4. glob(pattern, path?) — find files by pattern
+5. grep(pattern, path?, type?) — search file content
+6. bash(command, timeout?) — run shell command
+7. ls(path?) — list directory
+8. web_fetch(url, prompt) — fetch web content
+
+Each tool definition needs: name, description, input_schema (JSON Schema).
+Use the same ToolDefinition type that roko-std uses.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 200
+files = ["crates/roko-acp/src/builtin_tools.rs", "crates/roko-acp/src/lib.rs"]
+role = "implementer"
+depends_on = ["C04"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-std/src/lib.rs", lines = "1-50", why = "See how builtin tools are defined" },
+    { path = "crates/roko-agent/src/tool_schema.rs", lines = "1-80", why = "ToolDefinition struct" },
+]
+symbols = [
+    "ToolDefinition — struct with name: String, description: String, input_schema: serde_json::Value",
+]
+anti_patterns = [
+    "Do NOT implement execution logic here — just definitions/schemas",
+    "Do NOT use any roko-specific types in schemas — use standard JSON Schema",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pub fn acp_builtin_tools' crates/roko-acp/src/builtin_tools.rs"
+fail_msg = "acp_builtin_tools function not found"
+
+[[task.verify]]
+phase = "structural"
+command = "grep -c 'read_file\\|write_file\\|edit_file\\|glob\\|grep\\|bash\\|ls\\|web_fetch' crates/roko-acp/src/builtin_tools.rs | awk '{if ($1 >= 8) exit 0; else exit 1}'"
+fail_msg = "Must define all 8 tools"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "C06"
+title = "Add tool definitions to model call request in bridge_events.rs"
+description = """
+In bridge_events.rs, where ModelCallRequest is constructed for the OpenAI-compat path
+(~line 1536 model_call_request_from_acp_messages), add the tool definitions from
+acp_builtin_tools() to the request's tools field.
+
+For the Anthropic path (run_anthropic_cognitive_task ~line 1635), add tools to the
+Anthropic API request body as well using the Anthropic tool format.
+
+The tools should only be added when the session has tools enabled (add a
+session.tools_enabled: bool field that defaults to true).
+"""
+status = "ready"
+tier = "integrative"
+model_hint = "claude-opus-4-6"
+max_loc = 50
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["C05"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1530-1550", why = "ModelCallRequest construction" },
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1630-1660", why = "Anthropic dispatch path" },
+]
+symbols = [
+    "model_call_request_from_acp_messages — builds the LLM request, currently has no tools",
+    "run_anthropic_cognitive_task — Anthropic-specific dispatch",
+]
+anti_patterns = [
+    "Do NOT hard-code tool schemas inline — call acp_builtin_tools()",
+    "Do NOT modify the MCP tool path — this is for builtin tools only",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'acp_builtin_tools' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must reference acp_builtin_tools in bridge_events"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "C07"
+title = "Create execute_acp_builtin_tool() dispatcher"
+description = """
+Create a function execute_acp_builtin_tool(name, args, workdir, event_sender) that:
+
+1. Matches tool name to handler:
+   - read_file -> tokio::fs::read_to_string with line range support
+   - write_file -> tokio::fs::write
+   - edit_file -> read, replace old_string with new_string, write
+   - glob -> walkdir with glob pattern matching
+   - grep -> tokio::process::Command("rg") or manual line search
+   - bash -> tokio::process::Command with timeout
+   - ls -> tokio::fs::read_dir
+   - web_fetch -> reqwest::get with content extraction
+
+2. Emits CognitiveEvent::ToolCallStart before execution
+3. Emits CognitiveEvent::ToolCallComplete after execution
+4. Returns tool result as String (or error message)
+
+Safety: read_file, glob, grep, ls, web_fetch are auto-approve.
+write_file, edit_file, bash need permission (emit ToolCallStart with needs_permission flag).
+"""
+status = "ready"
+tier = "integrative"
+model_hint = "claude-opus-4-6"
+max_loc = 250
+files = ["crates/roko-acp/src/builtin_tools.rs"]
+role = "implementer"
+depends_on = ["C05"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-std/src/lib.rs", lines = "1-100", why = "See how existing tools execute" },
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1-30", why = "See CognitiveEvent imports" },
+]
+symbols = [
+    "CognitiveEvent::ToolCallStart — event emitted when tool begins",
+    "CognitiveEvent::ToolCallComplete — event emitted with tool result",
+]
+anti_patterns = [
+    "Do NOT use blocking IO — all operations must be async",
+    "Do NOT allow path traversal outside workdir for file operations",
+    "Do NOT execute bash commands without timeout (default 120s)",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pub async fn execute_acp_builtin_tool' crates/roko-acp/src/builtin_tools.rs"
+fail_msg = "execute_acp_builtin_tool function not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "C08"
+title = "Wire tool_use response handling into OpenAI stream loop"
+description = """
+In bridge_events.rs, the OpenAI-compat stream loop (run_openai_compat_cognitive_task)
+currently processes text chunks only. Add handling for tool_use content blocks:
+
+1. Detect tool_use blocks in the stream response
+2. When a tool call is received, call execute_acp_builtin_tool()
+3. Append the tool result as a tool_result message
+4. Continue the conversation loop (re-call the model with tool results)
+5. Loop until the model produces a text response (no more tool calls)
+6. Cap at max 25 tool iterations to prevent infinite loops
+
+The existing run_openai_compat_mcp_tool_loop in bridge_events.rs shows the pattern
+for MCP tools — adapt the same loop structure for builtin tools.
+"""
+status = "ready"
+tier = "architectural"
+model_hint = "claude-opus-4-6"
+max_loc = 150
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["C06", "C07"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1450-1550", why = "OpenAI stream dispatch" },
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1700-1800", why = "Existing MCP tool loop pattern" },
+]
+symbols = [
+    "run_openai_compat_cognitive_task — current OpenAI dispatch (no tool loop)",
+    "run_openai_compat_mcp_tool_loop — MCP tool loop (pattern to follow)",
+]
+anti_patterns = [
+    "Do NOT break existing MCP tool handling — builtin tools are separate",
+    "Do NOT remove the max iteration guard — keep it at 25",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'execute_acp_builtin_tool' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must call execute_acp_builtin_tool in the stream loop"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "C09"
+title = "Wire tool_use response handling into Anthropic stream loop"
+description = """
+In bridge_events.rs, the Anthropic dispatch path (run_anthropic_cognitive_task) also
+needs a tool loop. Anthropic's streaming format sends tool_use content blocks with
+id, name, and input fields.
+
+1. After receiving a message with stop_reason = "tool_use", extract tool calls
+2. Execute each tool via execute_acp_builtin_tool()
+3. Build tool_result content blocks with tool_use_id
+4. Re-call the API with updated messages array
+5. Loop until stop_reason = "end_turn" or max 25 iterations
+"""
+status = "ready"
+tier = "architectural"
+model_hint = "claude-opus-4-6"
+max_loc = 150
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["C06", "C07"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1630-1730", why = "Anthropic dispatch path" },
+    { path = "crates/roko-agent/src/provider/anthropic_api.rs", lines = "1-80", why = "Anthropic tool format" },
+]
+anti_patterns = [
+    "Do NOT use the OpenAI tool format for Anthropic — use tool_use/tool_result blocks",
+    "Do NOT accumulate all tool calls before executing — execute as they arrive",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'tool_result' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must handle tool_result in Anthropic path"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 12: ACP Error UX ────────────────────────────────────────────────────
+
+[[task]]
+id = "C10"
+title = "Auto-detect use_max_completion_tokens from model slug"
+description = """
+In crates/roko-agent/src/provider/openai_compat.rs, add a function:
+
+  fn should_use_max_completion_tokens(slug: &str) -> bool
+
+That returns true for slugs starting with: gpt-4o, gpt-5, o1, o3, o4, codex.
+
+Then in the request builder where max_tokens is set, use:
+  model.use_max_completion_tokens || should_use_max_completion_tokens(&model.slug)
+
+This prevents HTTP 400 errors for all modern OpenAI models without requiring config.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 20
+files = ["crates/roko-agent/src/provider/openai_compat.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-agent/src/provider/openai_compat.rs", lines = "410-430", why = "Where max_tokens is set in request" },
+]
+symbols = [
+    "use_max_completion_tokens — bool field on ModelProfile, currently must be set in TOML",
+]
+anti_patterns = [
+    "Do NOT remove support for the config field — it should still work as override",
+    "Do NOT match on exact model names — use prefix matching (starts_with)",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'should_use_max_completion_tokens' crates/roko-agent/src/provider/openai_compat.rs"
+fail_msg = "Function not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-agent 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "C11"
+title = "Filter unavailable providers from ACP model dropdown"
+description = """
+In crates/roko-acp/src/session.rs, where the model list is built for Zed's dropdown,
+filter out models whose providers don't have API keys set.
+
+Use is_provider_available() from schema.rs to check each model before including it.
+If ALL models are filtered, keep them all but mark as unavailable in display.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 25
+files = ["crates/roko-acp/src/session.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/session.rs", lines = "1-50", why = "Find where model list is built" },
+    { path = "crates/roko-core/src/config/schema.rs", lines = "473-502", why = "is_provider_available method" },
+]
+anti_patterns = [
+    "Do NOT hide ALL models if none are available — show them with status",
+    "Do NOT modify the config loading — just filter the display list",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'provider_available\\|is_provider_available' crates/roko-acp/src/session.rs"
+fail_msg = "Must check provider availability in session.rs"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "C12"
+title = "Format ACP errors as actionable user messages"
+description = """
+Create a function format_acp_error_for_user(error: &str) -> String in bridge_events.rs
+that pattern-matches known error strings and returns actionable messages:
+
+- "Missing API key: env var X" -> "Set X in your environment. Run: export X=your-key"
+- "max_tokens is not supported" -> "This model needs use_max_completion_tokens. Auto-fixing..."
+- "model not found" -> "Model 'X' isn't configured. Available: [list]. Add to roko.toml..."
+- "rate_limit" / "429" -> "Rate limited. Waiting 30s before retry..."
+- "context_length_exceeded" -> "Prompt too long for this model (Xk limit). Truncating..."
+
+Call this function before emitting CognitiveEvent::Failure messages.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 60
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1080-1120", why = "Where errors are emitted to Zed" },
+]
+anti_patterns = [
+    "Do NOT suppress errors — always show the original error after the friendly message",
+    "Do NOT add retry logic here — just format the message",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'format_acp_error_for_user' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Function not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HIGH PRIORITY — Degrades experience significantly
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Doc 14: Image Support (pass through to LLM) ─────────────────────────────
+
+[[task]]
+id = "H01"
+title = "Convert Image content blocks to OpenAI image_url format"
+description = """
+In bridge_events.rs, where prompt content blocks are assembled into the model's
+message array, convert ContentBlock::Image { data, mime_type } into the OpenAI
+ImageUrl format:
+
+  { "type": "image_url", "image_url": { "url": "data:{mime_type};base64,{data}" } }
+
+Currently the Image block renders as text "[attached image: image/png]".
+Replace that with the actual image content block.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 30
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "3470-3500", why = "extract_prompt_text handles Image" },
+    { path = "crates/roko-agent/src/provider/openai_compat.rs", lines = "1-50", why = "OpenAI message format" },
+]
+anti_patterns = [
+    "Do NOT validate image size here — let the API reject if too large",
+    "Do NOT convert to Anthropic format here — that's a separate path",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'image_url\\|data:.*base64' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must convert image to data URL format"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "H02"
+title = "Convert Image content blocks to Anthropic image format"
+description = """
+For the Anthropic API path, convert ContentBlock::Image { data, mime_type } into:
+
+  { "type": "image", "source": { "type": "base64", "media_type": "{mime_type}", "data": "{data}" } }
+
+This is the Anthropic-specific image format, different from OpenAI's image_url.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 20
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1630-1680", why = "Anthropic message construction" },
+    { path = "crates/roko-agent/src/provider/anthropic_api.rs", lines = "100-150", why = "Anthropic content block format" },
+]
+anti_patterns = [
+    "Do NOT share format logic with OpenAI path — they use different schemas",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'media_type\\|base64' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must use Anthropic image format"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 20: Wire Learning into ACP ──────────────────────────────────────────
+
+[[task]]
+id = "H03"
+title = "Add episode distillation hook after append_acp_episode"
+description = """
+In bridge_events.rs, after the episode is appended (append_acp_episode or equivalent),
+add a call to spawn_episode_distillation() from roko-neuro. This is literally 3 lines:
+
+  if let Ok(distiller) = roko_neuro::Distiller::new(&workdir) {
+      tokio::spawn(async move { let _ = distiller.distill_recent(5).await; });
+  }
+
+This makes the knowledge store learn from each ACP interaction automatically.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 10
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-neuro/src/lib.rs", lines = "1-50", why = "Find Distiller API" },
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1080-1100", why = "Where episodes are appended" },
+]
+anti_patterns = [
+    "Do NOT block on distillation — spawn it as a background task",
+    "Do NOT fail the request if distillation fails — just log warning",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'distill' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must call distillation"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "H04"
+title = "Emit efficiency events after each ACP dispatch"
+description = """
+After each model dispatch in bridge_events.rs, emit an AgentEfficiencyEvent to
+.roko/learn/efficiency.jsonl with:
+- model used
+- token counts (prompt + completion)
+- latency_ms
+- cost estimate (from model profile)
+- session_id
+
+This feeds the cascade router's learning loop.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-learn/src/efficiency.rs", lines = "1-60", why = "AgentEfficiencyEvent struct" },
+]
+symbols = [
+    "AgentEfficiencyEvent — struct with model, tokens, latency, cost fields",
+]
+anti_patterns = [
+    "Do NOT block on file write — use spawn_blocking or async write",
+    "Do NOT fail the response if efficiency logging fails",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'efficiency\\|EfficiencyEvent' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must emit efficiency events"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "H05"
+title = "Wire cascade router selection into ACP model dispatch"
+description = """
+In bridge_events.rs, before dispatching to the LLM, check if a CascadeRouter exists
+at .roko/learn/cascade-router.json. If it does:
+
+1. Load it (cache in session state for subsequent turns)
+2. Call router.select(context_features) to get a model suggestion
+3. If the suggested model differs from user selection AND user hasn't explicitly
+   pinned a model, use the router's suggestion
+4. After dispatch, call router.observe(model, reward) with quality signal
+
+This makes the ACP use the same adaptive model routing as the CLI.
+"""
+status = "ready"
+tier = "integrative"
+model_hint = "claude-opus-4-6"
+max_loc = 50
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["H04"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-learn/src/cascade_router.rs", lines = "1-80", why = "CascadeRouter API" },
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1020-1060", why = "Model dispatch point" },
+]
+symbols = [
+    "CascadeRouter — LinUCB bandit with load_or_new, select, observe methods",
+]
+anti_patterns = [
+    "Do NOT override explicit user model selection — only use router when user hasn't pinned",
+    "Do NOT fail if router file doesn't exist — create new one",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'cascade_router\\|CascadeRouter' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must reference cascade router"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "H06"
+title = "Trigger auto-dream consolidation after N episodes"
+description = """
+After appending an ACP episode, check if the episode count since last dream exceeds
+a threshold (default 10). If so, spawn a background dream consolidation:
+
+  let episodes_since_dream = count_episodes_since_last_dream(&workdir);
+  if episodes_since_dream >= 10 {
+      tokio::spawn(async move {
+          let _ = roko_dreams::DreamRunner::new(&workdir)
+              .and_then(|r| r.consolidate_now())
+              .await;
+      });
+  }
+
+The dream runner reads recent episodes, extracts patterns, writes them to
+.roko/dreams/ for future knowledge injection.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 30
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["H03"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-dreams/src/lib.rs", lines = "1-50", why = "DreamRunner API" },
+]
+anti_patterns = [
+    "Do NOT block on dream consolidation — it calls an LLM and takes 30+ seconds",
+    "Do NOT dream on every episode — only after threshold",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'dream\\|consolidate' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must trigger dream consolidation"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 01/13: Auto-Infer Config ────────────────────────────────────────────
+
+[[task]]
+id = "H07"
+title = "Create builtin model registry with ~15 well-known models"
+description = """
+Create crates/roko-core/src/config/model_registry.rs with a static BUILTIN_MODELS
+array containing entries for:
+
+Anthropic: claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5
+OpenAI: gpt-5.5, gpt-5.4-mini, o3, o4-mini, gpt-4o, codex-mini
+Gemini: gemini-2.5-pro, gemini-2.5-flash
+Perplexity: sonar-pro, sonar
+
+Each entry: slug, provider_kind, context_window, max_output, supports_tools,
+supports_vision, supports_thinking, use_max_completion_tokens, api_key_env.
+
+Add a lookup function: builtin_model(slug: &str) -> Option<&BuiltinModel>
+that matches by exact slug OR common aliases (opus, sonnet, haiku, etc).
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 150
+files = ["crates/roko-core/src/config/model_registry.rs", "crates/roko-core/src/config/mod.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-core/src/config/schema.rs", lines = "1-50", why = "ModelProfile struct" },
+    { path = "crates/roko-core/src/config/mod.rs", why = "Module declarations" },
+]
+anti_patterns = [
+    "Do NOT duplicate ModelProfile fields — define BuiltinModel as a subset that can synthesize a ModelProfile",
+    "Do NOT include experimental/beta models — only stable production models",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'BUILTIN_MODELS' crates/roko-core/src/config/model_registry.rs"
+fail_msg = "BUILTIN_MODELS not found"
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pub fn builtin_model' crates/roko-core/src/config/model_registry.rs"
+fail_msg = "builtin_model lookup function not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-core 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "H08"
+title = "Fall through to builtin registry in resolve_model"
+description = """
+In crates/roko-core/src/agent.rs resolve_model(), when a model key is not found in
+config.models, fall through to builtin_model(key) before returning an error.
+
+If found in builtin registry, synthesize a ModelProfile from the BuiltinModel fields
+and return it. This makes models like "opus", "sonnet", "gpt-5.5" work without any
+TOML configuration.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 20
+files = ["crates/roko-core/src/agent.rs"]
+role = "implementer"
+depends_on = ["H07"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-core/src/agent.rs", lines = "300-330", why = "resolve_model function" },
+]
+anti_patterns = [
+    "Do NOT change the lookup order — user config always wins over builtin",
+    "Do NOT modify existing ModelProfile struct — synthesize from BuiltinModel",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'builtin_model' crates/roko-core/src/agent.rs"
+fail_msg = "Must reference builtin_model in resolve_model"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-core 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "H09"
+title = "Auto-synthesize providers from env vars"
+description = """
+In crates/roko-core/src/config/schema.rs, add a function:
+
+  pub fn synthesize_standard_providers() -> HashMap<String, ProviderConfig>
+
+That checks env vars and creates provider entries:
+- ANTHROPIC_API_KEY set -> "anthropic" provider (base_url: api.anthropic.com)
+- OPENAI_API_KEY set -> "openai" provider (base_url: api.openai.com)
+- GEMINI_API_KEY set -> "gemini" provider (base_url: generativelanguage.googleapis.com)
+- PERPLEXITY_API_KEY set -> "perplexity" provider
+
+Call this during config loading — merge synthesized providers under user-defined ones
+(user config takes precedence).
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 50
+files = ["crates/roko-core/src/config/schema.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-core/src/config/schema.rs", lines = "270-300", why = "Config loading path" },
+    { path = "crates/roko-core/src/config/schema.rs", lines = "100-130", why = "ProviderConfig struct" },
+]
+anti_patterns = [
+    "Do NOT override user-defined providers — only fill gaps",
+    "Do NOT require ALL env vars — each is independent",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'synthesize_standard_providers' crates/roko-core/src/config/schema.rs"
+fail_msg = "Function not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-core 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 05/07/09: Unified CLI UX ────────────────────────────────────────────
+
+[[task]]
+id = "H10"
+title = "Implement roko note command (append-only capture)"
+description = """
+Create crates/roko-cli/src/commands/note.rs implementing a simple note capture:
+
+  roko note "my thought here"
+  roko note --tag feature "add cursor support"
+
+Notes are stored in .roko/notes/ as timestamped markdown files (YYYY-MM-DD-HHMMSS.md).
+Each file contains: timestamp, tags (optional), and the text.
+
+No LLM call. Must be instant (<100ms).
+Register in main.rs as a new Command variant.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 80
+files = ["crates/roko-cli/src/commands/note.rs", "crates/roko-cli/src/commands/mod.rs", "crates/roko-cli/src/main.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/main.rs", lines = "1-80", why = "See Command enum and dispatch" },
+    { path = "crates/roko-cli/src/commands/mod.rs", why = "Module declarations" },
+]
+anti_patterns = [
+    "Do NOT call any LLM — this must be instant",
+    "Do NOT overwrite existing notes — always append new file",
+    "Do NOT require .roko/ to exist — create notes dir if missing",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pub.*note\\|Note' crates/roko-cli/src/commands/note.rs"
+fail_msg = "Note command not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "H11"
+title = "Implement roko develop command (plan + approve + execute)"
+description = """
+Create crates/roko-cli/src/commands/develop.rs as a thin wrapper over do_cmd.rs:
+
+1. Forces --plan (always generates a plan)
+2. Shows plan approval screen before executing (table of tasks, Enter/Edit/Quit)
+3. Auto-launches TUI dashboard if TTY
+
+Command signature:
+  roko develop "prompt"
+  roko develop --dry-run "prompt"  (show plan, don't execute)
+  roko develop --yes "prompt"     (skip approval, auto-execute)
+  roko develop --continue         (resume from snapshot)
+
+Register in main.rs. Reuse existing do_cmd infrastructure.
+"""
+status = "ready"
+tier = "integrative"
+model_hint = "claude-opus-4-6"
+max_loc = 150
+files = ["crates/roko-cli/src/commands/develop.rs", "crates/roko-cli/src/commands/mod.rs", "crates/roko-cli/src/main.rs"]
+role = "implementer"
+depends_on = ["H10"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/commands/do_cmd.rs", lines = "1-80", why = "Existing do command to wrap" },
+    { path = "crates/roko-cli/src/commands/do_cmd.rs", lines = "540-580", why = "Plan execution path" },
+]
+symbols = [
+    "cmd_do — main entry point for roko do, handles complexity classification",
+    "run_plan_execution — executes a plan directory",
+]
+anti_patterns = [
+    "Do NOT duplicate do_cmd logic — call into it",
+    "Do NOT block on TUI if not a TTY",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'Develop\\|develop' crates/roko-cli/src/main.rs"
+fail_msg = "Develop command not registered"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "H12"
+title = "Make roko do <slug> look up existing plans by name"
+description = """
+In do_cmd.rs, before treating the first argument as a prompt, check if it matches
+an existing plan directory:
+
+1. Check .roko/plans/<arg>/tasks.toml
+2. Check plans/<arg>/tasks.toml
+
+If found, skip plan generation and go straight to execution.
+This enables: roko do self-dev-ux (runs this plan directly).
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 20
+files = ["crates/roko-cli/src/commands/do_cmd.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/commands/do_cmd.rs", lines = "80-120", why = "Where prompt is first processed" },
+]
+anti_patterns = [
+    "Do NOT change behavior for multi-word prompts — only single-word matches plan slugs",
+    "Do NOT error if plan exists but has no tasks.toml — fall through to prompt mode",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'plans.*tasks.toml\\|plan.*slug' crates/roko-cli/src/commands/do_cmd.rs"
+fail_msg = "Must check for existing plan directories"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 18: Stream shell commands ───────────────────────────────────────────
+
+[[task]]
+id = "H13"
+title = "Apply streaming fix to run_shell_command"
+description = """
+In bridge_events.rs run_shell_command() (~lines 3335-3384), apply the same streaming
+fix that was applied to run_slash_command: send each stdout line as a TokenChunk
+immediately instead of buffering.
+
+Use the same tokio::select! { biased; } pattern with cancel_token for clean shutdown.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "3222-3260", why = "The already-fixed streaming pattern in run_slash_command" },
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "3330-3390", why = "run_shell_command (still buffered)" },
+]
+anti_patterns = [
+    "Do NOT change the function signature — just the internal read loop",
+    "Do NOT remove stderr handling — keep it after stdout drains",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -A5 'run_shell_command' crates/roko-acp/src/bridge_events.rs | grep -q 'TokenChunk'"
+fail_msg = "run_shell_command must emit TokenChunk per line"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "H14"
+title = "Interleave stdout and stderr in slash command output"
+description = """
+In both run_slash_command and run_shell_command, replace the sequential
+stdout-then-stderr reading with interleaved reading using tokio::select!:
+
+let mut stdout_lines = BufReader::new(child.stdout.take().unwrap()).lines();
+let mut stderr_lines = BufReader::new(child.stderr.take().unwrap()).lines();
+let mut stdout_done = false;
+let mut stderr_done = false;
+
+loop {
+    if stdout_done && stderr_done { break; }
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => { child.kill(); return Ok(()); }
+        line = stdout_lines.next_line(), if !stdout_done => { ... }
+        line = stderr_lines.next_line(), if !stderr_done => { ... }
+    }
+}
+
+Stderr lines should be dimmed with ANSI: format!("\\x1b[2m{}\\x1b[0m", line)
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 60
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["H13"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "3220-3300", why = "Current stdout/stderr handling" },
+]
+anti_patterns = [
+    "Do NOT remove the cancel_token check — it must stay biased first",
+    "Do NOT panic when a stream closes — just set done flag",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'stderr_lines\\|stderr_done' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must interleave stderr"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MEDIUM PRIORITY — Annoying but workable
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Doc 02: Plan Generation UX ──────────────────────────────────────────────
+
+[[task]]
+id = "M01"
+title = "Add model escalation to plan generation retry loop"
+description = """
+In crates/roko-cli/src/prd.rs ~line 1224, the retry loop currently retries with the
+same model 3 times. Add escalation: if TOML validation fails, try next tier model.
+
+Escalation chain: haiku -> sonnet -> opus (or from config [agent.tier_models]).
+Only escalate on format/validation failures, NOT on auth/network errors.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-cli/src/prd.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/prd.rs", lines = "1220-1260", why = "The retry loop" },
+    { path = "crates/roko-cli/src/prd.rs", lines = "990-1010", why = "Function entry, model selection" },
+]
+anti_patterns = [
+    "Do NOT escalate on 401/auth errors — those won't be fixed by a different model",
+    "Do NOT remove the retry count — keep max 3 attempts per model",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'escalat\\|tier_up\\|next_model' crates/roko-cli/src/prd.rs"
+fail_msg = "Must implement model escalation"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "M02"
+title = "Pass previous error context into retry prompt"
+description = """
+In crates/roko-cli/src/prd.rs retry loop, when retrying after a TOML validation
+failure, include the previous invalid output AND the error message in the retry prompt:
+
+  format!("Previous attempt produced invalid TOML. Error: {error}\\n\\nInvalid output:\\n```\\n{output}\\n```\\n\\nPlease fix and regenerate a valid tasks.toml.")
+
+This helps the model understand what went wrong and fix it.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 15
+files = ["crates/roko-cli/src/prd.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/prd.rs", lines = "1220-1260", why = "Retry loop" },
+]
+anti_patterns = [
+    "Do NOT include the entire output if > 2000 chars — truncate with '...'",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'Previous attempt\\|invalid.*output\\|Error:' crates/roko-cli/src/prd.rs"
+fail_msg = "Must include error context in retry"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "M03"
+title = "Show raw agent output on plan generation failure"
+description = """
+In crates/roko-cli/src/prd.rs, when plan generation fails (all retries exhausted),
+print the raw agent output to stderr so the user can see what the model actually produced.
+
+Cap at 2000 chars. Use eprintln with clear framing:
+  eprintln!("--- Raw model output (first 2000 chars) ---");
+  eprintln!("{}", &output[..output.len().min(2000)]);
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 10
+files = ["crates/roko-cli/src/prd.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/prd.rs", lines = "1160-1180", why = "Where failure is reported" },
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'Raw model output\\|raw.*output' crates/roko-cli/src/prd.rs"
+fail_msg = "Must show raw output on failure"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 06: Error Recovery ──────────────────────────────────────────────────
+
+[[task]]
+id = "M04"
+title = "Classify agent crash from output text"
+description = """
+Create a function classify_agent_crash(stderr: &str) -> AgentCrashClass in
+crates/roko-cli/src/agent_exec.rs (or appropriate location).
+
+AgentCrashClass enum:
+- AuthenticationError (contains "401", "invalid_api_key", "Missing API key")
+- RateLimited (contains "429", "rate_limit")
+- ContextOverflow (contains "context_length_exceeded", "too many tokens")
+- ModelNotFound (contains "model_not_found", "does not exist")
+- NetworkError (contains "connection", "timeout", "ECONNREFUSED")
+- Unknown
+
+Each variant should have:
+- fn is_retriable(&self) -> bool
+- fn recovery_hint(&self) -> &str
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 60
+files = ["crates/roko-cli/src/agent_exec.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/agent_exec.rs", lines = "1-50", why = "Existing structure" },
+]
+anti_patterns = [
+    "Do NOT use regex — simple contains() checks are sufficient and faster",
+    "Do NOT make this async — it's a pure string analysis function",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'AgentCrashClass\\|classify_agent_crash' crates/roko-cli/src/agent_exec.rs"
+fail_msg = "Must define AgentCrashClass"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 08: Model Discovery Ergonomics ──────────────────────────────────────
+
+[[task]]
+id = "M05"
+title = "Add fuzzy model suggestions to UnknownModel error"
+description = """
+In crates/roko-cli/src/model_selection.rs, when returning an UnknownModel error,
+compute suggestions using simple string similarity (Jaro-Winkler or even just
+common prefix + contains matching).
+
+Search both config.models.keys() and builtin aliases.
+Show top 3 suggestions in the error message:
+  "Unknown model 'opsu'. Did you mean one of: opus, o3, sonnet?"
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-cli/src/model_selection.rs"]
+role = "implementer"
+depends_on = ["H07"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/model_selection.rs", lines = "115-135", why = "Where UnknownModel error is returned" },
+    { path = "crates/roko-cli/src/model_selection.rs", lines = "355-370", why = "Another UnknownModel site" },
+]
+anti_patterns = [
+    "Do NOT add external crate dependency for string similarity — implement inline",
+    "Do NOT show more than 5 suggestions",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'Did you mean\\|suggest' crates/roko-cli/src/model_selection.rs"
+fail_msg = "Must show suggestions in error"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "M06"
+title = "Add roko models list command"
+description = """
+Add a 'models list' subcommand (or top-level 'models') that shows:
+- All configured models from roko.toml (with provider, slug, key status)
+- Builtin models available without config
+- Current default model (highlighted)
+- Which models have working API keys vs missing
+
+Format as a clean table. Include --names-only flag for shell completion scripts.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 80
+files = ["crates/roko-cli/src/commands/config_cmd.rs", "crates/roko-cli/src/main.rs"]
+role = "implementer"
+depends_on = ["H07"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/commands/config_cmd.rs", lines = "1-50", why = "Existing config subcommands" },
+    { path = "crates/roko-cli/src/main.rs", lines = "1-80", why = "Command registration" },
+]
+anti_patterns = [
+    "Do NOT require --verbose for basic info — show everything by default",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'models.*list\\|ModelsList' crates/roko-cli/src/commands/config_cmd.rs"
+fail_msg = "models list command not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 03: CLI Noise ────────────────────────────────────────────────────────
+
+[[task]]
+id = "M07"
+title = "Only warn about the provider being used, not all providers"
+description = """
+Find where provider availability warnings are emitted during config loading / model
+resolution. Change the logic to only warn about the SELECTED provider, not iterate
+over all configured providers.
+
+Currently every roko command prints warnings like:
+  "warn: provider 'ollama' not reachable"
+  "warn: provider 'gemini' missing API key"
+
+These should only appear if the command actually tries to USE that provider.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 30
+files = ["crates/roko-cli/src/model_selection.rs", "crates/roko-core/src/config/schema.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/model_selection.rs", lines = "1-50", why = "Find warning emissions" },
+    { path = "crates/roko-core/src/config/schema.rs", lines = "270-310", why = "Config loading warnings" },
+]
+anti_patterns = [
+    "Do NOT suppress ALL warnings — just suppress ones for unused providers",
+    "Do NOT change the warning for the selected provider — keep it loud",
+]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task.verify]]
+phase = "structural"
+command = "cargo check -p roko-core 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 11: Context Sources ─────────────────────────────────────────────────
+
+[[task]]
+id = "M08"
+title = "Add --context flag to roko plan generate and roko do"
+description = """
+Add a --context <path> flag (repeatable) to both plan generate and do commands.
+
+When provided, load files from the paths (supporting glob patterns and directory
+recursion) and include them in the plan generation prompt as:
+  <file path="relative/path">content</file>
+
+Implement a load_context_files(paths, budget, workdir) helper that:
+- Walks directories recursively (skip target/, node_modules/, .git/)
+- Applies glob patterns
+- Respects a token budget (default 50000 chars)
+- Prioritizes shorter/more relevant files
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 100
+files = ["crates/roko-cli/src/commands/plan.rs", "crates/roko-cli/src/commands/do_cmd.rs", "crates/roko-cli/src/context_loader.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/commands/plan.rs", lines = "1-50", why = "Plan command args" },
+    { path = "crates/roko-cli/src/commands/do_cmd.rs", lines = "1-50", why = "Do command args" },
+]
+anti_patterns = [
+    "Do NOT load binary files — skip by extension",
+    "Do NOT exceed the budget — truncate with a note about what was skipped",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'context' crates/roko-cli/src/commands/plan.rs && grep -q 'context' crates/roko-cli/src/commands/do_cmd.rs"
+fail_msg = "Must add --context to both commands"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 10: Terminal Output ─────────────────────────────────────────────────
+
+[[task]]
+id = "M09"
+title = "Wire TTY detection into sink selection"
+description = """
+In crates/roko-cli/src/commands/do_cmd.rs (~line 558) and plan.rs (~line 542),
+call should_use_inline() before constructing the output sink.
+
+If TTY: use StderrSink (ratatui-based, pretty)
+If not TTY (piped): use FormattedStderrSink (plain text, no raw mode)
+
+This prevents raw-mode terminal corruption when output is piped or redirected.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 15
+files = ["crates/roko-cli/src/commands/do_cmd.rs", "crates/roko-cli/src/commands/plan.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/inline/terminal.rs", lines = "225-235", why = "should_use_inline function" },
+    { path = "crates/roko-cli/src/commands/do_cmd.rs", lines = "550-570", why = "Sink construction" },
+]
+anti_patterns = [
+    "Do NOT change behavior when TTY is detected — only change the no-TTY path",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'should_use_inline\\|is_terminal\\|isatty' crates/roko-cli/src/commands/do_cmd.rs"
+fail_msg = "Must check TTY in do_cmd"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 04: Onboarding ─────────────────────────────────────────────────────
+
+[[task]]
+id = "M10"
+title = "Add provider_usable check to roko doctor"
+description = """
+In crates/roko-cli/src/doctor.rs, add a new check:
+
+  provider_usable: Uses detect_auth_from_config() from auth_detect.rs.
+  Pass if any provider has a working auth method.
+  Fail with fix: "Set an API key. Example: export ANTHROPIC_API_KEY=sk-..."
+
+Also add default_model_configured check:
+  Pass if config.agent.default_model is non-empty and exists in models table (or builtin).
+  Fail with fix: "Set default_model in roko.toml [agent] section"
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-cli/src/doctor.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/doctor.rs", lines = "1-60", why = "Existing check structure" },
+    { path = "crates/roko-cli/src/auth_detect.rs", lines = "1-40", why = "Auth detection API" },
+]
+anti_patterns = [
+    "Do NOT fail loudly if no .roko/ exists — doctor should still work in bare directories",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'provider_usable\\|detect_auth' crates/roko-cli/src/doctor.rs"
+fail_msg = "Must add provider check to doctor"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "M11"
+title = "Create roko setup interactive wizard"
+description = """
+Create crates/roko-cli/src/commands/setup.rs implementing an interactive setup:
+
+1. Call detect_auth_from_env() to find available providers
+2. If NeedsSetup: prompt for API key (or show instructions)
+3. Auto-select default model based on available providers
+4. Run roko init if .roko/ doesn't exist
+5. Run roko doctor to verify
+6. Print clear "next steps" message
+
+Non-interactive mode (--yes): skip prompts, use first available provider.
+"""
+status = "ready"
+tier = "integrative"
+model_hint = "claude-opus-4-6"
+max_loc = 120
+files = ["crates/roko-cli/src/commands/setup.rs", "crates/roko-cli/src/commands/mod.rs", "crates/roko-cli/src/main.rs"]
+role = "implementer"
+depends_on = ["M10"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/auth_detect.rs", why = "Auth detection to reuse" },
+    { path = "crates/roko-cli/src/commands/init.rs", lines = "1-50", why = "Existing init to call" },
+]
+anti_patterns = [
+    "Do NOT store API keys in config files — instruct user to use env vars",
+    "Do NOT require all questions answered — each step should be optional/skippable",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'Setup\\|setup' crates/roko-cli/src/main.rs"
+fail_msg = "Setup command not registered"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 11: ACP Slash Commands ──────────────────────────────────────────────
+
+[[task]]
+id = "M12"
+title = "Add /note slash command to ACP"
+description = """
+In the ACP slash command registry (session.rs build_slash_commands), add a /note
+command that appends text to .roko/notes/ (same as CLI roko note).
+
+In bridge_events.rs run_slash_command match block, add:
+  "note" => vec!["note".into(), args.into()]
+
+This enables Zed users to capture ideas without leaving the editor.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 10
+files = ["crates/roko-acp/src/session.rs", "crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["H10"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/session.rs", lines = "1370-1420", why = "Slash command registration" },
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "2726-2730", why = "Command dispatch match" },
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q '\"note\"' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "note slash command not registered"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "M13"
+title = "Add /models slash command to ACP"
+description = """
+Add a /models slash command that lists available models with their status.
+This runs `roko config models list` and streams the output to Zed.
+
+In session.rs, register the command.
+In bridge_events.rs, map "models" => vec!["config".into(), "models".into(), "list".into()]
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 10
+files = ["crates/roko-acp/src/session.rs", "crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["M06"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/session.rs", lines = "1370-1420", why = "Slash command registration" },
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q '\"models\"' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "models slash command not registered"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "M14"
+title = "Add /do slash command to ACP"
+description = """
+Add a /do slash command that runs roko do with the user's prompt + model:
+  "do" => vec!["do".into(), "--model".into(), model_key.clone(), args.into()]
+
+This enables: /do "add authentication to the API" directly in Zed.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 10
+files = ["crates/roko-acp/src/session.rs", "crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["C02"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "2726-2740", why = "Existing command dispatch" },
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q '\"do\"' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "do slash command not registered"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 11: Pinned Context in ACP ──────────────────────────────────────────
+
+[[task]]
+id = "M15"
+title = "Add pinned_context field to ACP session state"
+description = """
+In crates/roko-acp/src/session.rs, add a pinned_context: Vec<PinnedFile> field to
+the session state. PinnedFile has: uri, content, added_at.
+
+Pinned files are injected into every turn's system prompt (after the base prompt
+but before conversation history).
+
+Add methods: pin_file(uri, content), unpin_file(uri), list_pinned().
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-acp/src/session.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/session.rs", lines = "1-80", why = "Session struct definition" },
+    { path = "crates/roko-acp/src/session.rs", lines = "480-520", why = "System prompt building" },
+]
+anti_patterns = [
+    "Do NOT persist pinned context to disk — it's session-scoped only",
+    "Do NOT exceed 32KB per pinned file — truncate",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pinned_context\\|PinnedFile' crates/roko-acp/src/session.rs"
+fail_msg = "pinned_context not added"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOW PRIORITY — Nice to have, polish
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Doc 04: Onboarding Polish ───────────────────────────────────────────────
+
+[[task]]
+id = "L01"
+title = "Print next-step hints after successful commands"
+description = """
+After key commands complete successfully (when stdout is a TTY), print a dim hint:
+
+- After roko init: "Next: roko setup (configure providers) or roko develop 'prompt'"
+- After roko prd idea: "Next: roko develop 'your idea' or roko prd draft new <slug>"
+- After roko prd plan: "Next: roko plan run plans/<slug>/"
+- After roko plan run: "Done! Review changes with: git diff"
+
+Use dim ANSI formatting. Only show when isatty(stdout).
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 30
+files = ["crates/roko-cli/src/commands/util.rs", "crates/roko-cli/src/commands/prd.rs", "crates/roko-cli/src/commands/plan.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/commands/util.rs", lines = "1-30", why = "cmd_init function" },
+]
+anti_patterns = [
+    "Do NOT print hints when piped (not a TTY)",
+    "Do NOT make hints loud — use dim ANSI escape",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'Next:\\|hint\\|next_step' crates/roko-cli/src/commands/util.rs"
+fail_msg = "Must print next-step hint after init"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 03: CLI Noise Polish ────────────────────────────────────────────────
+
+[[task]]
+id = "L02"
+title = "Move model/source debug line to --verbose only"
+description = """
+Find where model selection prints the info line like:
+  "model: claude-sonnet-4-6 via anthropic (source: default_model)"
+
+Move this behind a --verbose / ROKO_VERBOSE=1 check. It's useful for debugging
+but noise for normal usage.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 10
+files = ["crates/roko-cli/src/model_selection.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/model_selection.rs", lines = "80-130", why = "Where model info is printed" },
+]
+anti_patterns = [
+    "Do NOT remove the message entirely — move behind verbose check",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'verbose\\|ROKO_VERBOSE\\|tracing::debug' crates/roko-cli/src/model_selection.rs"
+fail_msg = "Model line should be behind verbose/debug"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 15: Bare Mode Improvements ─────────────────────────────────────────
+
+[[task]]
+id = "L03"
+title = "Auto-detect bare mode from workspace state"
+description = """
+In crates/roko-acp/src/session.rs, instead of reading bare_mode from config, auto-detect:
+- If .roko/ directory exists in workdir -> full mode
+- If no .roko/ -> bare mode (limited commands appropriate for non-roko projects)
+
+Keep the config flag as an override (explicit bare_mode=true/false overrides auto-detect).
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 15
+files = ["crates/roko-acp/src/session.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/session.rs", lines = "1355-1380", why = "Where bare_mode is read" },
+]
+anti_patterns = [
+    "Do NOT remove the config override — it should still work for explicit opt-in/out",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q '.roko.*exists\\|is_dir\\|auto.*detect' crates/roko-acp/src/session.rs"
+fail_msg = "Must auto-detect from .roko/ presence"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 16: Future-proof ContentBlock ───────────────────────────────────────
+
+[[task]]
+id = "L04"
+title = "Add Unknown catch-all variant to ContentBlock enum"
+description = """
+In crates/roko-acp/src/types.rs, add a catch-all variant to ContentBlock:
+
+  #[serde(other)]
+  Unknown
+
+This prevents future ACP spec additions (like 'audio') from crashing deserialization.
+All match sites should handle Unknown by logging a debug warning and skipping.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 15
+files = ["crates/roko-acp/src/types.rs", "crates/roko-acp/src/bridge_events.rs", "crates/roko-acp/src/event_forward.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/types.rs", lines = "445-470", why = "ContentBlock enum" },
+]
+anti_patterns = [
+    "Do NOT panic or error on Unknown — just skip with debug log",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'Unknown\\|other' crates/roko-acp/src/types.rs"
+fail_msg = "Must add Unknown variant"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 09: Deprecation Hints ──────────────────────────────────────────────
+
+[[task]]
+id = "L05"
+title = "Add deprecation hints for old command names"
+description = """
+When users run deprecated commands, show a hint (once per week, stored in
+.roko/state/hints.json with timestamps):
+
+- roko run -> "hint: roko run is now roko do. The old command still works."
+- roko prd idea -> "hint: roko prd idea is now roko note. The old command still works."
+
+Implement a show_deprecation_hint(old, new, hints_path) helper.
+Only show if last_shown was > 7 days ago or never.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-cli/src/hints.rs", "crates/roko-cli/src/lib.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/lib.rs", lines = "1-30", why = "Module declarations" },
+]
+anti_patterns = [
+    "Do NOT break old commands — they must still work",
+    "Do NOT show hints when not a TTY",
+    "Do NOT show hints when --quiet is set",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'deprecation_hint\\|show_hint' crates/roko-cli/src/hints.rs"
+fail_msg = "Hints module not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 10: CLICOLOR Support ───────────────────────────────────────────────
+
+[[task]]
+id = "L06"
+title = "Add CLICOLOR env var support to should_use_inline"
+description = """
+In crates/roko-cli/src/inline/terminal.rs should_use_inline(), add checks:
+- CLICOLOR=0 -> return false (no color/fancy output)
+- CLICOLOR_FORCE=1 -> return true (force fancy even when not TTY)
+- NO_COLOR set -> return false (standard no-color convention)
+
+These are standard conventions (https://no-color.org/).
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 10
+files = ["crates/roko-cli/src/inline/terminal.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/inline/terminal.rs", lines = "225-240", why = "should_use_inline function" },
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'CLICOLOR\\|NO_COLOR' crates/roko-cli/src/inline/terminal.rs"
+fail_msg = "Must check CLICOLOR/NO_COLOR"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 18: Structured Progress Events ─────────────────────────────────────
+
+[[task]]
+id = "L07"
+title = "Create AcpProgressSink implementing RunOutputSink"
+description = """
+Create a new output sink that emits ROKO_PROGRESS: JSON lines to stdout.
+This runs alongside FormattedStderrSink and enables the ACP layer to parse
+structured progress from CLI subprocess output.
+
+Implement RunOutputSink trait methods:
+- task_started -> ROKO_PROGRESS: {"type":"task_started","task_id":"T1",...}
+- task_completed -> ROKO_PROGRESS: {"type":"task_completed",...}
+- agent_started -> ROKO_PROGRESS: {"type":"agent_started",...}
+- tool_call -> ROKO_PROGRESS: {"type":"tool_call","tool":"Read",...}
+
+Each line is valid JSON prefixed with "ROKO_PROGRESS: ".
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 100
+files = ["crates/roko-cli/src/runner/output_sink.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/runner/output_sink.rs", lines = "1-60", why = "RunOutputSink trait" },
+    { path = "crates/roko-cli/src/runner/output_sink.rs", lines = "400-450", why = "FormattedStderrSink as reference" },
+]
+anti_patterns = [
+    "Do NOT write to stderr — this sink writes to stdout only",
+    "Do NOT include large payloads (file contents) in progress events — just metadata",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'AcpProgressSink\\|ROKO_PROGRESS' crates/roko-cli/src/runner/output_sink.rs"
+fail_msg = "AcpProgressSink not found"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+[[task]]
+id = "L08"
+title = "Parse ROKO_PROGRESS lines in run_slash_command"
+description = """
+In bridge_events.rs run_slash_command(), when reading stdout lines, check for the
+ROKO_PROGRESS: prefix. If found, parse the JSON and convert to CognitiveEvent:
+
+- task_started -> CognitiveEvent::ToolCallStart
+- task_completed -> CognitiveEvent::ToolCallComplete
+- agent_started -> CognitiveEvent::TokenChunk (with formatted text)
+- All other lines -> CognitiveEvent::TokenChunk (as before)
+
+This makes plan execution visible as tool-call cards in Zed.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = ["L07"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "3240-3260", why = "Where stdout lines are processed" },
+]
+anti_patterns = [
+    "Do NOT fail if JSON parsing fails — just pass through as text",
+    "Do NOT accumulate progress events — emit immediately",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'ROKO_PROGRESS' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must parse ROKO_PROGRESS lines"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 12: Prompt History Fix ──────────────────────────────────────────────
+
+[[task]]
+id = "L09"
+title = "Pop user turn from history on dispatch failure"
+description = """
+In bridge_events.rs, when model dispatch fails (CognitiveEvent::Failure), pop the
+last user turn from session history. Currently a failed dispatch pushes the user
+message but no assistant response, causing broken multi-turn history.
+
+  session.history.pop(); // Remove the user turn that failed
+
+This prevents the prompt from being echoed/repeated on the next successful turn.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 5
+files = ["crates/roko-acp/src/bridge_events.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-acp/src/bridge_events.rs", lines = "1080-1100", why = "Where failures are handled" },
+]
+anti_patterns = [
+    "Do NOT clear all history — only pop the last user turn",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'pop\\|remove.*history' crates/roko-acp/src/bridge_events.rs"
+fail_msg = "Must pop failed turn from history"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-acp 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ─── Doc 06: Error Classification in ACP ────────────────────────────────────
+
+[[task]]
+id = "L10"
+title = "Self-heal missing verify fields in generated plans"
+description = """
+In crates/roko-cli/src/prd.rs validate_and_fix_generated_plan(), add auto-fix for
+missing [[task.verify]] entries:
+
+For tasks with role = "implementer" and non-empty files:
+- Add phase = "compile" with command = "cargo check -p <crate>" (infer crate from path)
+- Add phase = "structural" with command that greps for expected function/struct names
+
+For tasks with role = "researcher": no verify needed (skip).
+
+This prevents validation rejecting otherwise-good plans just because the model
+forgot to include verify entries.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 40
+files = ["crates/roko-cli/src/prd.rs"]
+role = "implementer"
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-cli/src/prd.rs", lines = "2070-2120", why = "validate_and_fix_generated_plan" },
+    { path = "crates/roko-cli/src/task_parser.rs", lines = "1129-1160", why = "repair_toml function" },
+]
+anti_patterns = [
+    "Do NOT add verify to researcher/strategist/scribe roles",
+    "Do NOT guess wrong crate names — if path doesn't contain crates/, use workspace check",
+]
+
+[[task.verify]]
+phase = "structural"
+command = "grep -q 'auto.*verify\\|infer.*verify\\|add.*verify' crates/roko-cli/src/prd.rs"
+fail_msg = "Must auto-add verify entries"
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-cli 2>&1 | tail -5"
+fail_msg = "Must compile"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTEGRATION TESTS — Run after implementation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[task]]
+id = "V01"
+title = "Verify full workspace compiles with all changes"
+description = """
+Run cargo check --workspace to verify everything compiles together.
+Fix any cross-crate type mismatches or import errors.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 50
+files = ["Cargo.toml"]
+role = "implementer"
+depends_on = ["C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08", "C09", "C10", "C11", "C12", "H01", "H02", "H03", "H04", "H05", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H13", "H14", "M01", "M02", "M03", "M04", "M05", "M06", "M07", "M08", "M09", "M10", "M11", "M12", "M13", "M14", "M15", "L01", "L02", "L03", "L04", "L05", "L06", "L07", "L08", "L09", "L10"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check --workspace 2>&1 | tail -10"
+fail_msg = "Workspace must compile"
+timeout_ms = 300000
+
+[[task]]
+id = "V02"
+title = "Run clippy on workspace with no warnings"
+description = """
+Run cargo clippy --workspace --no-deps -- -D warnings.
+Fix any new clippy warnings introduced by the changes.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 50
+files = ["Cargo.toml"]
+role = "implementer"
+depends_on = ["V01"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo clippy --workspace --no-deps -- -D warnings 2>&1 | tail -10"
+fail_msg = "No clippy warnings allowed"
+timeout_ms = 300000
+
+[[task]]
+id = "V03"
+title = "Run workspace tests"
+description = """
+Run cargo test --workspace to verify no regressions.
+Fix any failing tests.
+"""
+status = "ready"
+tier = "focused"
+model_hint = "claude-opus-4-6"
+max_loc = 50
+files = ["Cargo.toml"]
+role = "implementer"
+depends_on = ["V02"]
+
+[[task.verify]]
+phase = "test"
+command = "cargo test --workspace 2>&1 | tail -20"
+fail_msg = "All tests must pass"
+timeout_ms = 600000
+
+[[task]]
+id = "V04"
+title = "Build release binary and verify ACP starts"
+description = """
+Build the release binary and verify the ACP server starts without errors:
+  cargo build --release -p roko-cli
+  timeout 5 ./target/release/roko acp --check || true
+
+Verify the binary exists and ACP initialization doesn't crash.
+"""
+status = "ready"
+tier = "mechanical"
+model_hint = "claude-opus-4-6"
+max_loc = 5
+files = ["Cargo.toml"]
+role = "implementer"
+depends_on = ["V03"]
+
+[[task.verify]]
+phase = "integration"
+command = "cargo build --release -p roko-cli 2>&1 | tail -5"
+fail_msg = "Release build must succeed"
+timeout_ms = 600000

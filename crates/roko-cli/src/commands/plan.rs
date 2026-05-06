@@ -276,7 +276,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     .unwrap_or_default()
                     .as_millis();
                 let state_dir = layout.state_dir();
-                for filename in &["executor.json", "orchestrator.json", "run-state.json"] {
+                for filename in &["executor.json", "orchestrator.json", "run-state.json", "state-snapshot.json"] {
                     let state_path = state_dir.join(filename);
                     if state_path.exists() {
                         let backup_path = state_path.with_extension(format!("json.bak.{ts}"));

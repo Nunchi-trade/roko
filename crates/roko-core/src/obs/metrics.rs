@@ -867,7 +867,7 @@ mod tests {
     fn render_prometheus_appends_registered_metrics() {
         let reg = MetricRegistry::new();
         let labels = LabelSet::from_pairs(&[("gate", "compile"), ("verdict", "pass")]);
-        let counter = reg.register_counter("roko_gate_verdicts_total", labels);
+        let counter = reg.register_counter("roko_gate_verdicts_total", "Total gate verdicts", labels);
         counter.inc_by(3);
 
         let output = reg.render_prometheus();

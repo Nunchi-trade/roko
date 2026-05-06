@@ -269,18 +269,41 @@ fn select_candidate(
                 selection_source: SelectionSource::CascadeRouter,
             });
         }
-        return Ok(ModelCandidate {
-            source: SelectionSource::CascadeRouter,
-            model: model.to_string(),
-        });
+        if config.provider_available_for_model_key(model) {
+            return Ok(ModelCandidate {
+                source: SelectionSource::CascadeRouter,
+                model: model.to_string(),
+            });
+        }
+        tracing::warn!(
+            model,
+            "cascade router selected model whose provider is unavailable; falling through"
+        );
     }
 
     let default_model = config.agent.default_model.trim();
     if !default_model.is_empty() {
-        return Ok(ModelCandidate {
-            source: SelectionSource::ProjectDefault,
-            model: default_model.to_string(),
-        });
+        if config.provider_available_for_model_key(default_model) {
+            return Ok(ModelCandidate {
+                source: SelectionSource::ProjectDefault,
+                model: default_model.to_string(),
+            });
+        }
+        tracing::warn!(
+            model = default_model,
+            "default_model provider is unavailable; searching for first available model"
+        );
+        // Find the first available model from config.models.
+        if let Some(available) = config
+            .models
+            .keys()
+            .find(|k| config.provider_available_for_model_key(k))
+        {
+            return Ok(ModelCandidate {
+                source: SelectionSource::ProjectDefault,
+                model: available.clone(),
+            });
+        }
     }
 
     Ok(ModelCandidate {

@@ -1040,7 +1040,17 @@ where
         let mut full_system = system_prompt.clone();
         full_system = append_context(&full_system, &file_context);
         full_system = append_context(&full_system, &knowledge_context);
-        session.build_messages_array(&full_system, &prompt_text)
+        let mut msgs = session.build_messages_array(&full_system, &prompt_text);
+        // If the prompt contains Image blocks, replace the last user message's
+        // content with an OpenAI multi-part content array (text + image_url).
+        if let Some(parts) = build_openai_content_parts(&params.prompt) {
+            if let Some(last) = msgs.last_mut() {
+                if last.get("role").and_then(|v| v.as_str()) == Some("user") {
+                    last["content"] = serde_json::Value::Array(parts);
+                }
+            }
+        }
+        msgs
     } else {
         Vec::new()
     };
@@ -1148,7 +1158,7 @@ where
                 &session_id,
                 prompt_text.trim(),
                 &workdir,
-                resolved.slug.clone(),
+                model_key.clone(),
                 cancel_token,
                 event_sender,
                 shared_run,
@@ -1558,11 +1568,32 @@ fn model_call_chat_message_from_acp(message: &serde_json::Value) -> Option<ChatM
         "user" => MessageRole::User,
         _ => return None,
     };
-    let content = message
-        .get("content")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let content_val = message.get("content")?;
+    let content = if let Some(s) = content_val.as_str() {
+        s.to_string()
+    } else if content_val.is_array() {
+        // Multi-part content (e.g. text + image_url). Extract text parts for
+        // the string-only ChatMessage; the original JSON messages array
+        // preserves the full structure for backends that consume it directly.
+        content_val
+            .as_array()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| {
+                        if p.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            p.get("text").and_then(|t| t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     Some(ChatMessage { role, content })
 }
 
@@ -2714,7 +2745,7 @@ async fn run_slash_command(
     session_id: &str,
     raw_input: &str,
     workdir: &Path,
-    model_slug: String,
+    model_key: String,
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
     shared_run: crate::session::SharedWorkflowRun,
@@ -3020,7 +3051,7 @@ Use the Workflow dropdown in the status bar to select, or:
                         clippy_enabled: true,
                         tests_enabled: true,
                         review_strictness: "standard".to_string(),
-                        model_slug: model_slug.clone(),
+                        model_slug: model_key.clone(),
                     },
                     cancel_token,
                     event_sender,
@@ -3063,7 +3094,7 @@ Use the Workflow dropdown in the status bar to select, or:
                         clippy_enabled: true,
                         tests_enabled: true,
                         review_strictness: "standard".to_string(),
-                        model_slug: model_slug.clone(),
+                        model_slug: model_key.clone(),
                     },
                     cancel_token,
                     event_sender,
@@ -3468,7 +3499,54 @@ fn dispatch_failure_update(message: String) -> SessionUpdate {
     }
 }
 
+/// Pattern-match known error strings and return an actionable user-facing message.
+/// The original error is always appended so nothing is suppressed.
+fn format_acp_error_for_user(error: &str) -> String {
+    // Missing API key – extract the env var name and tell the user how to set it.
+    if let Some(rest) = error
+        .strip_prefix("Missing API key: env var ")
+        .or_else(|| error.strip_prefix("missing API key: env var "))
+    {
+        let var = rest.split_whitespace().next().unwrap_or(rest);
+        return format!(
+            "Set {var} in your environment. Run: export {var}=your-key\n\n(Original error: {error})"
+        );
+    }
+
+    // OpenAI-compat models that reject max_tokens in favour of max_completion_tokens.
+    if error.contains("max_tokens is not supported") {
+        return format!(
+            "This model needs use_max_completion_tokens. Auto-fixing...\n\n(Original error: {error})"
+        );
+    }
+
+    // Model not found / not configured.
+    if error.contains("model not found") || error.contains("model_not_found") {
+        return format!(
+            "Model isn't configured or doesn't exist. Check your roko.toml [models] section.\n\n(Original error: {error})"
+        );
+    }
+
+    // Rate limiting (HTTP 429 or explicit rate_limit error code).
+    if error.contains("rate_limit") || error.contains("429") {
+        return format!(
+            "Rate limited. Waiting 30s before retry...\n\n(Original error: {error})"
+        );
+    }
+
+    // Context length exceeded.
+    if error.contains("context_length_exceeded") || error.contains("maximum context length") {
+        return format!(
+            "Prompt too long for this model. Consider truncating or switching to a model with a larger context window.\n\n(Original error: {error})"
+        );
+    }
+
+    // No pattern matched – return as-is.
+    error.to_string()
+}
+
 async fn emit_dispatch_failure(event_sender: &mpsc::Sender<CognitiveEvent>, message: String) {
+    let message = format_acp_error_for_user(&message);
     send_cognitive_event(event_sender, CognitiveEvent::Failure { message }).await;
 }
 
@@ -3504,12 +3582,41 @@ fn extract_prompt_text(prompt: &[ContentBlock]) -> String {
         .map(|block| match block {
             ContentBlock::Text { text } => text.clone(),
             ContentBlock::Resource { .. } => String::new(),
+            ContentBlock::Image { .. } => String::new(),
             ContentBlock::Diff { path, diff, .. } => {
                 format!("diff {path}:\n{}", diff.as_deref().unwrap_or(""))
             }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Builds an OpenAI-compatible content array from prompt blocks, converting
+/// `Image` blocks into `image_url` content parts with inline data URIs.
+/// Returns `None` when no images are present (caller can use a plain string).
+fn build_openai_content_parts(prompt: &[ContentBlock]) -> Option<Vec<serde_json::Value>> {
+    let has_image = prompt
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }));
+    if !has_image {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for block in prompt {
+        match block {
+            ContentBlock::Text { text } if !text.is_empty() => {
+                parts.push(serde_json::json!({"type": "text", "text": text}));
+            }
+            ContentBlock::Image { data, mime_type } => {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{mime_type};base64,{data}") }
+                }));
+            }
+            _ => {}
+        }
+    }
+    Some(parts)
 }
 
 /// Extracts `file://` URIs from Resource blocks in the prompt.
@@ -3600,7 +3707,7 @@ pub(crate) async fn resolve_context_items(prompt: &[ContentBlock], workdir: &Pat
                     }
                 }
             }
-            ContentBlock::Diff { .. } => {}
+            ContentBlock::Image { .. } | ContentBlock::Diff { .. } => {}
         }
     }
 
