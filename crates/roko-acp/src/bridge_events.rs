@@ -59,6 +59,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+use crate::builtin_tools::acp_builtin_tools;
 use crate::event_forward::AcpEventForwarder;
 use crate::knowledge::{DispatchKnowledge, append_context, query_dispatch_knowledge};
 use crate::runner::run_with_workflow_engine;
@@ -1267,6 +1268,7 @@ where
     let max_iterations = session.config_state.max_iterations;
     let review_strictness = session.config_state.review_strictness.clone();
     let session_mcp_servers = session.mcp_servers.clone();
+    let session_tools_enabled = session.tools_enabled;
     // Effort level from the IDE dropdown (low/medium/high/max). Passed to
     // config_with_session_effort() at dispatch time so the provider backend
     // sees it as `agent.default_effort`. See that function's doc comment for
@@ -1447,6 +1449,7 @@ where
                     &resolved.slug,
                     &roko_config,
                     &session_effort,
+                    session_tools_enabled,
                     cancel_token,
                     event_sender,
                 )
@@ -1463,6 +1466,7 @@ where
                     &workdir,
                     &session_mcp_servers,
                     &session_effort,
+                    session_tools_enabled,
                     cancel_token,
                     event_sender,
                 )
@@ -1665,6 +1669,7 @@ async fn run_anthropic_cognitive_task(
     slug: &str,
     roko_config: &RokoConfig,
     effort: &str,
+    tools_enabled: bool,
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
@@ -1694,7 +1699,8 @@ async fn run_anthropic_cognitive_task(
     }
 
     let caller = ModelCallService::new(model_key.to_string()).with_config(model_call_config);
-    let request = model_call_request_from_acp_messages(model_key, messages);
+    let tools = tools_enabled.then(acp_builtin_tools).unwrap_or_default();
+    let request = model_call_request_from_acp_messages(model_key, messages, tools);
     stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)
         .await
 }
@@ -1739,6 +1745,7 @@ fn anthropic_model_call_config(
 fn model_call_request_from_acp_messages(
     model_key: &str,
     messages: &[serde_json::Value],
+    tools: Vec<ToolDef>,
 ) -> ModelCallRequest {
     ModelCallRequest {
         model: model_key.to_string(),
@@ -1747,6 +1754,7 @@ fn model_call_request_from_acp_messages(
             .filter_map(model_call_chat_message_from_acp)
             .collect(),
         caller: Some("acp".to_string()),
+        tools,
         ..Default::default()
     }
 }
@@ -1960,6 +1968,7 @@ async fn run_openai_compat_cognitive_task(
     workdir: &Path,
     mcp_servers: &[crate::types::McpServerConfig],
     effort: &str,
+    tools_enabled: bool,
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
@@ -1996,7 +2005,8 @@ async fn run_openai_compat_cognitive_task(
     }
 
     let caller = ModelCallService::new(model_key.to_string()).with_config(roko_config.clone());
-    let request = model_call_request_from_acp_messages(model_key, messages);
+    let tools = tools_enabled.then(acp_builtin_tools).unwrap_or_default();
+    let request = model_call_request_from_acp_messages(model_key, messages, tools);
     stream_model_call_to_cognitive_events(session_id, &caller, request, cancel_token, event_sender)
         .await
 }
@@ -2978,7 +2988,13 @@ async fn run_slash_command(
         // ── Research (foraging phase) ──
         "research" => {
             require_args!("research", "<topic>");
-            vec!["research".into(), "topic".into(), "--model".into(), model_key.clone(), args.into()]
+            vec![
+                "research".into(),
+                "topic".into(),
+                "--model".into(),
+                model_key.clone(),
+                args.into(),
+            ]
         }
         "search" => {
             require_args!("search", "<query>");
@@ -2986,7 +3002,13 @@ async fn run_slash_command(
         }
         "enhance-prd" => {
             require_args!("enhance-prd", "<slug>");
-            vec!["research".into(), "enhance-prd".into(), "--model".into(), model_key.clone(), args.into()]
+            vec![
+                "research".into(),
+                "enhance-prd".into(),
+                "--model".into(),
+                model_key.clone(),
+                args.into(),
+            ]
         }
 
         // ── Specification (PRD lifecycle) ──
@@ -2996,13 +3018,26 @@ async fn run_slash_command(
         }
         "prd-draft" => {
             require_args!("prd-draft", "<slug>");
-            vec!["prd".into(), "draft".into(), "new".into(), "--model".into(), model_key.clone(), args.into()]
+            vec![
+                "prd".into(),
+                "draft".into(),
+                "new".into(),
+                "--model".into(),
+                model_key.clone(),
+                args.into(),
+            ]
         }
         "prd-list" => vec!["prd".into(), "list".into()],
         "prd-status" => vec!["prd".into(), "status".into()],
         "prd-plan" => {
             require_args!("prd-plan", "<slug>");
-            vec!["prd".into(), "plan".into(), "--model".into(), model_key.clone(), args.into()]
+            vec![
+                "prd".into(),
+                "plan".into(),
+                "--model".into(),
+                model_key.clone(),
+                args.into(),
+            ]
         }
         "prd-consolidate" => vec!["prd".into(), "consolidate".into()],
 
@@ -3010,11 +3045,23 @@ async fn run_slash_command(
         "plan-list" => vec!["plan".into(), "list".into()],
         "plan-generate" => {
             require_args!("plan-generate", "<description>");
-            vec!["plan".into(), "generate".into(), "--model".into(), model_key.clone(), args.into()]
+            vec![
+                "plan".into(),
+                "generate".into(),
+                "--model".into(),
+                model_key.clone(),
+                args.into(),
+            ]
         }
         "plan-regenerate" => {
             require_args!("plan-regenerate", "<description>");
-            vec!["plan".into(), "regenerate".into(), "--model".into(), model_key.clone(), args.into()]
+            vec![
+                "plan".into(),
+                "regenerate".into(),
+                "--model".into(),
+                model_key.clone(),
+                args.into(),
+            ]
         }
         "plan-validate" => {
             let dir = if args.is_empty() { "plans/" } else { args };
@@ -3028,12 +3075,24 @@ async fn run_slash_command(
         // ── Implementation & Execution ──
         "run" => {
             require_args!("run", "<prompt>");
-            vec!["run".into(), "--model".into(), model_key.clone(), args.into()]
+            vec![
+                "run".into(),
+                "--model".into(),
+                model_key.clone(),
+                args.into(),
+            ]
         }
         "agents" => vec!["agent".into(), "list".into()],
         "agent-chat" => {
             require_args!("agent-chat", "<agent name>");
-            vec!["agent".into(), "chat".into(), "--agent".into(), args.into(), "--model".into(), model_key.clone()]
+            vec![
+                "agent".into(),
+                "chat".into(),
+                "--agent".into(),
+                args.into(),
+                "--model".into(),
+                model_key.clone(),
+            ]
         }
 
         // ── Verification & Gates ──
@@ -4171,6 +4230,7 @@ mod tests {
                 json!({"role": "assistant", "content": "hi"}),
                 json!({"role": "unknown", "content": "skip"}),
             ],
+            Vec::new(),
         );
 
         assert_eq!(request.model, "claude-sonnet-4-6");
