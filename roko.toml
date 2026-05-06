@@ -1074,10 +1074,11 @@ epoch_duration_secs = 60
 min_submissions = 2
 outlier_sigma = 3.0
 
+# ── Lending sources (4) ────────────────────────────────────
 [[isfr.sources]]
 name = "aave-v3-usdc"
 kind = "aave_v3"
-weight = 0.30
+weight = 0.15
 class = "lending"
 rpc_url = "http://127.0.0.1:8545"
 pool_address = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
@@ -1087,7 +1088,7 @@ jitter_bps = 15
 [[isfr.sources]]
 name = "compound-v3-usdc"
 kind = "compound_v3"
-weight = 0.25
+weight = 0.12
 class = "lending"
 rpc_url = "http://127.0.0.1:8545"
 pool_address = "0xc3d688B66703497DAA19211EEdff47f25384cdc3"
@@ -1095,9 +1096,61 @@ rate_bps = 540
 jitter_bps = 12
 
 [[isfr.sources]]
+name = "spark-dai"
+kind = "aave_v3"
+weight = 0.08
+class = "lending"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xC13e21B648A5Ee794902342038FF3aDAB66BE987"
+rate_bps = 580
+jitter_bps = 10
+
+[[isfr.sources]]
+name = "morpho-usdc"
+kind = "aave_v3"
+weight = 0.05
+class = "lending"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
+rate_bps = 710
+jitter_bps = 20
+
+# ── Staking sources (3) ────────────────────────────────────
+[[isfr.sources]]
+name = "lido-steth"
+kind = "eth_staking"
+weight = 0.12
+class = "staking"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+rate_bps = 350
+jitter_bps = 8
+
+[[isfr.sources]]
+name = "rocketpool-reth"
+kind = "eth_staking"
+weight = 0.08
+class = "staking"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xae78736Cd615f374D3085123A210448E74Fc6393"
+rate_bps = 330
+jitter_bps = 6
+
+[[isfr.sources]]
+name = "swell-sweth"
+kind = "eth_staking"
+weight = 0.05
+class = "staking"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xf951E335afb289353dc249e82926178EaC7DEd78"
+rate_bps = 370
+jitter_bps = 10
+
+# ── Structured yield sources (3) ───────────────────────────
+[[isfr.sources]]
 name = "ethena-susde"
 kind = "ethena"
-weight = 0.25
+weight = 0.10
 class = "structured"
 rpc_url = "http://127.0.0.1:8545"
 pool_address = "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
@@ -1105,14 +1158,55 @@ rate_bps = 850
 jitter_bps = 30
 
 [[isfr.sources]]
-name = "lido-steth"
-kind = "eth_staking"
-weight = 0.20
-class = "staking"
+name = "pendle-usde-jun25"
+kind = "ethena"
+weight = 0.05
+class = "structured"
 rpc_url = "http://127.0.0.1:8545"
-pool_address = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
-rate_bps = 350
-jitter_bps = 8
+pool_address = "0x19588F29f9402Bb508007FeADd415c875Ee3f19F"
+rate_bps = 1200
+jitter_bps = 50
+
+[[isfr.sources]]
+name = "yearn-usdc"
+kind = "ethena"
+weight = 0.05
+class = "structured"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0xa354F35829Ae975e850e23e9615b11Da1B3dC4F2"
+rate_bps = 480
+jitter_bps = 15
+
+# ── Funding rate sources (3) ───────────────────────────────
+[[isfr.sources]]
+name = "eth-perp-funding"
+kind = "ethena"
+weight = 0.05
+class = "funding"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0x0000000000000000000000000000000000000001"
+rate_bps = 950
+jitter_bps = 80
+
+[[isfr.sources]]
+name = "btc-perp-funding"
+kind = "ethena"
+weight = 0.05
+class = "funding"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0x0000000000000000000000000000000000000002"
+rate_bps = 780
+jitter_bps = 60
+
+[[isfr.sources]]
+name = "dydx-eth-funding"
+kind = "ethena"
+weight = 0.05
+class = "funding"
+rpc_url = "http://127.0.0.1:8545"
+pool_address = "0x0000000000000000000000000000000000000003"
+rate_bps = 1050
+jitter_bps = 90
 
 [relay]
 url = "ws://127.0.0.1:9011/relay/agents/ws"

@@ -1,4 +1,4 @@
-//! Feed agent framework: 15 background agents that publish structured data
+//! Feed agent framework: 29 background agents that publish structured data
 //! feeds to the relay topic bus and local event bus.
 //!
 //! Each agent implements [`FeedAgent`] and is spawned by [`spawn_all`] during
@@ -6,11 +6,14 @@
 //! SSE bridge streams to the demo-app Feeds dashboard.
 
 mod chain_watcher;
+mod defi;
 mod derivatives;
 mod epoch_tracker;
 mod gas_oracle;
 mod keeper;
+mod market;
 mod monitors;
+mod onchain;
 mod oracle_submitter;
 mod source_scouts;
 
@@ -95,7 +98,7 @@ impl FeedAgentContext {
 }
 
 // ---------------------------------------------------------------------------
-// spawn_all — create and run all 15 feed agents
+// spawn_all — create and run all 29 feed agents
 // ---------------------------------------------------------------------------
 
 /// Spawn all feed agents as background tokio tasks.
@@ -123,6 +126,7 @@ pub fn spawn_all(state: Arc<AppState>) -> Vec<JoinHandle<()>> {
     }
 
     let agents: Vec<Arc<dyn FeedAgent>> = vec![
+        // Original 15 agents
         Arc::new(keeper::IsfrKeeperAgent),
         Arc::new(source_scouts::AaveScoutAgent),
         Arc::new(source_scouts::CompoundScoutAgent),
@@ -138,6 +142,23 @@ pub fn spawn_all(state: Arc<AppState>) -> Vec<JoinHandle<()>> {
         Arc::new(monitors::ConfidenceScorerAgent),
         Arc::new(derivatives::VolatilityWatcherAgent),
         Arc::new(monitors::RelayStatsAgent),
+        // On-chain analytics (5)
+        Arc::new(onchain::BlockSpaceAgent),
+        Arc::new(onchain::TxThroughputAgent),
+        Arc::new(onchain::FeeBurnAgent),
+        Arc::new(onchain::NetworkHealthAgent),
+        Arc::new(onchain::ContractActivityAgent),
+        // DeFi analytics (5)
+        Arc::new(defi::YieldCurveAgent),
+        Arc::new(defi::LiquidationRiskAgent),
+        Arc::new(defi::TvlTrackerAgent),
+        Arc::new(defi::StablecoinPegAgent),
+        Arc::new(defi::MevTrackerAgent),
+        // Market analytics (5)
+        Arc::new(market::CorrelationAgent),
+        Arc::new(market::RegimeClassifierAgent),
+        Arc::new(market::RiskAdjustedAgent),
+        Arc::new(market::SystemHeartbeatAgent),
     ];
 
     // Build catalog snapshot for the /api/feeds/catalog endpoint.

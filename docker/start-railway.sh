@@ -10,7 +10,7 @@ MIRAGE_HOST="${MIRAGE_HOST:-127.0.0.1}"
 MIRAGE_HEALTH_HOST="${MIRAGE_HEALTH_HOST:-127.0.0.1}"
 MIRAGE_PORT="${MIRAGE_PORT:-8545}"
 MIRAGE_CHAIN_ID="${MIRAGE_CHAIN_ID:-31337}"
-MIRAGE_BLOCK_INTERVAL_MS="${MIRAGE_BLOCK_INTERVAL_MS:-1000}"
+MIRAGE_BLOCK_INTERVAL_MS="${MIRAGE_BLOCK_INTERVAL_MS:-50}"
 MIRAGE_SNAPSHOT_INTERVAL_SECS="${MIRAGE_SNAPSHOT_INTERVAL_SECS:-15}"
 
 RELAY_BIND="${ROKO_AGENT_RELAY_BIND:-127.0.0.1:9011}"
@@ -253,26 +253,26 @@ if [ "${ISFR_AGENTS_ENABLED:-1}" != "0" ]; then
   log "spawning ISFR agent fleet (15 agents, 5 roles, serialized)"
 
   ISFR_PROMPTS=(
-    # Lending analysts (3)
-    "lending-aave|Analyze Aave V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Write findings to the knowledge store."
-    "lending-compound|Analyze Compound V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Write findings to the knowledge store."
-    "lending-comparative|Compare lending rates across Aave V3 and Compound V3 on Ethereum mainnet. Identify the best supply and borrow rates for major assets (USDC, USDT, ETH, WBTC). Highlight rate spreads and arbitrage opportunities. Write findings to the knowledge store."
-    # Staking analysts (3)
-    "staking-lido|Analyze Lido stETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, validator count, and total ETH staked. Write findings to the knowledge store."
-    "staking-rocketpool|Analyze Rocket Pool rETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, minipool count, and total ETH staked. Write findings to the knowledge store."
-    "staking-comparative|Compare ETH liquid staking yields across Lido, Rocket Pool, and Coinbase cbETH. Rank by net APR after fees. Assess liquidity depth and redemption times. Write findings to the knowledge store."
-    # Funding rate analysts (3)
-    "funding-eth-perps|Analyze ETH perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Identify funding rate arbitrage. Write findings to the knowledge store."
-    "funding-btc-perps|Analyze BTC perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Identify funding rate arbitrage. Write findings to the knowledge store."
-    "funding-cross-asset|Compare funding rates across ETH, BTC, SOL, and ARB perpetuals. Identify cross-asset funding rate dislocations and basis trade opportunities. Write findings to the knowledge store."
-    # Structured yield analysts (3)
-    "structured-ethena|Analyze Ethena USDe yield: current sUSDe APY, backing composition, delta-neutral strategy health, and insurance fund status. Write findings to the knowledge store."
-    "structured-pendle|Analyze Pendle yield markets: top 5 pools by TVL, current fixed vs variable yields, and implied yield curves. Write findings to the knowledge store."
-    "structured-survey|Survey the top 5 structured yield products by TVL on Ethereum. For each: report current APY, strategy type, risk tier, and TVL. Write findings to the knowledge store."
+    # Lending analysts (3) — covers Aave, Compound, Spark, Morpho
+    "lending-aave|Analyze Aave V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Compare with Spark Protocol DAI rates. Write findings to the knowledge store."
+    "lending-compound|Analyze Compound V3 current lending/borrowing rates on Ethereum mainnet. Report supply APY, borrow APY, and utilization for USDC, USDT, ETH, and WBTC. Include Morpho USDC vault rates for comparison. Write findings to the knowledge store."
+    "lending-comparative|Compare lending rates across Aave V3, Compound V3, Spark Protocol, and Morpho on Ethereum mainnet. Identify the best supply and borrow rates for major assets (USDC, USDT, ETH, WBTC, DAI). Highlight rate spreads, yield curve shape, and arbitrage opportunities across all four protocols. Write findings to the knowledge store."
+    # Staking analysts (3) — covers Lido, Rocket Pool, Swell
+    "staking-lido|Analyze Lido stETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, validator count, and total ETH staked. Compare with Swell swETH emerging yield. Write findings to the knowledge store."
+    "staking-rocketpool|Analyze Rocket Pool rETH staking yield on Ethereum mainnet. Report current APR, 7d/30d averages, minipool count, and total ETH staked. Note commission structure vs Lido. Write findings to the knowledge store."
+    "staking-comparative|Compare ETH liquid staking yields across Lido (stETH), Rocket Pool (rETH), Swell (swETH), and Coinbase (cbETH). Rank by net APR after fees. Assess liquidity depth, redemption times, and decentralization metrics. Write findings to the knowledge store."
+    # Funding rate analysts (3) — covers ETH, BTC, dYdX perps
+    "funding-eth-perps|Analyze ETH perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Identify funding rate arbitrage vs spot lending rates on Aave. Write findings to the knowledge store."
+    "funding-btc-perps|Analyze BTC perpetual funding rates across major venues (Binance, Bybit, dYdX, Hyperliquid). Report current rate, 7d average, and open interest. Compare BTC funding basis with ETH. Write findings to the knowledge store."
+    "funding-cross-asset|Compare funding rates across ETH, BTC, SOL, and ARB perpetuals including dYdX ETH-specific funding. Identify cross-asset funding rate dislocations and basis trade opportunities. Compute the funding-lending spread for each asset. Write findings to the knowledge store."
+    # Structured yield analysts (3) — covers Ethena, Pendle, Yearn
+    "structured-ethena|Analyze Ethena USDe yield: current sUSDe APY, backing composition, delta-neutral strategy health, and insurance fund status. Compare with Yearn USDC vault performance. Write findings to the knowledge store."
+    "structured-pendle|Analyze Pendle yield markets: top 5 pools by TVL, current fixed vs variable yields, and implied yield curves. Focus on USDe June 2025 market dynamics. Write findings to the knowledge store."
+    "structured-survey|Survey structured yield products on Ethereum: Ethena sUSDe, Pendle USDe-Jun25, Yearn USDC vault. For each: report current APY, strategy type, risk tier, TVL, and correlation to base lending rates. Write findings to the knowledge store."
     # Oracle / synthesis agents (3)
-    "oracle-composite|Compute the ISFR composite rate: weighted average of lending rates, staking yields, funding rates, and structured yields. Use knowledge store entries from peer agents. Apply the ISFR weighting formula. Write the composite rate to the knowledge store."
-    "oracle-confidence|Compute confidence intervals for the ISFR composite rate. Analyze variance across data sources, flag stale or outlier readings, and produce a quality score (0-100). Write findings to the knowledge store."
-    "oracle-summary|Produce an executive summary of the current ISFR state. Pull all agent findings from the knowledge store. Include: composite rate, confidence band, top opportunities, risk flags, and data freshness. Write the summary to the knowledge store."
+    "oracle-composite|Compute the ISFR composite rate from 13 sources: weighted average of lending rates (Aave, Compound, Spark, Morpho), staking yields (Lido, Rocket Pool, Swell), funding rates (ETH/BTC/dYdX perps), and structured yields (Ethena, Pendle, Yearn). Apply the ISFR weighting formula. Write the composite rate to the knowledge store."
+    "oracle-confidence|Compute confidence intervals for the ISFR composite rate across all 13 sources. Analyze variance within each rate class, flag stale or outlier readings, weight by source reliability, and produce a quality score (0-100). Write findings to the knowledge store."
+    "oracle-summary|Produce an executive summary of the current ISFR state across all 13 sources and 4 rate classes. Pull all agent findings from the knowledge store. Include: composite rate, per-class breakdown, confidence band, top opportunities, risk flags, data freshness, and market regime assessment. Write the summary to the knowledge store."
   )
 
   # Run agents sequentially in a background subshell so the main loop can
