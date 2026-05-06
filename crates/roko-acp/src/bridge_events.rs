@@ -1988,6 +1988,7 @@ async fn run_openai_compat_cognitive_task(
         return Ok(());
     }
 
+    // MCP tool-loop path (OpenAI-compatible providers with MCP servers).
     if !mcp_servers.is_empty()
         && openai_compat_tool_loop_supported(resolved.provider_kind)
         && run_openai_compat_mcp_tool_loop(
@@ -2004,6 +2005,25 @@ async fn run_openai_compat_cognitive_task(
         return Ok(());
     }
 
+    // Builtin tool-loop path: when tools are enabled and the provider supports
+    // tool calls, run the ToolLoop with ACP builtin tools so the model can
+    // invoke read_file, bash, etc. and receive results in a loop.
+    if tools_enabled
+        && openai_compat_tool_loop_supported(resolved.provider_kind)
+        && run_openai_compat_builtin_tool_loop(
+            session_id,
+            messages,
+            &resolved,
+            workdir,
+            cancel_token.clone(),
+            event_sender.clone(),
+        )
+        .await?
+    {
+        return Ok(());
+    }
+
+    // Fallback: plain streaming with no tool execution loop.
     let caller = ModelCallService::new(model_key.to_string()).with_config(roko_config.clone());
     let tools = tools_enabled.then(acp_builtin_tools).unwrap_or_default();
     let request = model_call_request_from_acp_messages(model_key, messages, tools);
@@ -2215,6 +2235,158 @@ async fn run_openai_compat_mcp_tool_loop(
             )
             .await;
             return Err(anyhow::anyhow!("ACP MCP tool loop failed: {error}").into());
+        }
+    }
+
+    Ok(true)
+}
+
+/// Builtin-tool loop for OpenAI-compatible providers.
+///
+/// Mirrors [`run_openai_compat_mcp_tool_loop`] but wires the 8 ACP builtin tools
+/// (read_file, write_file, edit_file, glob, grep, bash, ls, web_fetch) through the
+/// same [`ToolLoop`] infrastructure. When the model emits `tool_use` blocks the loop
+/// executes them via [`execute_acp_builtin_tool`], appends the results, and re-calls
+/// the model until it produces a text-only response (or hits the 25-iteration cap).
+#[allow(clippy::too_many_arguments)]
+async fn run_openai_compat_builtin_tool_loop(
+    session_id: &str,
+    messages: &[serde_json::Value],
+    resolved: &ResolvedModel,
+    workdir: &Path,
+    cancel_token: CancelToken,
+    event_sender: mpsc::Sender<CognitiveEvent>,
+) -> Result<bool> {
+    let Some(provider) = resolved.provider_config.as_ref() else {
+        debug!(
+            session_id,
+            model_key = %resolved.model_key,
+            "builtin tool loop skipped: no explicit provider config"
+        );
+        return Ok(false);
+    };
+    let Some(model) = resolved.profile.as_ref() else {
+        debug!(
+            session_id,
+            model_key = %resolved.model_key,
+            "builtin tool loop skipped: no explicit model profile"
+        );
+        return Ok(false);
+    };
+
+    // Build builtin tool definitions and handler map.
+    let tools = acp_builtin_tools();
+    if tools.is_empty() {
+        return Ok(false);
+    }
+
+    let mut handlers: HashMap<String, Arc<dyn ToolHandler>> = HashMap::new();
+    for tool in &tools {
+        handlers.insert(
+            tool.name.clone(),
+            Arc::new(AcpBuiltinToolHandler {
+                tool_name: tool.name.clone(),
+                workdir: workdir.to_path_buf(),
+                event_sender: event_sender.clone(),
+            }),
+        );
+    }
+
+    let translator: Arc<dyn Translator> = if provider.kind == ProviderKind::CerebrasApi {
+        Arc::new(StrictOpenAiTranslator)
+    } else {
+        Arc::new(OpenAiTranslator)
+    };
+    let backend = create_openai_compat_backend(provider, model, Arc::new(ReqwestPoster::new()))
+        .map_err(|error| anyhow::anyhow!("create ACP builtin tool-loop backend: {error}"))?;
+    let registry = Arc::new(VecToolRegistry::from_tools(tools.clone()));
+    let resolver: Arc<dyn HandlerResolver> = Arc::new(AcpBuiltinHandlerResolver { handlers });
+    let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
+    let context_limit = usize::try_from(model.context_window).unwrap_or(usize::MAX);
+    let tool_loop = ToolLoop::new(translator, dispatcher, backend)
+        .with_max_iterations(DEFAULT_MAX_TOOL_ITERATIONS)
+        .with_context_token_limit(context_limit);
+
+    let (chunk_sender, chunk_receiver) = mpsc::channel(256);
+    let forwarder = tokio::spawn(forward_tool_loop_stream_chunks(
+        chunk_receiver,
+        event_sender.clone(),
+    ));
+    let tool_context = ToolContext::testing(workdir)
+        .with_cancel_token(Arc::new(AcpToolCancelToken(cancel_token.clone())));
+    let mut tool_context = tool_context;
+    tool_context.capabilities = ToolPermission {
+        read: true,
+        write: true,
+        exec: true,
+        git: true,
+        network: true,
+    };
+
+    let output = tool_loop
+        .run_messages_streaming(messages.to_vec(), &tools, &tool_context, chunk_sender)
+        .await;
+    let _ = forwarder.await;
+
+    let usage = usage_info_from_tool_loop_usage(&output.total_usage);
+    match output.stop_reason {
+        ToolLoopStopReason::Stop => {
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage,
+                },
+            )
+            .await;
+        }
+        ToolLoopStopReason::MaxIterations => {
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::TokenChunk(format!(
+                    "\n[stopped after {} tool rounds because the model kept requesting tools]",
+                    DEFAULT_MAX_TOOL_ITERATIONS
+                )),
+            )
+            .await;
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::MaxTokens,
+                    usage,
+                },
+            )
+            .await;
+        }
+        ToolLoopStopReason::Cancelled => {
+            send_cognitive_event(
+                &event_sender,
+                CognitiveEvent::Complete {
+                    stop_reason: StopReason::Cancelled,
+                    usage,
+                },
+            )
+            .await;
+        }
+        ToolLoopStopReason::BudgetExhausted => {
+            emit_dispatch_failure(
+                &event_sender,
+                "Error: builtin tool loop stopped because the model-call budget was exhausted."
+                    .to_string(),
+            )
+            .await;
+            return Err(anyhow::anyhow!("ACP builtin tool loop budget exhausted").into());
+        }
+        ToolLoopStopReason::BackendError(error) => {
+            // Fall through to the plain streaming path so that providers that
+            // don't fully support streaming tool loops (or mock servers in
+            // tests) still work.
+            warn!(
+                session_id,
+                error = %error,
+                "builtin tool loop backend error, falling through to plain streaming"
+            );
+            return Ok(false);
         }
     }
 
@@ -2534,6 +2706,45 @@ struct AcpToolCancelToken(CancelToken);
 impl roko_core::tool::CancelToken for AcpToolCancelToken {
     fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
+    }
+}
+
+// ── Builtin tool handler adapter ──────────────────────────────────────
+
+/// Wraps [`execute_acp_builtin_tool`] in the [`ToolHandler`] trait so that
+/// the [`ToolLoop`] infrastructure can dispatch builtin tools identically to
+/// MCP tools.
+struct AcpBuiltinToolHandler {
+    tool_name: String,
+    workdir: PathBuf,
+    event_sender: mpsc::Sender<CognitiveEvent>,
+}
+
+#[async_trait]
+impl ToolHandler for AcpBuiltinToolHandler {
+    fn name(&self) -> &str {
+        &self.tool_name
+    }
+
+    async fn execute(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
+        let output = crate::builtin_tools::execute_acp_builtin_tool(
+            &self.tool_name,
+            &call.arguments,
+            &self.workdir,
+            &self.event_sender,
+        )
+        .await;
+        ToolResult::text(output)
+    }
+}
+
+struct AcpBuiltinHandlerResolver {
+    handlers: HashMap<String, Arc<dyn ToolHandler>>,
+}
+
+impl HandlerResolver for AcpBuiltinHandlerResolver {
+    fn resolve(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
+        self.handlers.get(name).cloned()
     }
 }
 
