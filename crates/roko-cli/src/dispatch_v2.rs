@@ -1223,6 +1223,7 @@ fn classify_runtime(
         | ProviderKind::PerplexityApi
         | ProviderKind::GeminiApi
         | ProviderKind::CursorAcp
+        | ProviderKind::CursorCli
         | ProviderKind::CerebrasApi => ProviderRuntime::AgentResultBridge { provider_kind },
         ProviderKind::ClaudeCli => ProviderRuntime::Unsupported(UnsupportedProvider {
             reason: UnsupportedProviderReason::UnsupportedCliProvider,

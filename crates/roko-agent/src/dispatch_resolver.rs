@@ -198,7 +198,7 @@ fn inferred_model_profile(provider_id: &str, resolved: &ResolvedModel) -> ModelP
 
 fn transport_for(provider: &ProviderConfig) -> TransportPlan {
     match provider.kind {
-        ProviderKind::ClaudeCli => TransportPlan::Cli {
+        ProviderKind::ClaudeCli | ProviderKind::CursorCli => TransportPlan::Cli {
             command: provider
                 .command
                 .clone()
@@ -247,7 +247,9 @@ fn http_protocol(kind: ProviderKind) -> &'static str {
         ProviderKind::OpenAiCompat | ProviderKind::PerplexityApi | ProviderKind::CerebrasApi => {
             "chat_completions"
         }
-        ProviderKind::ClaudeCli | ProviderKind::CursorAcp => "unsupported_http",
+        ProviderKind::ClaudeCli | ProviderKind::CursorAcp | ProviderKind::CursorCli => {
+            "unsupported_http"
+        }
     }
 }
 

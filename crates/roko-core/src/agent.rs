@@ -48,6 +48,8 @@ pub enum ProviderKind {
     GeminiApi,
     /// Cerebras Inference API (OpenAI-compatible, ultra-fast inference).
     CerebrasApi,
+    /// Cursor `agent` CLI subprocess (ACP JSON-RPC over stdio).
+    CursorCli,
 }
 
 impl ProviderKind {
@@ -62,6 +64,7 @@ impl ProviderKind {
             Self::PerplexityApi => "perplexity_api",
             Self::GeminiApi => "gemini_api",
             Self::CerebrasApi => "cerebras_api",
+            Self::CursorCli => "cursor_cli",
         }
     }
 
@@ -75,7 +78,7 @@ impl ProviderKind {
         match self {
             Self::AnthropicApi | Self::ClaudeCli => AgentBackend::Claude,
             Self::OpenAiCompat => AgentBackend::OpenAi,
-            Self::CursorAcp => AgentBackend::Cursor,
+            Self::CursorAcp | Self::CursorCli => AgentBackend::Cursor,
             Self::PerplexityApi => AgentBackend::Perplexity,
             Self::GeminiApi => AgentBackend::OpenAi,
             Self::CerebrasApi => AgentBackend::Cerebras,

@@ -67,6 +67,7 @@ pub mod anthropic_api;
 pub mod cerebras;
 pub mod claude_cli;
 pub mod cursor_acp;
+pub mod cursor_cli;
 pub mod openai_compat;
 pub mod openrouter_meta;
 pub mod pre_flight;
@@ -75,6 +76,7 @@ pub use anthropic_api::AnthropicApiAdapter;
 pub use cerebras::CerebrasAdapter;
 pub use claude_cli::ClaudeCliAdapter;
 pub use cursor_acp::CursorAcpAdapter;
+pub use cursor_cli::CursorCliAdapter;
 pub use openai_compat::OpenAiCompatAdapter;
 pub use openrouter_meta::fetch_model_metadata;
 pub use pre_flight::{ProviderReadinessIssue, check_provider_readiness, report_readiness_issues};
@@ -85,6 +87,7 @@ static ANTHROPIC_API_ADAPTER: AnthropicApiAdapter = AnthropicApiAdapter;
 static CEREBRAS_ADAPTER: CerebrasAdapter = CerebrasAdapter;
 static CLAUDE_CLI_ADAPTER: ClaudeCliAdapter = ClaudeCliAdapter;
 static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
+static CURSOR_CLI_ADAPTER: CursorCliAdapter = CursorCliAdapter;
 static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
 static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
@@ -157,6 +160,7 @@ pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         ProviderKind::ClaudeCli => &CLAUDE_CLI_ADAPTER,
         ProviderKind::AnthropicApi => &ANTHROPIC_API_ADAPTER,
         ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
+        ProviderKind::CursorCli => &CURSOR_CLI_ADAPTER,
         ProviderKind::PerplexityApi => &PERPLEXITY_ADAPTER,
         ProviderKind::GeminiApi => &GEMINI_ADAPTER,
         ProviderKind::CerebrasApi => &CEREBRAS_ADAPTER,

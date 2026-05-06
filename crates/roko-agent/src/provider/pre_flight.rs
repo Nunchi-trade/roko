@@ -85,10 +85,16 @@ fn check_single_provider(
                 });
             }
         }
-        ProviderKind::CursorAcp => {
+        ProviderKind::CursorAcp | ProviderKind::CursorCli => {
             // Cursor handles auth/process ownership differently.
             // Only check if an explicit command is configured.
-            if let Some(ref command) = provider.command {
+            let default_cmd = if provider.kind == ProviderKind::CursorCli {
+                Some("agent")
+            } else {
+                None
+            };
+            let command = provider.command.as_deref().or(default_cmd);
+            if let Some(command) = command {
                 if !binary_on_path(command) {
                     issues.push(ProviderReadinessIssue {
                         provider_name: provider_name.to_string(),

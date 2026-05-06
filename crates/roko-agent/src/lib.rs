@@ -50,6 +50,7 @@ pub mod claude_cli_agent;
 pub mod codex_agent;
 pub mod composition;
 pub mod cursor_agent;
+pub mod cursor_cli_agent;
 pub mod dispatch_resolver;
 pub mod dispatcher;
 pub mod error;

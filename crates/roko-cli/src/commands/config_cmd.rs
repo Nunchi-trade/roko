@@ -549,10 +549,12 @@ pub(crate) async fn cmd_provider_test(
                         .1
                 },
             ),
-            ProviderKind::ClaudeCli | ProviderKind::CursorAcp => runtime_selection
-                .as_ref()
-                .filter(|selection| selection.provider_key == provider_name.as_str())
-                .map(|selection| model_profile_for_effective_selection(&config, selection)),
+            ProviderKind::ClaudeCli | ProviderKind::CursorAcp | ProviderKind::CursorCli => {
+                runtime_selection
+                    .as_ref()
+                    .filter(|selection| selection.provider_key == provider_name.as_str())
+                    .map(|selection| model_profile_for_effective_selection(&config, selection))
+            }
         };
         (provider_name, provider, model, None)
     };
@@ -602,7 +604,7 @@ pub(crate) async fn cmd_provider_test(
             })?;
             run_openai_compat_provider_test(&provider_name, provider, model, json).await?
         }
-        ProviderKind::CursorAcp => {
+        ProviderKind::CursorAcp | ProviderKind::CursorCli => {
             run_cursor_provider_test(&provider_name, provider, model.as_ref(), json).await?
         }
         ProviderKind::CerebrasApi => {

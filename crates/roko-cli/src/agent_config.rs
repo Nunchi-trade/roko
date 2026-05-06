@@ -98,7 +98,7 @@ fn provider_api_key_env(kind: ProviderKind) -> Option<String> {
         ProviderKind::PerplexityApi => Some("PERPLEXITY_API_KEY".to_string()),
         ProviderKind::GeminiApi => Some("GEMINI_API_KEY".to_string()),
         ProviderKind::CerebrasApi => Some("CEREBRAS_API_KEY".to_string()),
-        ProviderKind::ClaudeCli | ProviderKind::CursorAcp => None,
+        ProviderKind::ClaudeCli | ProviderKind::CursorAcp | ProviderKind::CursorCli => None,
     }
 }
 

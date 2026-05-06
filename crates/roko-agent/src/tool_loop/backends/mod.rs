@@ -76,7 +76,7 @@ pub fn create_openai_compat_backend(
                 Box::new(SharedHttpPoster { inner: poster }),
             )
         }
-        ProviderKind::ClaudeCli | ProviderKind::CursorAcp => {
+        ProviderKind::ClaudeCli | ProviderKind::CursorAcp | ProviderKind::CursorCli => {
             Err(AgentCreationError::MissingConfig(
                 "CLI/ACP backends don't use LlmBackend — they own the tool loop".into(),
             ))
@@ -177,7 +177,7 @@ pub fn create_tool_loop_backend(
                 Box::new(SharedHttpPoster { inner: poster }),
             )
         }
-        ProviderKind::ClaudeCli | ProviderKind::CursorAcp => {
+        ProviderKind::ClaudeCli | ProviderKind::CursorAcp | ProviderKind::CursorCli => {
             Err(AgentCreationError::MissingConfig(
                 "CLI/ACP backends don't use LlmBackend — they own the tool loop".into(),
             ))
