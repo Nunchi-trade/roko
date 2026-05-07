@@ -181,7 +181,7 @@ pub static BUILTIN_MODELS: &[BuiltinModel] = &[
 ];
 
 /// Common aliases mapped to their canonical slug.
-static ALIASES: &[(&str, &str)] = &[
+pub static ALIASES: &[(&str, &str)] = &[
     // Anthropic short names
     ("opus", "claude-opus-4-6"),
     ("claude-opus", "claude-opus-4-6"),
