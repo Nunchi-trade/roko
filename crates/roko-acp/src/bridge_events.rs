@@ -3622,6 +3622,10 @@ async fn run_slash_command(
             require_args!("agent-stop", "<name>");
             vec!["agent".into(), "stop".into(), "--name".into(), args.into()]
         }
+        "note" => {
+            require_args!("note", "<note text>");
+            vec!["note".into(), args.into()]
+        }
         "knowledge-gc" => vec!["knowledge".into(), "gc".into()],
         "knowledge-backup" => vec!["knowledge".into(), "backup".into()],
         "audit" => vec!["config".into(), "plugins".into(), "audit".into()],

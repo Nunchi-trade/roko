@@ -1668,6 +1668,12 @@ pub fn build_slash_commands(bare_mode: bool) -> Vec<SlashCommand> {
             "workflow",
             Some("pipeline name"),
         ),
+        slash_command(
+            "note",
+            "Append a note to .roko/notes/ (capture ideas without leaving editor)",
+            "system",
+            Some("note text"),
+        ),
         slash_command("help", "List all available commands", "help", None),
     ];
 
