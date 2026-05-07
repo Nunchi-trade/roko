@@ -308,6 +308,9 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
         PrdCmd::Idea { text } => {
             let joined = text.join(" ");
             roko_cli::prd::cmd_idea(&workdir, &joined)?;
+            crate::commands::util::print_next_step_hint(
+                "Next: roko develop 'your idea' or roko prd draft new <slug>",
+            );
             Ok(0)
         }
         PrdCmd::List => {
@@ -367,8 +370,6 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                             .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
                             .unwrap_or_default();
                     crate::commands::util::preflight_provider_for_model(&prd_config, &model_key)?;
-                    // Aggregate provider readiness: warn/abort if no providers are usable.
-                    crate::commands::util::preflight_providers_aggregate(&prd_config)?;
                 }
                 // Write scaffold first so agent can read and fill it
                 let frontmatter = roko_cli::prd::new_draft_frontmatter(&slug, &title);
@@ -760,8 +761,6 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
                         .unwrap_or_default();
                 crate::commands::util::preflight_provider_for_model(&plan_config, &model_key)?;
-                // Aggregate provider readiness: warn/abort if no providers are usable.
-                crate::commands::util::preflight_providers_aggregate(&plan_config)?;
             }
             let init_ms = t_phase.elapsed().as_millis();
             let t_phase = Instant::now();
@@ -776,6 +775,9 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             let total_ms = t_total.elapsed().as_millis();
             tracing::info!(init_ms, generate_ms, total_ms, "prd plan: phase timing");
             eprintln!("  Timing: init={init_ms}ms generate={generate_ms}ms total={total_ms}ms");
+            crate::commands::util::print_next_step_hint(&format!(
+                "Next: roko plan run plans/{slug}/"
+            ));
             Ok(0)
         }
         PrdCmd::Consolidate => {

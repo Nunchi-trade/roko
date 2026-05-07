@@ -4,6 +4,15 @@
 use crate::*;
 use roko_core::config::schema::RokoConfig;
 use roko_fs::RokoLayout;
+use std::io::IsTerminal;
+
+/// Print a dim next-step hint to stderr, only when stdout is a TTY.
+pub(crate) fn print_next_step_hint(msg: &str) {
+    if std::io::stdout().is_terminal() {
+        // \x1b[2m = dim, \x1b[0m = reset
+        eprintln!("\x1b[2m{msg}\x1b[0m");
+    }
+}
 
 /// Returns `true` on success, `false` when the topic is not recognised.
 pub(crate) fn cmd_explain(topic: &str, depth: u8) -> bool {
@@ -214,6 +223,8 @@ pub(crate) async fn cmd_init(
             println!("provider: {} \u{2014} ready", other.label());
         }
     }
+
+    print_next_step_hint("Next: roko setup (configure providers) or roko develop 'prompt'");
 
     Ok(())
 }
@@ -450,21 +461,65 @@ pub(crate) async fn cmd_status(
         for sig in &all {
             *counts.entry(sig.kind.to_string()).or_default() += 1;
         }
-        let episode_count = counts.get("episode").copied().unwrap_or(0);
+        let runner_event_status = read_runner_event_status(&workdir);
+        let substrate_episode_count = counts.get("episode").copied().unwrap_or(0);
+        let file_episode_status = read_file_episode_status(&workdir);
+        let episode_count = if substrate_episode_count == 0 {
+            file_episode_status
+                .as_ref()
+                .map_or(0, |status| status.count)
+        } else {
+            substrate_episode_count
+        };
 
         // Verify verdicts from substrate.
         let verdicts_json = substrate
             .query(&Query::of_kind(Kind::GateVerdict), &ctx)
             .await
             .map_err(|e| anyhow!("query verdicts: {e}"))?;
-        let gate_pass = verdicts_json
+        let mut gate_pass = verdicts_json
             .iter()
             .filter(|v| v.tag("passed") == Some("true"))
             .count();
-        let gate_fail = verdicts_json
+        let mut gate_fail = verdicts_json
             .iter()
             .filter(|v| v.tag("passed") == Some("false"))
             .count();
+        // Most recent episode.
+        let mut episodes_json = substrate
+            .query(&Query::of_kind(Kind::Episode), &ctx)
+            .await
+            .map_err(|e| anyhow!("query episodes: {e}"))?;
+        episodes_json.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
+        let runner_is_latest = runner_event_status.as_ref().is_some_and(|runner| {
+            runner.newer_than(latest_episode_timestamp(
+                &episodes_json,
+                file_episode_status.as_ref(),
+            ))
+        });
+        if runner_is_latest
+            && runner_event_status
+                .as_ref()
+                .is_some_and(|runner| runner.has_gates())
+        {
+            if let Some(runner) = runner_event_status.as_ref() {
+                gate_pass = runner.gate_pass;
+                gate_fail = runner.gate_fail;
+            }
+        } else if gate_pass == 0 && gate_fail == 0 {
+            let fallback = read_gate_result_counts(&learn_dir);
+            gate_pass = fallback.0;
+            gate_fail = fallback.1;
+            if gate_pass == 0 && gate_fail == 0 {
+                if let Some(runner) = runner_event_status
+                    .as_ref()
+                    .filter(|runner| runner.has_gates())
+                {
+                    gate_pass = runner.gate_pass;
+                    gate_fail = runner.gate_fail;
+                }
+            }
+        }
 
         // Running agents from runtime directory.
         let runtime_dir_json = workdir.join(".roko").join("runtime");
@@ -484,15 +539,22 @@ pub(crate) async fn cmd_status(
         let active_plans_json: usize = state_entries.len();
         let run_state_found = executor_state.is_some();
 
-        // Most recent episode.
-        let mut episodes_json = substrate
-            .query(&Query::of_kind(Kind::Episode), &ctx)
-            .await
-            .map_err(|e| anyhow!("query episodes: {e}"))?;
-        episodes_json.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
         let last_passed = episodes_json
             .first()
-            .and_then(|ep| ep.tag("passed").map(|v| v == "true"));
+            .and_then(|ep| ep.tag("passed").map(|v| v == "true"))
+            .or_else(|| {
+                file_episode_status
+                    .as_ref()
+                    .and_then(|status| status.passed)
+            });
+        let last_passed = if runner_is_latest {
+            runner_event_status
+                .as_ref()
+                .and_then(|status| status.passed)
+                .or(last_passed)
+        } else {
+            last_passed
+        };
 
         let status = SessionStatus {
             session_id: cli.resume.clone(),
@@ -514,10 +576,13 @@ pub(crate) async fn cmd_status(
             serde_json::to_string(&cost_by_model).unwrap_or_else(|_| "{}".to_string());
         let cost_by_plan_json =
             serde_json::to_string(&cost_by_plan).unwrap_or_else(|_| "{}".to_string());
+        let runner_json =
+            serde_json::to_string(&runner_event_status.as_ref().map(RunnerEventStatus::json))
+                .unwrap_or_else(|_| "null".to_string());
         let base = status.display_json();
         // Splice additional fields before the closing brace.
         let enriched = format!(
-            "{},\"gates\":{{\"pass\":{gate_pass},\"fail\":{gate_fail}}},\"workspace\":{{\"agents\":{running_agents_json},\"plans\":{active_plans_json},\"run_state_found\":{run_state_found}}},\"signal_counts\":{counts_json},\"cost_by_model\":{cost_by_model_json},\"cost_by_plan\":{cost_by_plan_json},\"health\":\"ready\"}}",
+            "{},\"gates\":{{\"pass\":{gate_pass},\"fail\":{gate_fail}}},\"workspace\":{{\"agents\":{running_agents_json},\"plans\":{active_plans_json},\"run_state_found\":{run_state_found}}},\"signal_counts\":{counts_json},\"cost_by_model\":{cost_by_model_json},\"cost_by_plan\":{cost_by_plan_json},\"runner\":{runner_json},\"health\":\"ready\"}}",
             &base[..base.len() - 1],
         );
         println!("{enriched}");
@@ -591,35 +656,95 @@ pub(crate) async fn cmd_status(
         .await
         .map_err(|e| anyhow!("query episodes: {e}"))?;
     episodes.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
+    let runner_event_status = read_runner_event_status(&workdir);
+    let file_episode_status = read_file_episode_status(&workdir);
+    let runner_is_latest = runner_event_status.as_ref().is_some_and(|runner| {
+        runner.newer_than(latest_episode_timestamp(
+            &episodes,
+            file_episode_status.as_ref(),
+        ))
+    });
     println!();
-    match episodes.first() {
-        Some(ep) => {
+    if runner_is_latest {
+        if let Some(runner) = runner_event_status.as_ref() {
             println!(
-                "most recent episode: {} (passed={})",
-                ep.id,
-                ep.tag("passed").unwrap_or("?")
+                "most recent run: {} (passed={})",
+                runner.display_id(),
+                runner
+                    .passed
+                    .map_or_else(|| "?".to_string(), |passed| passed.to_string())
             );
-            println!(
-                "  gates passed={} failed={}",
-                ep.tag("gates_passed").unwrap_or("0"),
-                ep.tag("gates_failed").unwrap_or("0")
-            );
+            if let (Some(done), Some(total)) = (runner.tasks_completed, runner.total_tasks) {
+                println!(
+                    "  tasks completed={} total={} failed={}",
+                    done,
+                    total,
+                    runner.tasks_failed.unwrap_or(0)
+                );
+            }
         }
-        None => println!("most recent episode: (none)"),
+    } else {
+        match episodes.first() {
+            Some(ep) => {
+                println!(
+                    "most recent episode: {} (passed={})",
+                    ep.id,
+                    ep.tag("passed").unwrap_or("?")
+                );
+                println!(
+                    "  gates passed={} failed={}",
+                    ep.tag("gates_passed").unwrap_or("0"),
+                    ep.tag("gates_failed").unwrap_or("0")
+                );
+            }
+            None => match &file_episode_status {
+                Some(status) => println!(
+                    "most recent episode: {} (passed={})",
+                    status.id.as_deref().unwrap_or("?"),
+                    status
+                        .passed
+                        .map_or_else(|| "?".to_string(), |passed| passed.to_string())
+                ),
+                None => println!("most recent episode: (none)"),
+            },
+        }
     }
 
     let verdicts = substrate
         .query(&Query::of_kind(Kind::GateVerdict), &ctx)
         .await
         .map_err(|e| anyhow!("query verdicts: {e}"))?;
-    let passed = verdicts
+    let mut passed = verdicts
         .iter()
         .filter(|v| v.tag("passed") == Some("true"))
         .count();
-    let failed = verdicts
+    let mut failed = verdicts
         .iter()
         .filter(|v| v.tag("passed") == Some("false"))
         .count();
+    if runner_is_latest
+        && runner_event_status
+            .as_ref()
+            .is_some_and(|runner| runner.has_gates())
+    {
+        if let Some(runner) = runner_event_status.as_ref() {
+            passed = runner.gate_pass;
+            failed = runner.gate_fail;
+        }
+    } else if passed == 0 && failed == 0 {
+        let fallback = read_gate_result_counts(&learn_dir);
+        passed = fallback.0;
+        failed = fallback.1;
+        if passed == 0 && failed == 0 {
+            if let Some(runner) = runner_event_status
+                .as_ref()
+                .filter(|runner| runner.has_gates())
+            {
+                passed = runner.gate_pass;
+                failed = runner.gate_fail;
+            }
+        }
+    }
     println!("gate verdicts: {passed} pass / {failed} fail");
 
     // Learning subsystem stats.
@@ -735,6 +860,212 @@ pub(crate) async fn cmd_status(
     }
 
     Ok(EXIT_SUCCESS)
+}
+
+struct FileEpisodeStatus {
+    count: usize,
+    id: Option<String>,
+    passed: Option<bool>,
+    timestamp_ms: Option<u64>,
+}
+
+fn read_file_episode_status(workdir: &Path) -> Option<FileEpisodeStatus> {
+    let roko_dir = workdir.join(".roko");
+    for path in [
+        roko_dir.join("episodes.jsonl"),
+        roko_dir.join("learn").join("episodes.jsonl"),
+        roko_dir.join("memory").join("episodes.jsonl"),
+    ] {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let mut count = 0;
+        let mut id = None;
+        let mut passed = None;
+        let mut timestamp_ms = None;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            count += 1;
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            id = value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .or(id);
+            passed = value
+                .get("success")
+                .and_then(serde_json::Value::as_bool)
+                .or_else(|| value.get("passed").and_then(serde_json::Value::as_bool))
+                .or(passed);
+            timestamp_ms = json_timestamp_ms(&value).or(timestamp_ms);
+        }
+        if count > 0 {
+            return Some(FileEpisodeStatus {
+                count,
+                id,
+                passed,
+                timestamp_ms,
+            });
+        }
+    }
+    None
+}
+
+struct RunnerEventStatus {
+    run_id: Option<String>,
+    timestamp_ms: u64,
+    passed: Option<bool>,
+    total_tasks: Option<usize>,
+    tasks_completed: Option<usize>,
+    tasks_failed: Option<usize>,
+    gate_pass: usize,
+    gate_fail: usize,
+}
+
+impl RunnerEventStatus {
+    fn display_id(&self) -> &str {
+        self.run_id.as_deref().unwrap_or("?")
+    }
+
+    const fn has_gates(&self) -> bool {
+        self.gate_pass > 0 || self.gate_fail > 0
+    }
+
+    fn newer_than(&self, timestamp_ms: Option<u64>) -> bool {
+        timestamp_ms.is_none_or(|timestamp_ms| self.timestamp_ms >= timestamp_ms)
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "run_id": self.run_id,
+            "timestamp_ms": self.timestamp_ms,
+            "passed": self.passed,
+            "total_tasks": self.total_tasks,
+            "tasks_completed": self.tasks_completed,
+            "tasks_failed": self.tasks_failed,
+            "gates": {
+                "pass": self.gate_pass,
+                "fail": self.gate_fail,
+            },
+        })
+    }
+}
+
+fn latest_episode_timestamp(
+    substrate_episodes: &[roko_core::Engram],
+    file_episode_status: Option<&FileEpisodeStatus>,
+) -> Option<u64> {
+    substrate_episodes
+        .first()
+        .and_then(|episode| u64::try_from(episode.created_at_ms).ok())
+        .or_else(|| file_episode_status.and_then(|status| status.timestamp_ms))
+}
+
+fn read_runner_event_status(workdir: &Path) -> Option<RunnerEventStatus> {
+    let text = std::fs::read_to_string(workdir.join(".roko").join("events.jsonl")).ok()?;
+    let events: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect();
+
+    let latest = events
+        .iter()
+        .filter(|value| {
+            matches!(
+                value.get("type").and_then(serde_json::Value::as_str),
+                Some("run.completed" | "run.started")
+            )
+        })
+        .filter_map(|value| json_timestamp_ms(value).map(|timestamp_ms| (timestamp_ms, value)))
+        .max_by_key(|(timestamp_ms, _)| *timestamp_ms)?;
+
+    let latest_value = latest.1;
+    let run_id = latest_value
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+
+    let mut gate_pass = 0;
+    let mut gate_fail = 0;
+    for event in &events {
+        if event.get("type").and_then(serde_json::Value::as_str) != Some("gate.completed") {
+            continue;
+        }
+        if event.get("run_id").and_then(serde_json::Value::as_str) != run_id.as_deref() {
+            continue;
+        }
+        if let Some(verdicts) = event.get("verdicts").and_then(serde_json::Value::as_array) {
+            for verdict in verdicts {
+                match verdict.get("passed").and_then(serde_json::Value::as_bool) {
+                    Some(true) => gate_pass += 1,
+                    Some(false) => gate_fail += 1,
+                    None => {}
+                }
+            }
+        } else {
+            match event.get("passed").and_then(serde_json::Value::as_bool) {
+                Some(true) => gate_pass += 1,
+                Some(false) => gate_fail += 1,
+                None => {}
+            }
+        }
+    }
+
+    Some(RunnerEventStatus {
+        run_id,
+        timestamp_ms: latest.0,
+        passed: latest_value
+            .get("outcome")
+            .and_then(serde_json::Value::as_str)
+            .map(|outcome| outcome == "succeeded"),
+        total_tasks: json_usize(latest_value, "total_tasks"),
+        tasks_completed: json_usize(latest_value, "tasks_completed"),
+        tasks_failed: json_usize(latest_value, "tasks_failed"),
+        gate_pass,
+        gate_fail,
+    })
+}
+
+fn json_usize(value: &serde_json::Value, key: &str) -> Option<usize> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+}
+
+fn json_timestamp_ms(value: &serde_json::Value) -> Option<u64> {
+    value
+        .get("timestamp_ms")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            value
+                .get("created_at_ms")
+                .and_then(serde_json::Value::as_u64)
+        })
+}
+
+fn read_gate_result_counts(learn_dir: &Path) -> (usize, usize) {
+    let Ok(text) = std::fs::read_to_string(learn_dir.join("efficiency.jsonl")) else {
+        return (0, 0);
+    };
+    let mut passed = 0;
+    let mut failed = 0;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("kind").and_then(serde_json::Value::as_str) != Some("gate_result") {
+            continue;
+        }
+        match value.get("passed").and_then(serde_json::Value::as_bool) {
+            Some(true) => passed += 1,
+            Some(false) => failed += 1,
+            None => {}
+        }
+    }
+    (passed, failed)
 }
 
 pub(crate) async fn cmd_doctor(
@@ -1640,28 +1971,6 @@ fn binary_on_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Run aggregate provider readiness checks and report issues to stderr.
-///
-/// Returns `Err` only when ALL referenced providers have issues (none are
-/// ready), meaning the operation should abort. When at least one provider
-/// is ready, issues are printed as warnings and `Ok(())` is returned so
-/// fallback-capable configurations can proceed.
-pub(crate) fn preflight_providers_aggregate(
-    config: &roko_core::config::schema::RokoConfig,
-) -> anyhow::Result<()> {
-    let issues = roko_agent::provider::check_provider_readiness(config);
-    if issues.is_empty() {
-        return Ok(());
-    }
-
-    let all_blocked = roko_agent::provider::report_readiness_issues(&issues, config);
-
-    if all_blocked {
-        anyhow::bail!(
-            "no usable providers: all referenced providers have configuration issues. \
-             Run `roko config providers available` for setup instructions."
-        );
-    }
-
-    Ok(())
-}
+// NOTE: `preflight_providers_aggregate` was removed — it emitted warnings for
+// ALL configured providers, even those not used by the current command.
+// Commands now call `preflight_provider_for_model` for only the selected model.

@@ -790,6 +790,12 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     );
                 }
 
+                if v2_report.all_succeeded() {
+                    crate::commands::util::print_next_step_hint(
+                        "Done! Review changes with: git diff",
+                    );
+                }
+
                 Ok(if v2_report.all_succeeded() {
                     EXIT_SUCCESS
                 } else {
