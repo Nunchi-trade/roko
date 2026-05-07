@@ -160,9 +160,12 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
         },
         // ── Models ──────────────────────────────────────────────────
         ConfigCmd::Models { cmd } => match cmd {
-            ConfigModelCmd::List { workdir } => {
+            ConfigModelCmd::List {
+                names_only,
+                workdir,
+            } => {
                 let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-                cmd_model_list(&wd)?;
+                cmd_model_list(&wd, names_only)?;
                 Ok(())
             }
             ConfigModelCmd::Route {
@@ -707,30 +710,136 @@ pub(crate) async fn cmd_provider_test_all(workdir: &Path, json: bool) -> Result<
     Ok(())
 }
 
-pub(crate) fn cmd_model_list(workdir: &Path) -> Result<()> {
+pub(crate) fn cmd_model_list(workdir: &Path, names_only: bool) -> Result<()> {
+    use roko_core::config::model_registry::BUILTIN_MODELS;
+    use std::collections::BTreeSet;
+
     let config = roko_core::config::loader::load_config_unified(workdir)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let models = configured_models(&config);
-    if models.is_empty() {
-        println!("no models configured");
+    let default_model = config.agent.default_model.trim().to_string();
+
+    // --names-only: one name per line for shell completion
+    if names_only {
+        let mut names: BTreeSet<String> = models.keys().cloned().collect();
+        for builtin in BUILTIN_MODELS {
+            names.insert(builtin.slug.to_string());
+        }
+        for name in &names {
+            println!("{name}");
+        }
         return Ok(());
     }
 
-    let mut model_names = models.keys().cloned().collect::<Vec<_>>();
-    model_names.sort_unstable();
+    // ── Configured models table ──────────────────────────────────────
+    let configured_slugs: BTreeSet<&str> = models.values().map(|p| p.slug.as_str()).collect();
 
-    let rows = model_names
-        .into_iter()
-        .map(|model_name| {
-            let profile = models
-                .get(&model_name)
-                .expect("model name collected from model registry");
-            build_model_list_row(&model_name, profile)
-        })
-        .collect::<Vec<_>>();
+    if !models.is_empty() {
+        println!("Configured models (roko.toml):");
+        println!();
 
-    print!("{}", format_model_rows(&rows));
+        let mut rows: Vec<ModelsListRow> = Vec::new();
+        let mut model_names: Vec<String> = models.keys().cloned().collect();
+        model_names.sort_unstable();
+
+        for model_name in &model_names {
+            let profile = &models[model_name];
+            let key_ok = config.provider_available_for_model_key(model_name);
+            let is_default = model_name == &default_model;
+            rows.push(ModelsListRow {
+                model: if is_default {
+                    format!("{model_name} *")
+                } else {
+                    model_name.clone()
+                },
+                provider: profile.provider.clone(),
+                slug: profile.slug.clone(),
+                key_status: if key_ok { "ok" } else { "missing" }.to_string(),
+            });
+        }
+        print!("{}", format_models_list_rows(&rows));
+    } else {
+        println!("No models configured in roko.toml.");
+    }
+
+    // ── Builtin models (available without config) ────────────────────
+    let builtins: Vec<&roko_core::config::model_registry::BuiltinModel> = BUILTIN_MODELS
+        .iter()
+        .filter(|b| !configured_slugs.contains(b.slug))
+        .collect();
+
+    if !builtins.is_empty() {
+        println!();
+        println!("Builtin models (available without config):");
+        println!();
+
+        let mut rows: Vec<ModelsListRow> = Vec::new();
+        for b in &builtins {
+            let key_ok = !b.api_key_env.is_empty()
+                && std::env::var(b.api_key_env)
+                    .ok()
+                    .map_or(false, |v| !v.trim().is_empty());
+            rows.push(ModelsListRow {
+                model: b.slug.to_string(),
+                provider: format!("{:?}", b.provider_kind),
+                slug: b.slug.to_string(),
+                key_status: if key_ok {
+                    "ok".to_string()
+                } else {
+                    format!("missing ({})", b.api_key_env)
+                },
+            });
+        }
+        print!("{}", format_models_list_rows(&rows));
+    }
+
+    // ── Legend ────────────────────────────────────────────────────────
+    if !default_model.is_empty() {
+        println!();
+        println!("* = current default model");
+    }
+
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ModelsListRow {
+    model: String,
+    provider: String,
+    slug: String,
+    key_status: String,
+}
+
+fn format_models_list_rows(rows: &[ModelsListRow]) -> String {
+    let mut widths = [
+        "Model".len(),
+        "Provider".len(),
+        "Slug".len(),
+        "Key".len(),
+    ];
+    for row in rows {
+        widths[0] = widths[0].max(row.model.len());
+        widths[1] = widths[1].max(row.provider.len());
+        widths[2] = widths[2].max(row.slug.len());
+        widths[3] = widths[3].max(row.key_status.len());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "  {:<mw$}  {:<pw$}  {:<sw$}  {:<kw$}",
+        "Model", "Provider", "Slug", "Key",
+        mw = widths[0], pw = widths[1], sw = widths[2], kw = widths[3],
+    );
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "  {:<mw$}  {:<pw$}  {:<sw$}  {:<kw$}",
+            row.model, row.provider, row.slug, row.key_status,
+            mw = widths[0], pw = widths[1], sw = widths[2], kw = widths[3],
+        );
+    }
+    out
 }
 
 fn format_effective_model_selection_summary(

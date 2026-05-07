@@ -1895,7 +1895,11 @@ enum ConfigProviderCmd {
 #[derive(Debug, Subcommand)]
 enum ConfigModelCmd {
     /// List configured models and their capabilities.
+    #[command(alias = "ls")]
     List {
+        /// Print only model names, one per line (for shell completion scripts).
+        #[arg(long)]
+        names_only: bool,
         /// Directory containing `roko.toml` (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
