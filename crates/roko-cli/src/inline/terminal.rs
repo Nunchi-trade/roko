@@ -223,10 +223,24 @@ impl Drop for InlineTerminal {
 
 /// Returns `true` if stdout is a TTY and inline rendering is appropriate.
 ///
+/// Respects standard environment conventions:
+/// - `NO_COLOR` set → false (<https://no-color.org/>)
+/// - `CLICOLOR=0` → false (disable fancy output)
+/// - `CLICOLOR_FORCE=1` → true (force fancy even without TTY)
+///
 /// When this returns `false`, callers should fall back to plain text output.
 #[must_use]
 pub fn should_use_inline() -> bool {
-    io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if std::env::var_os("CLICOLOR").as_deref() == Some(std::ffi::OsStr::new("0")) {
+        return false;
+    }
+    if std::env::var_os("CLICOLOR_FORCE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return true;
+    }
+    io::stdout().is_terminal()
 }
 
 #[cfg(test)]
