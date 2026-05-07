@@ -328,8 +328,15 @@ pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
 
     // 4. Builtin model registry — well-known models that work without TOML config.
     if let Some(builtin) = crate::config::model_registry::builtin_model(model_key) {
+        let effective_providers = config.effective_providers();
+        let provider = effective_providers
+            .iter()
+            .find(|(_, provider)| provider.kind == builtin.provider_kind);
+        let provider_key = provider
+            .map(|(key, _)| key.as_str())
+            .unwrap_or_else(|| builtin.provider_kind.label());
         let profile = ModelProfile {
-            provider: builtin.provider_kind.label().to_owned(),
+            provider: provider_key.to_owned(),
             slug: builtin.slug.to_owned(),
             context_window: builtin.context_window,
             max_output: Some(builtin.max_output),
@@ -338,7 +345,7 @@ pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
             supports_vision: builtin.supports_vision,
             ..ModelProfile::default()
         };
-        let provider_config = config.providers.get(builtin.provider_kind.label()).cloned();
+        let provider_config = provider.map(|(_, provider)| provider.clone());
         let backend = builtin.provider_kind.to_backend();
         return ResolvedModel {
             model_key: model_key.to_owned(),
@@ -369,7 +376,7 @@ fn resolved_from_profile(
     model_key: &str,
     profile: &crate::config::schema::ModelProfile,
 ) -> ResolvedModel {
-    let provider_config = config.providers.get(&profile.provider).cloned();
+    let provider_config = config.effective_providers().get(&profile.provider).cloned();
 
     // Derive provider_kind and backend from config (authoritative) rather
     // than from slug heuristics. Only fall back to from_model() when the
@@ -1365,16 +1372,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_falls_back_to_legacy_backend() {
+    fn resolve_model_uses_builtin_registry_without_config() {
         let config = RokoConfig::default();
 
         let resolved = resolve_model(&config, "claude-sonnet-4-6");
         assert_eq!(resolved.model_key, "claude-sonnet-4-6");
         assert_eq!(resolved.slug, "claude-sonnet-4-6");
-        assert_eq!(resolved.provider_kind, ProviderKind::ClaudeCli);
+        assert_eq!(resolved.provider_kind, ProviderKind::AnthropicApi);
         assert_eq!(resolved.backend, AgentBackend::Claude);
-        assert!(resolved.provider_config.is_none());
-        assert!(resolved.profile.is_none());
+        assert!(resolved.profile.is_some());
     }
 
     #[test]
