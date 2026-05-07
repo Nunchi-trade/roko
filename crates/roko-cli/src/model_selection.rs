@@ -118,7 +118,10 @@ pub enum Error {
         provider_key: String,
     },
     /// The selected model could not be backed by any configured provider.
-    #[error("{}", format_unknown_model_error(selection_source, model, provider_kind, suggestions))]
+    #[error(
+        "{}",
+        format_unknown_model_error(selection_source, model, provider_kind, suggestions)
+    )]
     UnknownModel {
         /// Which precedence step selected the model.
         selection_source: SelectionSource,
@@ -137,9 +140,8 @@ fn format_unknown_model_error(
     provider_kind: &str,
     suggestions: &[String],
 ) -> String {
-    let mut msg = format!(
-        "{source} selected unknown model '{model}' (inferred kind '{provider_kind}')"
-    );
+    let mut msg =
+        format!("{source} selected unknown model '{model}' (inferred kind '{provider_kind}')");
     if suggestions.is_empty() {
         msg.push_str("; add an explicit [models.*] entry for this model");
     } else {
@@ -206,7 +208,12 @@ fn jaro_winkler(a: &str, b: &str) -> f64 {
     let jaro = (m / a_len as f64 + m / b_len as f64 + (m - transpositions as f64 / 2.0) / m) / 3.0;
 
     // Winkler boost for common prefix (up to 4 chars).
-    let prefix_len = a.iter().zip(b.iter()).take(4).take_while(|(x, y)| x == y).count();
+    let prefix_len = a
+        .iter()
+        .zip(b.iter())
+        .take(4)
+        .take_while(|(x, y)| x == y)
+        .count();
     jaro + prefix_len as f64 * 0.1 * (1.0 - jaro)
 }
 
@@ -234,13 +241,12 @@ fn suggest_models(input: &str, config: &RokoConfig) -> Vec<String> {
             let name_lower = name.to_ascii_lowercase();
             let jw = jaro_winkler(&input_lower, &name_lower);
             // Boost if the candidate contains the input or vice versa.
-            let contains_bonus = if name_lower.contains(&input_lower)
-                || input_lower.contains(&name_lower)
-            {
-                0.15
-            } else {
-                0.0
-            };
+            let contains_bonus =
+                if name_lower.contains(&input_lower) || input_lower.contains(&name_lower) {
+                    0.15
+                } else {
+                    0.0
+                };
             (name, (jw + contains_bonus).min(1.0))
         })
         .filter(|(_, score)| *score > 0.6)
@@ -248,7 +254,10 @@ fn suggest_models(input: &str, config: &RokoConfig) -> Vec<String> {
 
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(3);
-    scored.into_iter().map(|(name, _)| name.to_string()).collect()
+    scored
+        .into_iter()
+        .map(|(name, _)| name.to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
