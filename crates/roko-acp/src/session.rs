@@ -104,6 +104,20 @@ fn default_provider() -> String {
 const MAX_HISTORY_TURNS: usize = 40;
 /// Maximum total characters across all history turns.
 const MAX_HISTORY_CHARS: usize = 64_000;
+/// Maximum bytes per pinned file content (32 KiB).
+const MAX_PINNED_FILE_BYTES: usize = 32 * 1024;
+
+/// A file pinned into the session context, injected into every turn's system prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinnedFile {
+    /// URI identifying the pinned resource (e.g. file path or URL).
+    pub uri: String,
+    /// Content of the pinned file (truncated to 32 KiB).
+    pub content: String,
+    /// When this file was pinned.
+    pub added_at: DateTime<Utc>,
+}
 
 /// A single turn in the conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +313,9 @@ pub struct AcpSession {
     /// Whether builtin tool definitions are sent to the model.
     #[serde(default = "default_true")]
     pub tools_enabled: bool,
+    /// Files pinned into every turn's system prompt (session-scoped, not persisted to disk).
+    #[serde(default)]
+    pub pinned_context: Vec<PinnedFile>,
 }
 
 fn default_true() -> bool {
@@ -328,6 +345,7 @@ impl AcpSession {
             cached_conventions: None,
             always_allowed: HashSet::new(),
             tools_enabled: true,
+            pinned_context: Vec::new(),
         }
     }
 
@@ -374,6 +392,7 @@ impl AcpSession {
             cached_conventions: None,
             always_allowed: HashSet::new(),
             tools_enabled: true,
+            pinned_context: Vec::new(),
         }
     }
 
@@ -480,6 +499,35 @@ impl AcpSession {
         self.busy.load(Ordering::Acquire)
     }
 
+    /// Pin a file into the session context. Content is truncated to 32 KiB.
+    /// If a file with the same URI is already pinned, its content and timestamp are updated.
+    pub fn pin_file(&mut self, uri: String, content: String) {
+        let truncated: String = content.chars().take(MAX_PINNED_FILE_BYTES).collect();
+        if let Some(existing) = self.pinned_context.iter_mut().find(|p| p.uri == uri) {
+            existing.content = truncated;
+            existing.added_at = Utc::now();
+        } else {
+            self.pinned_context.push(PinnedFile {
+                uri,
+                content: truncated,
+                added_at: Utc::now(),
+            });
+        }
+    }
+
+    /// Remove a pinned file by URI. Returns `true` if the file was found and removed.
+    pub fn unpin_file(&mut self, uri: &str) -> bool {
+        let before = self.pinned_context.len();
+        self.pinned_context.retain(|p| p.uri != uri);
+        self.pinned_context.len() < before
+    }
+
+    /// Returns a snapshot of all currently pinned files.
+    #[must_use]
+    pub fn list_pinned(&self) -> &[PinnedFile] {
+        &self.pinned_context
+    }
+
     /// Updates the current legacy mode identifier. Clears history on mode change.
     pub fn set_mode(&mut self, mode_id: String) {
         if self.config_state.agent_mode != mode_id {
@@ -535,6 +583,18 @@ impl AcpSession {
             .filter(|text| !text.trim().is_empty())
         {
             builder = builder.with_gate_feedback_text(feedback.as_str());
+        }
+
+        // Inject pinned files after the base prompt layers.
+        if !self.pinned_context.is_empty() {
+            let mut pinned_section = String::from("\n## Pinned Context\n");
+            for pinned in &self.pinned_context {
+                pinned_section.push_str(&format!(
+                    "\n### {}\n```\n{}\n```\n",
+                    pinned.uri, pinned.content,
+                ));
+            }
+            builder = builder.with_domain(pinned_section);
         }
 
         builder.build()
