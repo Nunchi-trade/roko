@@ -1419,6 +1419,12 @@ pub fn build_slash_commands(bare_mode: bool) -> Vec<SlashCommand> {
         ),
         slash_command("config", "Show roko.toml configuration", "system", None),
         slash_command(
+            "models",
+            "List available models with their status",
+            "system",
+            None,
+        ),
+        slash_command(
             "learn",
             "Learning state: episodes, routing, experiments, efficiency",
             "learning",

@@ -3385,6 +3385,7 @@ async fn run_slash_command(
         "status" => vec!["status".into()],
         "doctor" => vec!["doctor".into()],
         "config" => vec!["config".into(), "show".into()],
+        "models" => vec!["config".into(), "models".into(), "list".into()],
         "learn" => vec!["learn".into(), "all".into()],
 
         // ── Research (foraging phase) ──
