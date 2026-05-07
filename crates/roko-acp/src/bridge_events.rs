@@ -3485,6 +3485,15 @@ async fn run_slash_command(
                 args.into(),
             ]
         }
+        "do" => {
+            require_args!("do", "<prompt>");
+            vec![
+                "do".into(),
+                "--model".into(),
+                model_key.clone(),
+                args.into(),
+            ]
+        }
         "agents" => vec!["agent".into(), "list".into()],
         "agent-chat" => {
             require_args!("agent-chat", "<agent name>");

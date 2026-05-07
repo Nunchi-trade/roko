@@ -1528,6 +1528,12 @@ pub fn build_slash_commands(bare_mode: bool) -> Vec<SlashCommand> {
             Some("prompt text"),
         ),
         slash_command(
+            "do",
+            "Execute a task with roko do (agentic coding)",
+            "implementation",
+            Some("describe the task..."),
+        ),
+        slash_command(
             "agents",
             "List agents and their status",
             "implementation",
