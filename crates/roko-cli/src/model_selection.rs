@@ -79,9 +79,12 @@ impl EffectiveModelSelection {
         )
     }
 
-    /// Print the canonical selection line to stderr.
+    /// Print the canonical selection line to stderr when verbose mode is active.
     pub fn print_stderr(&self) {
-        eprintln!("{}", self.display_line());
+        if std::env::var("ROKO_VERBOSE").map_or(false, |v| v == "1") {
+            eprintln!("{}", self.display_line());
+        }
+        tracing::debug!("{}", self.display_line());
     }
 
     /// Serialize the selection to a JSON value for embedding in log records.
