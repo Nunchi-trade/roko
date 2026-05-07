@@ -1648,9 +1648,14 @@ where
     }
 
     // Push assistant turn after streaming completes (skip slash commands).
+    // If dispatch failed (empty assistant text), pop the user turn we pushed earlier
+    // to prevent a dangling user message with no response in the history.
     match &stream_result {
         Ok(sr) if !is_slash_command && !sr.assistant_text.is_empty() => {
             session.push_assistant_turn(truncate_assistant_history(&sr.assistant_text));
+        }
+        _ if !is_slash_command => {
+            session.conversation_history.pop();
         }
         _ => {}
     }
