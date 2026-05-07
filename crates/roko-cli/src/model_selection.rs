@@ -118,9 +118,7 @@ pub enum Error {
         provider_key: String,
     },
     /// The selected model could not be backed by any configured provider.
-    #[error(
-        "{selection_source} selected unknown model '{model}' (inferred kind '{provider_kind}'); add an explicit [models.*] entry for this model"
-    )]
+    #[error("{}", format_unknown_model_error(selection_source, model, provider_kind, suggestions))]
     UnknownModel {
         /// Which precedence step selected the model.
         selection_source: SelectionSource,
@@ -128,7 +126,129 @@ pub enum Error {
         model: String,
         /// Provider kind inferred from the selected model.
         provider_kind: String,
+        /// Suggested similar model names.
+        suggestions: Vec<String>,
     },
+}
+
+fn format_unknown_model_error(
+    source: &SelectionSource,
+    model: &str,
+    provider_kind: &str,
+    suggestions: &[String],
+) -> String {
+    let mut msg = format!(
+        "{source} selected unknown model '{model}' (inferred kind '{provider_kind}')"
+    );
+    if suggestions.is_empty() {
+        msg.push_str("; add an explicit [models.*] entry for this model");
+    } else {
+        msg.push_str(". Did you mean one of: ");
+        msg.push_str(&suggestions.join(", "));
+        msg.push('?');
+    }
+    msg
+}
+
+/// Jaro-Winkler similarity between two strings (0.0 – 1.0).
+fn jaro_winkler(a: &str, b: &str) -> f64 {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let a_len = a.len();
+    let b_len = b.len();
+
+    if a_len == 0 && b_len == 0 {
+        return 1.0;
+    }
+    if a_len == 0 || b_len == 0 {
+        return 0.0;
+    }
+
+    let match_distance = (a_len.max(b_len) / 2).saturating_sub(1);
+    let mut a_matched = vec![false; a_len];
+    let mut b_matched = vec![false; b_len];
+    let mut matches = 0usize;
+    let mut transpositions = 0usize;
+
+    for i in 0..a_len {
+        let start = i.saturating_sub(match_distance);
+        let end = (i + match_distance + 1).min(b_len);
+        for j in start..end {
+            if b_matched[j] || a[i] != b[j] {
+                continue;
+            }
+            a_matched[i] = true;
+            b_matched[j] = true;
+            matches += 1;
+            break;
+        }
+    }
+
+    if matches == 0 {
+        return 0.0;
+    }
+
+    let mut k = 0usize;
+    for i in 0..a_len {
+        if !a_matched[i] {
+            continue;
+        }
+        while !b_matched[k] {
+            k += 1;
+        }
+        if a[i] != b[k] {
+            transpositions += 1;
+        }
+        k += 1;
+    }
+
+    let m = matches as f64;
+    let jaro = (m / a_len as f64 + m / b_len as f64 + (m - transpositions as f64 / 2.0) / m) / 3.0;
+
+    // Winkler boost for common prefix (up to 4 chars).
+    let prefix_len = a.iter().zip(b.iter()).take(4).take_while(|(x, y)| x == y).count();
+    jaro + prefix_len as f64 * 0.1 * (1.0 - jaro)
+}
+
+/// Collect all known model names from config keys, builtin slugs, and aliases,
+/// then return the top suggestions sorted by similarity to `input`.
+fn suggest_models(input: &str, config: &RokoConfig) -> Vec<String> {
+    use roko_core::config::model_registry::{ALIASES, BUILTIN_MODELS};
+    use std::collections::BTreeSet;
+
+    let mut candidates = BTreeSet::new();
+    for key in config.models.keys() {
+        candidates.insert(key.as_str());
+    }
+    for m in BUILTIN_MODELS {
+        candidates.insert(m.slug);
+    }
+    for &(alias, _) in ALIASES {
+        candidates.insert(alias);
+    }
+
+    let input_lower = input.to_ascii_lowercase();
+    let mut scored: Vec<(&str, f64)> = candidates
+        .into_iter()
+        .map(|name| {
+            let name_lower = name.to_ascii_lowercase();
+            let jw = jaro_winkler(&input_lower, &name_lower);
+            // Boost if the candidate contains the input or vice versa.
+            let contains_bonus = if name_lower.contains(&input_lower)
+                || input_lower.contains(&name_lower)
+            {
+                0.15
+            } else {
+                0.0
+            };
+            (name, (jw + contains_bonus).min(1.0))
+        })
+        .filter(|(_, score)| *score > 0.6)
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(3);
+    scored.into_iter().map(|(name, _)| name.to_string()).collect()
 }
 
 #[derive(Debug, Clone)]
@@ -159,7 +279,7 @@ pub fn resolve_effective_model(
     let resolved = resolve_model(config, &requested_model);
     let providers = config.effective_providers();
     let (provider_key, provider) =
-        select_provider(source, &requested_model, &resolved, &providers)?;
+        select_provider(source, &requested_model, &resolved, &providers, config)?;
 
     let effective_model_key = resolved.model_key;
     let backend_slug = resolved.slug;
@@ -360,6 +480,7 @@ fn select_provider<'a>(
     model: &str,
     resolved: &roko_core::agent::ResolvedModel,
     providers: &'a IndexMap<String, ProviderConfig>,
+    config: &RokoConfig,
 ) -> Result<(String, &'a ProviderConfig), Error> {
     if let Some(profile) = resolved.profile.as_ref() {
         let provider_key = profile.provider.trim();
@@ -384,6 +505,7 @@ fn select_provider<'a>(
 
     Err(Error::UnknownModel {
         selection_source: source,
+        suggestions: suggest_models(model, config),
         model: model.to_string(),
         provider_kind: resolved.provider_kind.label().to_string(),
     })
@@ -656,7 +778,10 @@ mod tests {
         )
         .expect_err("selection should fail");
 
-        assert!(err.to_string().contains("add an explicit [models.*]"));
+        assert!(
+            err.to_string().contains("add an explicit [models.*]")
+                || err.to_string().contains("Did you mean")
+        );
     }
 
     #[test]
@@ -694,10 +819,14 @@ mod tests {
             &err,
             Error::UnknownModel {
                 provider_kind,
+                suggestions: _,
                 ..
             } if provider_kind == "openai_compat"
         ));
-        assert!(err.to_string().contains("explicit [models.*]"));
+        assert!(
+            err.to_string().contains("explicit [models.*]")
+                || err.to_string().contains("Did you mean")
+        );
     }
 
     // ── Task 064: IDE/ACP fallback scenario tests ────────────────────────
