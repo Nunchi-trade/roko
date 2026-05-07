@@ -4,6 +4,23 @@
 use crate::*;
 use roko_fs::RokoLayout;
 
+#[cfg(feature = "legacy-runner-v2")]
+fn join_approval_tui_thread(handle: Option<std::thread::JoinHandle<anyhow::Result<()>>>) {
+    let Some(handle) = handle else {
+        return;
+    };
+
+    match handle.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::error!(error = %err, "approval TUI exited with error");
+        }
+        Err(_) => {
+            tracing::error!("approval TUI thread panicked");
+        }
+    }
+}
+
 pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     match cmd {
         PlanCmd::List { workdir } => {
@@ -343,9 +360,6 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     }
                 }
 
-                // Aggregate provider readiness: warn/abort if no providers are usable.
-                crate::commands::util::preflight_providers_aggregate(&early_roko_config)?;
-
                 // Pre-flight: warn if gate tools are missing.
                 let missing_gate_tools = crate::commands::util::preflight_gate_deps();
                 if !missing_gate_tools.is_empty() {
@@ -565,12 +579,17 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     projection: Some(projection),
                     http_event_sink: None,
                     output_sink: if !approval && !cli.quiet && !cli.json {
-                        std::sync::Arc::new(
-                            roko_cli::runner::output_sink::FormattedStderrSink::new(
-                                cli.color.should_color(),
-                            ),
-                        )
-                            as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+                        if roko_cli::inline::should_use_inline() {
+                            std::sync::Arc::new(roko_cli::runner::output_sink::StderrSink::new())
+                                as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+                        } else {
+                            std::sync::Arc::new(
+                                roko_cli::runner::output_sink::FormattedStderrSink::new(
+                                    cli.color.should_color(),
+                                ),
+                            )
+                                as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+                        }
                     } else {
                         std::sync::Arc::new(roko_cli::runner::output_sink::NoopSink)
                             as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
@@ -580,6 +599,8 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 };
 
                 // Optionally spawn the approval TUI.
+                let mut approval_tui_handle = None;
+                let mut approval_tui_shutdown = None;
                 if approval {
                     if !std::io::stdout().is_terminal() {
                         anyhow::bail!("approval mode requires an interactive terminal");
@@ -600,19 +621,23 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
                     let state_hub_for_tui = state_hub.clone();
                     let workdir_for_tui = wd.clone();
-                    std::thread::Builder::new()
+                    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+                    let handle = std::thread::Builder::new()
                         .name("roko-plan-approval-tui".to_string())
                         .spawn(move || {
                             let app = App::new_connected_with_page(
                                 &workdir_for_tui,
                                 None,
                                 &state_hub_for_tui,
-                            );
-                            if let Err(err) = app.run() {
-                                tracing::error!(error = %err, "approval TUI exited with error");
-                            }
+                            )
+                            .with_shutdown_receiver(shutdown_rx)
+                            .with_exit_on_plan_completion()
+                            .without_mouse_capture();
+                            app.run()
                         })
                         .context("spawn approval TUI thread")?;
+                    approval_tui_shutdown = Some(shutdown_tx);
+                    approval_tui_handle = Some(handle);
                 }
 
                 let cancel = tokio_util::sync::CancellationToken::new();
@@ -654,9 +679,13 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     plans_dir = %resolved_plans_dir.display(),
                     "plan run: setup complete, entering event loop"
                 );
-                let v2_report =
-                    roko_cli::runner::event_loop::run(plans, &run_config, &state_hub, cancel)
-                        .await?;
+                let v2_result =
+                    roko_cli::runner::event_loop::run(plans, &run_config, &state_hub, cancel).await;
+                if let Some(shutdown_tx) = approval_tui_shutdown.take() {
+                    let _ = shutdown_tx.send(());
+                }
+                join_approval_tui_thread(approval_tui_handle.take());
+                let v2_report = v2_result?;
 
                 if cli.json {
                     println!(
@@ -768,7 +797,11 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 })
             } // end #[cfg(feature = "legacy-runner-v2")]
         }
-        PlanCmd::Generate { source, from_file } => {
+        PlanCmd::Generate {
+            source,
+            from_file,
+            context,
+        } => {
             use roko_cli::agent_config::load_gateway_env;
             use roko_cli::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 
@@ -813,12 +846,27 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 "plan generate",
             )?;
 
+            let context_block = if context.is_empty() {
+                String::new()
+            } else {
+                let loaded = roko_cli::context_loader::load_context_files(
+                    &context,
+                    roko_cli::context_loader::DEFAULT_BUDGET,
+                    &workdir,
+                );
+                if !loaded.is_empty() {
+                    format!("\n\n<context>\n{loaded}</context>\n")
+                } else {
+                    String::new()
+                }
+            };
+
             let task_prompt = format!(
                 "Read the source below and generate implementation plan directories under .roko/plans/. \
                  Search the codebase first to understand what exists. \
                  Create plan.md and tasks.toml files with tier, model_hint, context (read_files with line ranges), \
                  mcp_servers (per-task MCP server names), and verify steps (executable shell commands). \
-                 Use the cheapest model tier for each task.\n\n{source_text}"
+                 Use the cheapest model tier for each task.\n\n{source_text}{context_block}"
             );
 
             run_agent_logged(
