@@ -2401,16 +2401,18 @@ fn validate_and_fix_generated_plan(
                                 Some(c) => format!("cargo check -p {c}"),
                                 None => "cargo check --workspace".to_string(),
                             };
-                            auto_verify
-                                .push(make_verify_entry("compile", &compile_cmd, &format!(
+                            auto_verify.push(make_verify_entry(
+                                "compile",
+                                &compile_cmd,
+                                &format!(
                                     "{} must compile",
                                     crate_name.as_deref().unwrap_or("workspace"),
-                                )));
+                                ),
+                            ));
 
                             // Add structural grep for expected symbols from title
                             if let Some(title) = task.get("title").and_then(toml::Value::as_str) {
-                                let structural_cmd =
-                                    build_structural_verify_cmd(title, &files);
+                                let structural_cmd = build_structural_verify_cmd(title, &files);
                                 if let Some(cmd) = structural_cmd {
                                     auto_verify.push(make_verify_entry(
                                         "structural",
@@ -2420,10 +2422,7 @@ fn validate_and_fix_generated_plan(
                                 }
                             }
 
-                            task.insert(
-                                "verify".to_string(),
-                                toml::Value::Array(auto_verify),
-                            );
+                            task.insert("verify".to_string(), toml::Value::Array(auto_verify));
                             eprintln!(
                                 "info: {task_id_label}: auto-added verify entries \
                                  (compile + structural)"
