@@ -470,9 +470,7 @@ fn check_provider_usable(workdir: &Path) -> DoctorCheck {
             detail: None,
             path: None,
             url: None,
-            fix: Some(
-                "Set an API key. Example: export ANTHROPIC_API_KEY=sk-...".to_string(),
-            ),
+            fix: Some("Set an API key. Example: export ANTHROPIC_API_KEY=sk-...".to_string()),
         },
         _ => DoctorCheck {
             id: "provider_usable".to_string(),
@@ -503,7 +501,7 @@ fn check_default_model_configured(loaded_config: &LoadedConfig) -> DoctorCheck {
     if model_key.is_empty() {
         return DoctorCheck {
             id: "default_model_configured".to_string(),
-            status: DoctorStatus::Fail,
+            status: DoctorStatus::Warn,
             message: "no default_model configured".to_string(),
             detail: None,
             path: None,
@@ -529,9 +527,7 @@ fn check_default_model_configured(loaded_config: &LoadedConfig) -> DoctorCheck {
         DoctorCheck {
             id: "default_model_configured".to_string(),
             status: DoctorStatus::Fail,
-            message: format!(
-                "default_model \"{model_key}\" not found in models table or builtins"
-            ),
+            message: format!("default_model \"{model_key}\" not found in models table or builtins"),
             detail: None,
             path: None,
             url: None,
