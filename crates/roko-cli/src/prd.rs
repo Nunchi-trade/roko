@@ -992,21 +992,15 @@ pub async fn generate_plan_from_prd_with_failure_context(
 }
 
 /// Default model escalation chain: haiku → sonnet → opus.
-const DEFAULT_ESCALATION_CHAIN: &[&str] = &[
-    "claude-haiku-4-5",
-    "claude-sonnet-4-6",
-    "claude-opus-4-6",
-];
+const DEFAULT_ESCALATION_CHAIN: &[&str] =
+    &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"];
 
 /// Return the next-tier model for escalation on validation failures.
 ///
 /// Checks `tier_models` config first (keys: `"haiku"`, `"sonnet"`, `"opus"`),
 /// falling back to [`DEFAULT_ESCALATION_CHAIN`]. Returns `None` if the current
 /// model is already at the highest tier.
-fn next_tier_model(
-    current: Option<&str>,
-    tier_models: &HashMap<String, String>,
-) -> Option<String> {
+fn next_tier_model(current: Option<&str>, tier_models: &HashMap<String, String>) -> Option<String> {
     // Build the chain from config or defaults.
     let chain: Vec<&str> = if tier_models.is_empty() {
         DEFAULT_ESCALATION_CHAIN.to_vec()
