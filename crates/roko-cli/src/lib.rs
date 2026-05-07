@@ -75,8 +75,8 @@ pub mod episode;
 pub mod event_sources;
 pub mod explain;
 pub(crate) mod gate_runner;
-pub mod hints;
 mod heartbeat;
+pub mod hints;
 pub mod index;
 pub mod inference_observer;
 #[path = "commands/init.rs"]

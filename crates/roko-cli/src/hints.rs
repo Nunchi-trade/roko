@@ -42,5 +42,8 @@ pub fn show_deprecation_hint(old: &str, new: &str, hints_path: &Path) {
     if let Some(parent) = hints_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(hints_path, serde_json::to_string_pretty(&hints).unwrap_or_default());
+    let _ = std::fs::write(
+        hints_path,
+        serde_json::to_string_pretty(&hints).unwrap_or_default(),
+    );
 }
