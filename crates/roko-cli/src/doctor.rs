@@ -1,5 +1,6 @@
 //! `roko doctor` bootstrap diagnostics for self-hosted workspaces.
 
+use crate::auth_detect::{AuthMethod, detect_auth_from_config};
 use crate::config::{ConfigLayer, ConfigPaths, resolve_paths};
 use crate::{Config, load_resolved_config};
 use anyhow::{Context as _, Result};
@@ -183,6 +184,8 @@ pub async fn run_doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     checks.push(check_layout_basics(&workdir));
     checks.push(check_claude_cli());
     checks.push(check_anthropic_api_key());
+    checks.push(check_provider_usable(&workdir));
+    checks.push(check_default_model_configured(&loaded_config));
     checks.push(check_rust_version());
     checks.push(check_node_version());
     checks.push(check_serve_auth(&loaded_config));
@@ -453,6 +456,86 @@ fn check_layout_basics(workdir: &Path) -> DoctorCheck {
             path: Some(root),
             url: None,
             fix: Some("roko init".to_string()),
+        }
+    }
+}
+
+fn check_provider_usable(workdir: &Path) -> DoctorCheck {
+    let auth = detect_auth_from_config(workdir);
+    match auth {
+        AuthMethod::NeedsSetup => DoctorCheck {
+            id: "provider_usable".to_string(),
+            status: DoctorStatus::Fail,
+            message: "no LLM provider has working auth".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: Some(
+                "Set an API key. Example: export ANTHROPIC_API_KEY=sk-...".to_string(),
+            ),
+        },
+        _ => DoctorCheck {
+            id: "provider_usable".to_string(),
+            status: DoctorStatus::Ok,
+            message: format!("provider available: {}", auth.label()),
+            detail: None,
+            path: None,
+            url: None,
+            fix: None,
+        },
+    }
+}
+
+fn check_default_model_configured(loaded_config: &LoadedConfig) -> DoctorCheck {
+    let Some(config) = &loaded_config.resolved else {
+        return DoctorCheck {
+            id: "default_model_configured".to_string(),
+            status: DoctorStatus::Skipped,
+            message: "config unavailable; default_model not evaluated".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: None,
+        };
+    };
+
+    let model_key = config.agent.model.as_deref().unwrap_or("").trim();
+    if model_key.is_empty() {
+        return DoctorCheck {
+            id: "default_model_configured".to_string(),
+            status: DoctorStatus::Fail,
+            message: "no default_model configured".to_string(),
+            detail: None,
+            path: None,
+            url: None,
+            fix: Some("Set default_model in roko.toml [agent] section".to_string()),
+        };
+    }
+
+    let in_models_table = config.models.contains_key(model_key);
+    let is_builtin = roko_core::config::model_registry::builtin_model(model_key).is_some();
+
+    if in_models_table || is_builtin {
+        DoctorCheck {
+            id: "default_model_configured".to_string(),
+            status: DoctorStatus::Ok,
+            message: format!("default_model \"{model_key}\" is valid"),
+            detail: None,
+            path: None,
+            url: None,
+            fix: None,
+        }
+    } else {
+        DoctorCheck {
+            id: "default_model_configured".to_string(),
+            status: DoctorStatus::Fail,
+            message: format!(
+                "default_model \"{model_key}\" not found in models table or builtins"
+            ),
+            detail: None,
+            path: None,
+            url: None,
+            fix: Some("Set default_model in roko.toml [agent] section".to_string()),
         }
     }
 }
