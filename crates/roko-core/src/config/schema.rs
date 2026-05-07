@@ -1880,7 +1880,7 @@ default_model = "claude-sonnet-4-6"
         // so look up the configured default model by its key (not by slug).
         let default_key = cfg.agent.default_model.as_str();
         let default_model = models.get(default_key).expect("default model");
-        assert_eq!(default_model.slug, "glm-5.1");
+        assert_eq!(default_model.slug, "gpt-5.4-mini");
         assert!(
             !default_model.provider.is_empty(),
             "default model must declare a provider"
