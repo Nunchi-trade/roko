@@ -4269,6 +4269,10 @@ fn extract_prompt_text(prompt: &[ContentBlock]) -> String {
             ContentBlock::Diff { path, diff, .. } => {
                 format!("diff {path}:\n{}", diff.as_deref().unwrap_or(""))
             }
+            ContentBlock::Unknown => {
+                tracing::debug!("skipping unknown content block type in prompt");
+                String::new()
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -4422,6 +4426,9 @@ pub(crate) async fn resolve_context_items(prompt: &[ContentBlock], workdir: &Pat
                 }
             }
             ContentBlock::Image { .. } | ContentBlock::Diff { .. } => {}
+            ContentBlock::Unknown => {
+                tracing::debug!("skipping unknown content block in context resolution");
+            }
         }
     }
 

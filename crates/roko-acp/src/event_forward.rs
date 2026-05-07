@@ -178,6 +178,10 @@ fn summarize_content_block(block: &ContentBlock) -> String {
             .cloned()
             .unwrap_or_else(|| format!("diff: {path}")),
         ContentBlock::Image { .. } => "[image]".to_string(),
+        ContentBlock::Unknown => {
+            tracing::debug!("skipping unknown content block type");
+            "[unknown]".to_string()
+        }
     }
 }
 

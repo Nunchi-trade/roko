@@ -484,6 +484,10 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<String>,
     },
+    /// Catch-all for unknown/future content block types (e.g. 'audio').
+    /// Prevents deserialization failures when the ACP spec adds new types.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Reference to an ACP resource.
