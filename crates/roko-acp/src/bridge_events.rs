@@ -3951,6 +3951,7 @@ Available commands (organized by Will's core loop):
     let mut stdout_done = false;
     let mut stderr_done = false;
     let mut output = String::new();
+    let mut progress_task_counter: u64 = 0;
 
     loop {
         if stdout_done && stderr_done {
@@ -3965,8 +3966,70 @@ Available commands (organized by Will's core loop):
             line = stdout_lines.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(l)) => {
-                        output.push_str(&l);
-                        output.push('\n');
+                        if let Some(json_str) = l.strip_prefix("ROKO_PROGRESS: ") {
+                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                match value.get("type").and_then(|t| t.as_str()) {
+                                    Some("task_started") => {
+                                        progress_task_counter += 1;
+                                        let title = value.get("title")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("task");
+                                        let task_id = value.get("task_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        let call_id = format!("progress-{}-{}", task_id, progress_task_counter);
+                                        let _ = event_sender.send(CognitiveEvent::ToolCallStart {
+                                            tool_call_id: call_id,
+                                            title: title.to_string(),
+                                            kind: ToolCallKind::Terminal,
+                                            locations: None,
+                                        }).await;
+                                    }
+                                    Some("task_completed") => {
+                                        let task_id = value.get("task_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        let completed = value.get("completed")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        let total = value.get("total")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        let call_id = format!("progress-{}-{}", task_id, progress_task_counter);
+                                        let _ = event_sender.send(CognitiveEvent::ToolCallComplete {
+                                            tool_call_id: call_id,
+                                            status: ToolCallStatus::Completed,
+                                            content: vec![ContentBlock::Text {
+                                                text: format!("{}/{} tasks done", completed, total),
+                                            }],
+                                        }).await;
+                                    }
+                                    Some("agent_started") => {
+                                        let provider = value.get("provider")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        let model = value.get("model")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        let _ = event_sender.send(CognitiveEvent::TokenChunk(
+                                            format!("[agent] {} ({})\n", model, provider),
+                                        )).await;
+                                    }
+                                    _ => {
+                                        // Unknown progress type — pass through as text
+                                        output.push_str(&l);
+                                        output.push('\n');
+                                    }
+                                }
+                            } else {
+                                // JSON parse failed — pass through as plain text
+                                output.push_str(&l);
+                                output.push('\n');
+                            }
+                        } else {
+                            output.push_str(&l);
+                            output.push('\n');
+                        }
                     }
                     Ok(None) => stdout_done = true,
                     Err(e) => {
