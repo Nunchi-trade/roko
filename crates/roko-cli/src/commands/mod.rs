@@ -21,6 +21,7 @@ pub mod plan;
 pub mod prd;
 pub mod research;
 pub mod server;
+pub mod setup;
 pub mod show;
 pub mod status;
 pub mod think;

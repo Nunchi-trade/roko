@@ -488,6 +488,20 @@ Examples:
         #[arg(long)]
         serve_url: Option<String>,
     },
+    /// Interactive setup wizard: detect providers, init workspace, verify.
+    #[command(after_help = "\
+Examples:
+  roko setup                        Interactive guided setup
+  roko setup --yes                  Non-interactive (use first available provider)
+  roko setup --workdir /path        Setup in a specific directory")]
+    Setup {
+        /// Directory to set up (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Non-interactive mode: skip prompts, use first available provider.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Check workspace layer dependency rules.
     LayerCheck,
 
@@ -2402,6 +2416,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Doctor { workdir, serve_url } => {
             commands::util::cmd_doctor(cli, workdir, serve_url).await
         }
+        Command::Setup { workdir, yes } => commands::setup::cmd_setup(cli, workdir, yes).await,
         Command::LayerCheck => roko_cli::layer_check::run_layer_check(),
         Command::Plan { cmd } => {
             let wd = resolve_workdir(cli);
