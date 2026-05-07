@@ -370,6 +370,9 @@ Examples:
         /// Disable cascade routing for this run.
         #[arg(long)]
         no_cascade: bool,
+        /// Additional context files/dirs/globs to include in the prompt.
+        #[arg(long = "context", value_name = "PATH")]
+        context: Vec<PathBuf>,
         /// Prompt words. Quoted prompts are recommended.
         #[arg(value_name = "PROMPT")]
         prompt: Vec<String>,
@@ -1375,6 +1378,9 @@ Examples:
         /// Treat source as a file path to read (instead of inline text).
         #[arg(long)]
         from_file: Option<PathBuf>,
+        /// Additional context files/dirs/globs to include in the prompt.
+        #[arg(long = "context", value_name = "PATH")]
+        context: Vec<PathBuf>,
     },
     /// Regenerate an existing plan from its source PRD / plan extract.
     Regenerate {
@@ -2329,6 +2335,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                     None,
                     false,
                     provider,
+                    Vec::new(),
                 )
                 .await;
             }
@@ -2345,6 +2352,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             compare,
             r#continue,
             no_cascade,
+            context,
             prompt,
         } => {
             commands::do_cmd::cmd_do(
@@ -2360,6 +2368,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 r#continue,
                 no_cascade,
                 provider,
+                context,
             )
             .await
         }
