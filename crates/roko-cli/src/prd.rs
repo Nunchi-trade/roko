@@ -2373,6 +2373,63 @@ fn validate_and_fix_generated_plan(
                             }
                         }
                     }
+
+                    // Auto-add verify entries for implementer tasks with files
+                    // but no verify block. Researchers/strategists/scribes skip.
+                    if task.get("verify").is_none() {
+                        let role = task
+                            .get("role")
+                            .and_then(toml::Value::as_str)
+                            .unwrap_or("implementer");
+                        let files: Vec<String> = task
+                            .get("files")
+                            .and_then(toml::Value::as_array)
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(toml::Value::as_str)
+                                    .map(String::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        if role == "implementer" && !files.is_empty() {
+                            let mut auto_verify = Vec::new();
+
+                            // Infer crate name from file paths for compile check
+                            let crate_name = infer_crate_from_paths(&files);
+                            let compile_cmd = match &crate_name {
+                                Some(c) => format!("cargo check -p {c}"),
+                                None => "cargo check --workspace".to_string(),
+                            };
+                            auto_verify
+                                .push(make_verify_entry("compile", &compile_cmd, &format!(
+                                    "{} must compile",
+                                    crate_name.as_deref().unwrap_or("workspace"),
+                                )));
+
+                            // Add structural grep for expected symbols from title
+                            if let Some(title) = task.get("title").and_then(toml::Value::as_str) {
+                                let structural_cmd =
+                                    build_structural_verify_cmd(title, &files);
+                                if let Some(cmd) = structural_cmd {
+                                    auto_verify.push(make_verify_entry(
+                                        "structural",
+                                        &cmd,
+                                        "Expected symbols must exist in source",
+                                    ));
+                                }
+                            }
+
+                            task.insert(
+                                "verify".to_string(),
+                                toml::Value::Array(auto_verify),
+                            );
+                            eprintln!(
+                                "info: {task_id_label}: auto-added verify entries \
+                                 (compile + structural)"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2423,6 +2480,66 @@ fn validate_and_fix_generated_plan(
     }
 
     Ok(serialized)
+}
+
+/// Infer the crate name from a list of file paths.
+/// Looks for `crates/<name>/` pattern. Returns `None` if no crate path found.
+fn infer_crate_from_paths(files: &[String]) -> Option<String> {
+    for f in files {
+        // Match patterns like "crates/roko-cli/src/foo.rs"
+        if let Some(rest) = f.strip_prefix("crates/") {
+            if let Some(slash) = rest.find('/') {
+                return Some(rest[..slash].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Build a `[[task.verify]]` TOML table value.
+fn make_verify_entry(phase: &str, command: &str, fail_msg: &str) -> toml::Value {
+    let mut table = toml::value::Table::new();
+    table.insert("phase".to_string(), toml::Value::String(phase.to_string()));
+    table.insert(
+        "command".to_string(),
+        toml::Value::String(command.to_string()),
+    );
+    table.insert(
+        "fail_msg".to_string(),
+        toml::Value::String(fail_msg.to_string()),
+    );
+    toml::Value::Table(table)
+}
+
+/// Build a structural verify command that greps for expected symbols.
+/// Extracts likely function/struct names from the task title and greps
+/// the first file in the list for them.
+fn build_structural_verify_cmd(title: &str, files: &[String]) -> Option<String> {
+    let target_file = files.first()?;
+    // Extract words that look like identifiers (snake_case or CamelCase)
+    let candidates: Vec<&str> = title
+        .split_whitespace()
+        .filter(|w| {
+            w.len() >= 4
+                && w.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && w.chars().next().is_some_and(|c| c.is_alphabetic())
+                // Skip common non-symbol words
+                && !matches!(
+                    w.to_lowercase().as_str(),
+                    "with" | "from" | "into" | "that" | "this" | "pass" | "when"
+                        | "does" | "make" | "have" | "task" | "file" | "test"
+                        | "only" | "also" | "each" | "them" | "should" | "implement"
+                        | "create" | "update" | "remove" | "validate" | "generate"
+                )
+        })
+        .take(2)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    // Build a grep -q 'sym1\|sym2' file command
+    let pattern = candidates.join("\\|");
+    Some(format!("grep -q '{pattern}' {target_file}"))
 }
 
 /// Slugify a title.
