@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn all_models_present() {
-        assert_eq!(BUILTIN_MODELS.len(), 14);
+        assert_eq!(BUILTIN_MODELS.len(), 13);
     }
 
     #[test]

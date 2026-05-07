@@ -222,6 +222,19 @@ fn load_config_impl(
 mod load_config_tests {
     use super::*;
 
+    fn isolated_load_options() -> loader::LoadOptions {
+        loader::LoadOptions {
+            merge_global: false,
+            apply_env_overrides: false,
+            apply_hierarchical_env: false,
+            strict_validation: false,
+        }
+    }
+
+    fn load_config_isolated(workdir: &Path) -> Result<ValidatedConfig, LoadConfigError> {
+        loader::load_config_validated_with_options(workdir, &isolated_load_options())
+    }
+
     #[test]
     fn strict_rejects_dangerously_skip_permissions() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -242,14 +255,15 @@ mod load_config_tests {
         let toml_text = "[runner]\ndangerously_skip_permissions = true\n";
         std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
 
-        let validated = load_config(dir.path()).expect("local trust must permit dangerous flag");
+        let validated =
+            load_config_isolated(dir.path()).expect("local trust must permit dangerous flag");
         assert!(validated.config().runner.dangerously_skip_permissions);
     }
 
     #[test]
     fn missing_roko_toml_returns_default() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let validated = load_config(dir.path()).expect("default load ok");
+        let validated = load_config_isolated(dir.path()).expect("default load ok");
         assert_eq!(validated.config(), &RokoConfig::default());
         // Default path should still emit no soft warnings.
         assert!(validated.diagnostics().is_empty());
@@ -265,7 +279,7 @@ mod load_config_tests {
         );
         std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
 
-        let validated = load_config(dir.path()).expect("clean load ok");
+        let validated = load_config_isolated(dir.path()).expect("clean load ok");
         assert!(
             validated.diagnostics().is_empty(),
             "unexpected diagnostics: {:?}",
@@ -281,7 +295,7 @@ mod load_config_tests {
         let toml_text = "config_version = 1\n";
         std::fs::write(dir.path().join("roko.toml"), toml_text).expect("write roko.toml");
 
-        let validated = load_config(dir.path()).expect("older config still loads");
+        let validated = load_config_isolated(dir.path()).expect("older config still loads");
         let diagnostics = validated.diagnostics();
         assert_eq!(diagnostics.len(), 1, "got {diagnostics:?}");
         assert_eq!(diagnostics[0].key, "config_version");
@@ -290,7 +304,7 @@ mod load_config_tests {
     #[test]
     fn into_config_returns_inner_roko_config() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = load_config(dir.path())
+        let cfg = load_config_isolated(dir.path())
             .expect("default load ok")
             .into_config();
         assert_eq!(cfg, RokoConfig::default());
