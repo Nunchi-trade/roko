@@ -811,12 +811,7 @@ struct ModelsListRow {
 }
 
 fn format_models_list_rows(rows: &[ModelsListRow]) -> String {
-    let mut widths = [
-        "Model".len(),
-        "Provider".len(),
-        "Slug".len(),
-        "Key".len(),
-    ];
+    let mut widths = ["Model".len(), "Provider".len(), "Slug".len(), "Key".len()];
     for row in rows {
         widths[0] = widths[0].max(row.model.len());
         widths[1] = widths[1].max(row.provider.len());
@@ -828,15 +823,27 @@ fn format_models_list_rows(rows: &[ModelsListRow]) -> String {
     let _ = writeln!(
         out,
         "  {:<mw$}  {:<pw$}  {:<sw$}  {:<kw$}",
-        "Model", "Provider", "Slug", "Key",
-        mw = widths[0], pw = widths[1], sw = widths[2], kw = widths[3],
+        "Model",
+        "Provider",
+        "Slug",
+        "Key",
+        mw = widths[0],
+        pw = widths[1],
+        sw = widths[2],
+        kw = widths[3],
     );
     for row in rows {
         let _ = writeln!(
             out,
             "  {:<mw$}  {:<pw$}  {:<sw$}  {:<kw$}",
-            row.model, row.provider, row.slug, row.key_status,
-            mw = widths[0], pw = widths[1], sw = widths[2], kw = widths[3],
+            row.model,
+            row.provider,
+            row.slug,
+            row.key_status,
+            mw = widths[0],
+            pw = widths[1],
+            sw = widths[2],
+            kw = widths[3],
         );
     }
     out
@@ -1542,6 +1549,7 @@ pub(crate) fn format_provider_rows(rows: &[ProviderListRow]) -> String {
     out
 }
 
+#[cfg(test)]
 pub(crate) fn build_model_list_row(model_name: &str, profile: &ModelProfile) -> ModelListRow {
     ModelListRow {
         model: model_name.to_string(),
@@ -1555,6 +1563,7 @@ pub(crate) fn build_model_list_row(model_name: &str, profile: &ModelProfile) -> 
     }
 }
 
+#[cfg(test)]
 pub(crate) fn format_model_rows(rows: &[ModelListRow]) -> String {
     let mut widths = [
         "Model".len(),
@@ -1626,6 +1635,7 @@ pub(crate) fn format_model_rows(rows: &[ModelListRow]) -> String {
     out
 }
 
+#[cfg(test)]
 pub(crate) fn format_context_window(tokens: u64) -> String {
     if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
         format!("{}M", tokens / 1_000_000)
@@ -1642,10 +1652,12 @@ pub(crate) fn format_context_window(tokens: u64) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn format_bool_capability(value: bool) -> &'static str {
     if value { "✓" } else { "✗" }
 }
 
+#[cfg(test)]
 pub(crate) fn format_model_cost(profile: &ModelProfile) -> String {
     match (profile.cost_input_per_m, profile.cost_output_per_m) {
         (Some(input), Some(output)) => format!("${input:.2}/${output:.2}"),
@@ -2802,6 +2814,7 @@ pub(crate) struct ProviderListRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct ModelListRow {
     pub(crate) model: String,
     pub(crate) provider: String,
