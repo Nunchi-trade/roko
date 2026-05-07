@@ -24,6 +24,7 @@ pub(crate) async fn cmd_do(
     continue_work: Option<Option<String>>,
     no_cascade: bool,
     provider: Option<String>,
+    context: Vec<PathBuf>,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     let prompt = prompt_args.join(" ").trim().to_string();
@@ -93,10 +94,10 @@ pub(crate) async fn cmd_do(
             run_simple_path(cli, &workdir, &prompt, complexity, no_cascade, provider).await
         }
         PlanComplexity::Standard => {
-            run_standard_path(cli, &workdir, &prompt, no_cascade, provider).await
+            run_standard_path(cli, &workdir, &prompt, no_cascade, provider, &context).await
         }
         PlanComplexity::Complex => {
-            run_complex_path(cli, &workdir, &prompt, no_cascade, provider).await
+            run_complex_path(cli, &workdir, &prompt, no_cascade, provider, &context).await
         }
     }
 }
@@ -161,6 +162,7 @@ async fn run_standard_path(
     prompt: &str,
     no_cascade: bool,
     provider: Option<String>,
+    context: &[PathBuf],
 ) -> Result<i32> {
     use roko_cli::agent_config::{command_from_config, load_gateway_env};
     use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
@@ -185,18 +187,30 @@ async fn run_standard_path(
             .and_then(|s| RokoConfig::from_toml(&s).ok())
             .unwrap_or_default();
         crate::commands::util::preflight_provider_for_model(&do_config, &model_key)?;
-        // Aggregate provider readiness: warn/abort if no providers are usable.
-        crate::commands::util::preflight_providers_aggregate(&do_config)?;
     }
 
     // Generate plan from the prompt using the plan generate agent.
     let system = roko_cli::plan_generate::build_generation_prompt(workdir, prompt, "prompt");
+    let context_block = if context.is_empty() {
+        String::new()
+    } else {
+        let loaded = roko_cli::context_loader::load_context_files(
+            context,
+            roko_cli::context_loader::DEFAULT_BUDGET,
+            workdir,
+        );
+        if !loaded.is_empty() {
+            format!("\n\n<context>\n{loaded}</context>\n")
+        } else {
+            String::new()
+        }
+    };
     let task_prompt = format!(
         "Read the source below and generate implementation plan directories under .roko/plans/. \
          Search the codebase first to understand what exists. \
          Create plan.md and tasks.toml files with tier, model_hint, context (read_files with line ranges), \
          mcp_servers (per-task MCP server names), and verify steps (executable shell commands). \
-         Use the cheapest model tier for each task.\n\n{prompt}"
+         Use the cheapest model tier for each task.\n\n{prompt}{context_block}"
     );
 
     let effort = cli.effort.map(|e| e.to_string());
@@ -262,6 +276,7 @@ async fn run_complex_path(
     prompt: &str,
     no_cascade: bool,
     provider: Option<String>,
+    _context: &[PathBuf],
 ) -> Result<i32> {
     use roko_cli::agent_config::{command_from_config, load_gateway_env};
     use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
@@ -301,8 +316,6 @@ async fn run_complex_path(
             .and_then(|s| RokoConfig::from_toml(&s).ok())
             .unwrap_or_default();
         crate::commands::util::preflight_provider_for_model(&do_config, &model_key)?;
-        // Aggregate provider readiness: warn/abort if no providers are usable.
-        crate::commands::util::preflight_providers_aggregate(&do_config)?;
     }
 
     let title = prompt;
@@ -575,9 +588,15 @@ async fn run_plan_execution(
         projection: Some(projection),
         http_event_sink: None,
         output_sink: if !cli.quiet && !cli.json {
-            std::sync::Arc::new(roko_cli::runner::output_sink::FormattedStderrSink::new(
-                cli.color.should_color(),
-            )) as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+            if roko_cli::inline::should_use_inline() {
+                std::sync::Arc::new(roko_cli::runner::output_sink::StderrSink::new())
+                    as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+            } else {
+                std::sync::Arc::new(roko_cli::runner::output_sink::FormattedStderrSink::new(
+                    cli.color.should_color(),
+                ))
+                    as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
+            }
         } else {
             std::sync::Arc::new(roko_cli::runner::output_sink::NoopSink)
                 as std::sync::Arc<dyn roko_cli::runner::output_sink::RunOutputSink>
