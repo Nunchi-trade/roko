@@ -131,13 +131,8 @@ timeout_ms = 5000
     )
     .expect("write roko.toml");
 
-    // The learning runtime writes episodes to .roko/learn/episodes.jsonl
-    // (not .roko/memory/episodes.jsonl which was the old path).
-    let episodes_path = tmp
-        .path()
-        .join(".roko")
-        .join("learn")
-        .join("episodes.jsonl");
+    // WorkflowEngine writes workflow-complete episodes to the canonical root log.
+    let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
     let before = fs::read_to_string(&episodes_path).unwrap_or_default();
     run_roko_isolated(
         tmp.path(),
@@ -153,7 +148,7 @@ timeout_ms = 5000
 
     assert!(
         after.lines().count() > before.lines().count(),
-        "CLAUDE.md item 03 invalidated: .roko/learn/episodes.jsonl did not grow during a live run"
+        "CLAUDE.md item 03 invalidated: .roko/episodes.jsonl did not grow during a live run"
     );
     let last_episode: serde_json::Value = serde_json::from_str(
         after
@@ -164,11 +159,32 @@ timeout_ms = 5000
     .expect("parse appended episode");
     assert_eq!(
         last_episode
-            .get("extra")
-            .and_then(|extra| extra.get("plan_id"))
+            .get("trigger_kind")
             .and_then(serde_json::Value::as_str),
-        Some("cli-run"),
-        "CLAUDE.md item 03 invalidated: appended learning episode is missing the cli-run marker\n{last_episode}"
+        Some("workflow_complete"),
+        "CLAUDE.md item 03 invalidated: appended episode is not a workflow completion\n{last_episode}"
+    );
+    assert_eq!(
+        last_episode
+            .get("success")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "CLAUDE.md item 03 invalidated: appended workflow episode did not record success\n{last_episode}"
+    );
+    let run_id = last_episode
+        .get("extra")
+        .and_then(|extra| extra.get("run_id"))
+        .and_then(serde_json::Value::as_str);
+    assert!(
+        run_id.is_some(),
+        "CLAUDE.md item 03 invalidated: appended workflow episode is missing its run id marker\n{last_episode}"
+    );
+    assert_eq!(
+        run_id,
+        last_episode
+            .get("task_id")
+            .and_then(serde_json::Value::as_str),
+        "CLAUDE.md item 03 invalidated: appended workflow episode run id does not match task id\n{last_episode}"
     );
     assert!(
         last_episode
@@ -180,6 +196,7 @@ timeout_ms = 5000
 }
 
 #[test]
+#[cfg(feature = "legacy-runner-v2")]
 fn item_04_plan_runner_reports_non_zero_agent_calls() {
     let tmp = TempDir::new().expect("tempdir");
     setup_sample_plan_workspace(tmp.path());
@@ -291,6 +308,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"mcp-ok"}}}}'
 }
 
 #[test]
+#[cfg(feature = "legacy-runner-v2")]
 fn item_06_plan_run_persists_learning_feedback() {
     let tmp = TempDir::new().expect("tempdir");
     setup_sample_plan_workspace(tmp.path());

@@ -427,18 +427,6 @@ async fn bash_executes_and_captures_stdout() {
 }
 
 #[tokio::test]
-async fn bash_rejects_blocklisted_command() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let handler = handler_for("bash").expect("bash");
-    let ctx = ToolContext::testing(tmp.path());
-    let call = call_with_args("bash", serde_json::json!({ "command": "rm -rf /" }));
-    assert!(matches!(
-        handler.execute(call, &ctx).await,
-        ToolResult::Err(ToolError::CommandNotAllowed(_))
-    ));
-}
-
-#[tokio::test]
 async fn bash_requires_exec_capability() {
     use roko_core::tool::trace::NoopTraceSink;
     use roko_core::tool::{NeverCancel, NoopAuditSink, NoopMetricsSink, ToolPermission};

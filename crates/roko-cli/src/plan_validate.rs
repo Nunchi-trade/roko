@@ -1474,6 +1474,7 @@ title = "Create crate ROKO-COMPOSE"
 prompt = "Please create crate ROKO-COMPOSE for the workspace."
 role = "implementer"
 depends_on = []
+files = ["crates/roko-compose/src/lib.rs"]
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 
 [[task]]
@@ -1482,6 +1483,7 @@ title = "Rewrite the pipeline"
 description = "This is a greenfield implementation starting from scratch."
 role = "implementer"
 depends_on = []
+files = ["crates/roko-core/src/lib.rs"]
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 "#,
         )
@@ -1523,6 +1525,7 @@ title = "Create crate roko-compose"
 prompt = "Please create crate roko-compose."
 role = "implementer"
 depends_on = []
+files = ["crates/roko-compose/src/lib.rs"]
 verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 "#,
         )

@@ -1215,6 +1215,10 @@ heartbeat_interval_secs = 30
 [feed_agents]
 enabled = true
 
+[timeouts]
+plan_total_secs = 14400
+gate_test_secs = 1800
+
 [runner]
-plan_timeout_secs = 3600
+plan_timeout_secs = 14400
 dangerously_skip_permissions = true

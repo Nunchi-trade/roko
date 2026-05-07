@@ -17,7 +17,7 @@ use crate::learning_helpers::{
     distillation_model_caller, load_or_create_playbook_store, load_or_create_skill_library,
     playbook_query_context, render_prior_experience,
 };
-use crate::model_selection::{EffectiveModelSelection, resolve_effective_model};
+use crate::model_selection::{EffectiveModelSelection, SelectionSource, resolve_effective_model};
 use crate::output_format;
 #[cfg(feature = "legacy-orchestrate")]
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
@@ -395,6 +395,12 @@ fn resolve_workflow_model_selection(
         model_config.agent.default_model = model;
     }
 
+    if let Some(selection) =
+        legacy_command_workflow_selection(&mut config, &mut model_config, overrides)
+    {
+        return Ok((config, model_config, selection));
+    }
+
     let role = non_empty(&config.prompt.role).map(str::to_owned);
     let selection = resolve_effective_model(
         overrides.model.clone(),
@@ -410,6 +416,50 @@ fn resolve_workflow_model_selection(
     config.agent.model = Some(selection.effective_model_key.clone());
 
     Ok((config, model_config, selection))
+}
+
+fn legacy_command_workflow_selection(
+    config: &mut Config,
+    model_config: &mut RokoConfig,
+    overrides: &CliOverrides,
+) -> Option<EffectiveModelSelection> {
+    if overrides.provider.is_some()
+        || !model_config.providers.is_empty()
+        || !model_config.models.is_empty()
+    {
+        return None;
+    }
+
+    let command = config.agent.command.trim();
+    if command.is_empty() || command == "false" {
+        return None;
+    }
+    if is_known_protocol_command(command) {
+        return None;
+    }
+
+    let model = overrides
+        .model
+        .clone()
+        .or_else(|| config.agent.model.clone())
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| command.to_string());
+
+    model_config.agent.default_model.clone_from(&model);
+    config.agent.model = Some(model.clone());
+
+    let resolved = resolve_model(model_config, &model);
+    Some(EffectiveModelSelection {
+        requested_model: Some(model.clone()),
+        effective_model_key: resolved.model_key,
+        provider_key: format!("exec:{command}"),
+        provider_kind: "exec".to_string(),
+        backend_slug: resolved.slug,
+        source: SelectionSource::ProjectDefault,
+        reason: format!(
+            "project agent command `{command}` selected generic subprocess model `{model}`"
+        ),
+    })
 }
 
 fn ensure_workflow_agent_configured(
@@ -548,6 +598,7 @@ pub async fn run_with_workflow_engine_with_hub(
 ) -> anyhow::Result<WorkflowRunReport> {
     let (config, model_config, selection) = resolve_workflow_model_selection(workdir, overrides)?;
     selection.print_stderr();
+    let workflow_prompt = workflow_prompt_with_config_files(workdir, &config, prompt)?;
 
     let pipeline_config = model_config.pipeline.clone();
     let services = build_workflow_effect_services(
@@ -576,7 +627,7 @@ pub async fn run_with_workflow_engine_with_hub(
     };
 
     let report = run_workflow_engine_with_services(
-        prompt,
+        &workflow_prompt,
         workdir,
         workflow,
         enabled_gates,
@@ -601,6 +652,7 @@ pub async fn run_workflow_engine_report_with_hub(
 ) -> anyhow::Result<WorkflowRunReport> {
     let (config, model_config, selection) = resolve_workflow_model_selection(workdir, overrides)?;
     selection.print_stderr();
+    let workflow_prompt = workflow_prompt_with_config_files(workdir, &config, prompt)?;
     let pipeline_config = model_config.pipeline.clone();
     let services = build_workflow_effect_services(
         workdir,
@@ -620,7 +672,7 @@ pub async fn run_workflow_engine_report_with_hub(
     };
 
     run_workflow_engine_with_services(
-        prompt,
+        &workflow_prompt,
         workdir,
         workflow,
         enabled_gates,
@@ -630,6 +682,43 @@ pub async fn run_workflow_engine_report_with_hub(
         selection.provider_key,
     )
     .await
+}
+
+fn workflow_prompt_with_config_files(
+    workdir: &Path,
+    config: &Config,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    if config.prompt.files.is_empty() {
+        return Ok(prompt.to_string());
+    }
+
+    let mut enriched = prompt.to_string();
+    enriched.push_str("\n\n## Prompt Files\n");
+    for file in &config.prompt.files {
+        enriched.push_str("\n");
+        enriched.push_str(&render_prompt_file_for_workflow(workdir, file)?);
+    }
+    Ok(enriched)
+}
+
+fn render_prompt_file_for_workflow(workdir: &Path, spec: &PromptFile) -> anyhow::Result<String> {
+    let full_path = if spec.path.is_absolute() {
+        spec.path.clone()
+    } else {
+        workdir.join(&spec.path)
+    };
+    let contents = std::fs::read_to_string(&full_path)
+        .with_context(|| format!("read prompt file {}", full_path.display()))?;
+    let label = spec
+        .name
+        .as_deref()
+        .unwrap_or_else(|| spec.path.to_str().unwrap_or("prompt_file"));
+    Ok(format!(
+        "### {label}\nPath: `{}`\n\n{}",
+        spec.path.display(),
+        contents
+    ))
 }
 
 async fn run_workflow_engine_with_services(
@@ -3337,9 +3426,9 @@ mod tests {
             Some("mock response from implementer")
         );
         assert!(transcript.success);
-        // Gate verdicts are not yet surfaced through RunLedger
-        // (record_gate_input is a stub), so transcript.gates is empty.
-        assert!(transcript.gates.is_empty());
+        // Gate verdicts are surfaced through RuntimeEvent::GatePassed in the
+        // effect driver, so the mock "compile" gate appears in the transcript.
+        assert!(!transcript.gates.is_empty());
         assert_eq!(transcript.cost_usd, Some(0.001));
         assert_eq!(
             transcript.episode_id.as_deref(),

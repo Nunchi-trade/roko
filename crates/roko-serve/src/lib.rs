@@ -2840,10 +2840,20 @@ mod tests {
         router.observe(vec![0.0; CONTEXT_DIM], 0, 1.0);
         router.save(&router_path).expect("seed router");
 
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.models.insert(
+            "claude-sonnet".to_string(),
+            roko_core::config::schema::ModelProfile {
+                provider: "anthropic".to_string(),
+                slug: "claude-sonnet-4-6".to_string(),
+                ..Default::default()
+            },
+        );
+
         let persisted_state = build_app_state(
             persisted_workdir.clone(),
             Arc::new(NoOpRuntime),
-            roko_core::config::schema::RokoConfig::default(),
+            config.clone(),
             None,
         )
         .expect("build_app_state");
@@ -2864,7 +2874,7 @@ mod tests {
         let fresh_state = build_app_state(
             fresh_dir.path().to_path_buf(),
             Arc::new(NoOpRuntime),
-            roko_core::config::schema::RokoConfig::default(),
+            config,
             None,
         )
         .expect("build_app_state");

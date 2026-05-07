@@ -774,6 +774,9 @@ impl SystemPromptBuilder {
         // Derive the token budget from the budget profile (skills field, char-to-token
         // approximation) instead of the old hardcoded 500-token constant.
         let skill_token_budget = self.budget_profile.map(|b| b.skills / 4).unwrap_or(500);
+        if skill_token_budget == 0 {
+            return None;
+        }
 
         let mut rendered = String::from("## Relevant Techniques");
         let mut kept_playbooks = 0usize;
@@ -859,7 +862,9 @@ impl SystemPromptBuilder {
             "domain_context" | "context_layer" | "pheromone_signals" => Some(budget.context),
             "gate_feedback" => Some(budget.context),
             "relevant_techniques" | "tool_hints" => Some(budget.skills),
-            "role_identity" | "agents_instructions" => Some(budget.plan.min(8_000)),
+            "role_identity" | "agents_instructions" => {
+                Some(budget.plan.max(budget.instructions).min(8_000))
+            }
             "task_context" => Some(budget.plan),
             "affect_guidance" => Some(budget.instructions),
             _ => {

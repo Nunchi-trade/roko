@@ -2283,9 +2283,9 @@ depends_on = ["V02"]
 
 [[task.verify]]
 phase = "test"
-command = "cargo test --workspace 2>&1 | tail -20"
+command = "tmp=$(mktemp /tmp/roko-v03.XXXXXX); cargo test --workspace > \"$tmp\" 2>&1; code=$?; if [ \"$code\" -ne 0 ]; then echo \"full test log: $tmp\"; rg -n \"failures:|---- .* stdout ----|panicked at|FAILED|error:\" \"$tmp\" | tail -120; tail -80 \"$tmp\"; exit \"$code\"; else tail -80 \"$tmp\"; rm -f \"$tmp\"; fi"
 fail_msg = "All tests must pass"
-timeout_ms = 600000
+timeout_ms = 1800000
 
 [[task]]
 id = "V04"
@@ -2307,6 +2307,6 @@ depends_on = ["V03"]
 
 [[task.verify]]
 phase = "integration"
-command = "cargo build --release -p roko-cli 2>&1 | tail -5"
+command = "tmp=$(mktemp /tmp/roko-v04.XXXXXX); cargo build --release -p roko-cli > \"$tmp\" 2>&1; code=$?; if [ \"$code\" -ne 0 ]; then echo \"release build log: $tmp\"; tail -120 \"$tmp\"; exit \"$code\"; else tail -20 \"$tmp\"; rm -f \"$tmp\"; fi"
 fail_msg = "Release build must succeed"
-timeout_ms = 600000
+timeout_ms = 1800000

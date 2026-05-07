@@ -631,6 +631,7 @@ fn provider_test_request(model_key: &str, provider_id: &str) -> ModelCallRequest
         budget_remaining: None,
         routing_hints: Vec::new(),
         cache_policy: CachePolicy::Bypass,
+        tools: Vec::new(),
     }
 }
 
@@ -733,7 +734,7 @@ mod tests {
             roko_core::config::schema::ProviderConfig {
                 kind: roko_core::agent::ProviderKind::OpenAiCompat,
                 base_url: Some("https://api.z.ai/api/paas/v4".into()),
-                api_key_env: Some("ZAI_API_KEY".into()),
+                api_key_env: Some("ROKO_TEST_ZAI_API_KEY_NEVER_SET".into()),
                 command: None,
                 args: None,
                 timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
@@ -806,13 +807,16 @@ mod tests {
             .expect("body bytes");
         let response: ProvidersResponse = serde_json::from_slice(&body).expect("parse response");
 
-        assert_eq!(response.providers.len(), 1);
-        assert_eq!(response.providers[0].id, "zai");
-        assert_eq!(response.providers[0].kind, "openai_compat");
-        assert_eq!(response.providers[0].model_count, 1);
-        assert!(!response.providers[0].has_api_key);
+        let provider = response
+            .providers
+            .iter()
+            .find(|provider| provider.id == "zai")
+            .expect("configured provider should be present");
+        assert_eq!(provider.kind, "openai_compat");
+        assert_eq!(provider.model_count, 1);
+        assert!(!provider.has_api_key);
 
-        let health = response.providers[0]
+        let health = provider
             .health
             .as_ref()
             .expect("provider health should be present");
@@ -934,7 +938,7 @@ mod tests {
             roko_core::config::schema::ProviderConfig {
                 kind: roko_core::agent::ProviderKind::OpenAiCompat,
                 base_url: Some("https://api.z.ai/api/paas/v4".into()),
-                api_key_env: Some("ZAI_API_KEY".into()),
+                api_key_env: Some("ROKO_TEST_ZAI_API_KEY_NEVER_SET".into()),
                 command: None,
                 args: None,
                 timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
@@ -949,7 +953,7 @@ mod tests {
             roko_core::config::schema::ProviderConfig {
                 kind: roko_core::agent::ProviderKind::AnthropicApi,
                 base_url: Some("https://api.anthropic.com".into()),
-                api_key_env: Some("ANTHROPIC_API_KEY".into()),
+                api_key_env: Some("ROKO_TEST_ANTHROPIC_API_KEY_NEVER_SET".into()),
                 command: None,
                 args: None,
                 timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
@@ -1105,7 +1109,7 @@ mod tests {
             roko_core::config::schema::ProviderConfig {
                 kind: roko_core::agent::ProviderKind::OpenAiCompat,
                 base_url: Some("https://api.z.ai/api/paas/v4".into()),
-                api_key_env: Some("ZAI_API_KEY".into()),
+                api_key_env: Some("ROKO_TEST_ZAI_API_KEY_NEVER_SET".into()),
                 command: None,
                 args: None,
                 timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),
@@ -1320,7 +1324,7 @@ mod tests {
             roko_core::config::schema::ProviderConfig {
                 kind: roko_core::agent::ProviderKind::OpenAiCompat,
                 base_url: Some("https://api.z.ai/api/paas/v4".into()),
-                api_key_env: Some("ZAI_API_KEY".into()),
+                api_key_env: Some("ROKO_TEST_ZAI_API_KEY_NEVER_SET".into()),
                 command: None,
                 args: None,
                 timeout_ms: Some(DEFAULT_REQUEST_TIMEOUT_MS),

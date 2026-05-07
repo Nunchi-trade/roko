@@ -348,12 +348,15 @@ impl OpenAiCompatLlmBackend {
         line: &[u8],
         accumulator: &mut StreamAccumulator,
         event_tx: &mpsc::Sender<StreamChunk>,
-    ) {
+    ) -> bool {
         let line = String::from_utf8_lossy(line);
         let line = line.trim_end_matches(['\r', '\n']);
         if let Some(chunk) = parse_sse_line(line) {
             accumulator.push(chunk.clone());
             let _ = event_tx.send(chunk).await;
+            true
+        } else {
+            false
         }
     }
 
@@ -744,9 +747,11 @@ impl LlmBackend for OpenAiCompatLlmBackend {
 
         let mut response = response;
         let mut pending = Vec::new();
+        let mut raw_body = Vec::new();
         let mut accumulator = StreamAccumulator::new();
         let mut metadata = StreamResponseMetadata::default();
         let mut first_chunk = true;
+        let mut saw_stream_event = false;
 
         loop {
             let chunk_fut = response.chunk();
@@ -788,17 +793,34 @@ impl LlmBackend for OpenAiCompatLlmBackend {
                 break;
             };
 
+            raw_body.extend_from_slice(&chunk);
             pending.extend_from_slice(&chunk);
             while let Some(newline_idx) = pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = pending.drain(..=newline_idx).collect();
                 Self::capture_stream_metadata(&line, &mut metadata);
-                Self::push_stream_line(&line, &mut accumulator, &event_tx).await;
+                saw_stream_event |=
+                    Self::push_stream_line(&line, &mut accumulator, &event_tx).await;
             }
         }
 
         if !pending.is_empty() {
             Self::capture_stream_metadata(&pending, &mut metadata);
-            Self::push_stream_line(&pending, &mut accumulator, &event_tx).await;
+            saw_stream_event |= Self::push_stream_line(&pending, &mut accumulator, &event_tx).await;
+        }
+
+        if !saw_stream_event {
+            let json: Value = serde_json::from_slice(&raw_body)
+                .map_err(|e| LlmError::Backend(format!("parse non-SSE response: {e}")))?;
+            if let Some(text) = json
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                let _ = event_tx
+                    .send(StreamChunk::ContentDelta(text.to_string()))
+                    .await;
+            }
+            return Ok(BackendResponse::Json(json));
         }
 
         let json = Self::stream_response_to_json(accumulator.finalize(), metadata)?;

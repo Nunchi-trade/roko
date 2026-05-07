@@ -188,14 +188,18 @@ async fn chain_wallet_info_returns_live_details() {
     assert!(body["nonce"].is_u64(), "nonce should be present as u64");
 }
 
-// ── Test 5: chain_handler_map creates all 14 handlers (live client) ─────
+// ── Test 5: chain_handler_map creates all canonical handlers (live client) ─────
 
 #[tokio::test]
-async fn chain_handler_map_creates_all_14_tools() {
+async fn chain_handler_map_creates_all_canonical_tools() {
     let client = make_client();
     let map = chain_handler_map(client as Arc<dyn ChainClient>, None);
 
-    assert_eq!(map.len(), 14, "should create exactly 14 handlers");
+    assert_eq!(
+        map.len(),
+        CHAIN_TOOL_NAMES.len(),
+        "should create exactly the canonical chain handlers"
+    );
 
     for name in CHAIN_TOOL_NAMES {
         let handler = map

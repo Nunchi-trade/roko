@@ -6,6 +6,7 @@ use crate::dispatcher::{HandlerResolver, ToolDispatcher};
 use crate::exec::ExecAgent;
 use crate::http::{HttpPostError, HttpPoster};
 use crate::openai_compat_backend::OpenAiCompatLlmBackend;
+use crate::rate_limit::ProviderRateLimiter;
 use crate::safety::SafetyLayer;
 use crate::streaming::StreamChunk;
 use crate::streaming::parse_sse_line;
@@ -1050,7 +1051,9 @@ fn parity_tool() -> ToolDef {
 }
 
 fn openai_compat_backend(backend: ParityBackend, poster: RecordedPoster) -> OpenAiCompatLlmBackend {
-    OpenAiCompatLlmBackend::new("test-key", backend.model()).with_poster(Box::new(poster))
+    OpenAiCompatLlmBackend::new("test-key", backend.model())
+        .with_rate_limiter(Arc::new(ProviderRateLimiter::new(60_000)))
+        .with_poster(Box::new(poster))
 }
 
 fn openai_compat_backend_with_base_url(
@@ -1059,6 +1062,7 @@ fn openai_compat_backend_with_base_url(
 ) -> OpenAiCompatLlmBackend {
     OpenAiCompatLlmBackend::new("test-key", backend.model())
         .with_base_url(base_url)
+        .with_rate_limiter(Arc::new(ProviderRateLimiter::new(60_000)))
         .with_timeout_ms(5_000)
 }
 

@@ -319,6 +319,7 @@ async fn exec_agent_integrates_with_composer() {
         .with_priority(SectionPriority::Critical)
         .into_signal()
         .unwrap();
+    let sec_id = sec.id;
 
     let prompt = composer
         .compose(&[sec], &Budget::unlimited(), &NoOpScorer, &Context::at(0))
@@ -330,10 +331,10 @@ async fn exec_agent_integrates_with_composer() {
     assert!(result.success);
     let echoed = result.output.body.as_text().unwrap();
     assert!(echoed.contains("echo this back"));
-    // Output lineage points back to the prompt.
-    assert_eq!(result.output.lineage, vec![prompt.id]);
     // Prompt lineage points back to the section.
-    assert_eq!(prompt.lineage.len(), 1);
+    assert_eq!(prompt.lineage, vec![sec_id]);
+    // Output lineage preserves the prompt inputs and appends the prompt id.
+    assert_eq!(result.output.lineage, vec![sec_id, prompt.id]);
 }
 
 // ───────────────────────────────────────────────────────────────────────────

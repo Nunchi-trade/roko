@@ -548,11 +548,13 @@ mod tests {
             .expect("body");
         let feeds: Vec<roko_core::FeedRuntimeStatus> =
             serde_json::from_slice(&body).expect("parse");
-        assert_eq!(feeds.len(), 2);
+        assert_eq!(feeds.len(), 3);
         assert_eq!(feeds[0].id, "file-watch-roko-dir");
         assert_eq!(feeds[0].topic, "fs.changed");
         assert_eq!(feeds[1].id, "provider-health-feed");
         assert_eq!(feeds[1].topic, "provider.health");
+        assert_eq!(feeds[2].id, "isfr-keeper");
+        assert_eq!(feeds[2].topic, "isfr.rates");
     }
 
     #[tokio::test]

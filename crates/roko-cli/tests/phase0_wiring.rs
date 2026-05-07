@@ -9,6 +9,8 @@
 //! 6. Signal scaffold: roko_core::Signal type alias resolves
 //! 7. Model selection: cascade router used (or fallback if single model)
 
+#![cfg(feature = "legacy-runner-v2")]
+
 mod common;
 
 use common::{run_sample_plan, setup_sample_plan_workspace};

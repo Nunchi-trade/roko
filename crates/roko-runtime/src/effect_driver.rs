@@ -59,6 +59,12 @@ pub(crate) struct WorkflowFeedbackTotals {
     pub total_cost_usd: f64,
 }
 
+enum GitWorktreeStatus {
+    Inside,
+    Outside,
+    Error(String),
+}
+
 /// Drives workflow execution by translating state-machine actions into effects.
 pub struct EffectDriver {
     services: EffectServices,
@@ -353,6 +359,14 @@ impl EffectDriver {
     /// Returns `PipelineInput::CommitFinished` with a typed outcome for created
     /// commits, clean trees, and commit failures.
     pub async fn commit(&self, message: &str) -> PipelineInput {
+        match self.git_worktree_status().await {
+            GitWorktreeStatus::Inside => {}
+            GitWorktreeStatus::Outside => {
+                return self.commit_noop("not a git worktree; skipping commit");
+            }
+            GitWorktreeStatus::Error(error) => return self.commit_error(error),
+        }
+
         match tokio::process::Command::new("git")
             .args(["add", "-A"])
             .current_dir(&self.workdir)
@@ -417,19 +431,50 @@ impl EffectDriver {
             Ok(output) => {
                 let output_text = command_failure_details(&output);
                 if output_text.contains("nothing to commit") {
-                    self.emit(RuntimeEvent::FeedbackRecorded {
-                        run_id: self.run_id.clone(),
-                        kind: "commit_noop".to_string(),
-                        summary: "nothing to commit, working tree clean".to_string(),
-                    });
-                    PipelineInput::CommitFinished {
-                        outcome: CommitOutcome::NoChanges,
-                    }
+                    self.commit_noop("nothing to commit, working tree clean")
                 } else {
                     self.commit_error(format!("git commit failed: {output_text}"))
                 }
             }
             Err(err) => self.commit_error(format!("git commit failed: {err}")),
+        }
+    }
+
+    async fn git_worktree_status(&self) -> GitWorktreeStatus {
+        match tokio::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(&self.workdir)
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.trim() == "true" {
+                    GitWorktreeStatus::Inside
+                } else {
+                    GitWorktreeStatus::Outside
+                }
+            }
+            Ok(output) => {
+                let details = command_failure_details(&output);
+                if details.contains("not a git repository") {
+                    GitWorktreeStatus::Outside
+                } else {
+                    GitWorktreeStatus::Error(format!("git rev-parse failed: {details}"))
+                }
+            }
+            Err(err) => GitWorktreeStatus::Error(format!("git rev-parse failed: {err}")),
+        }
+    }
+
+    fn commit_noop(&self, summary: &str) -> PipelineInput {
+        self.emit(RuntimeEvent::FeedbackRecorded {
+            run_id: self.run_id.clone(),
+            kind: "commit_noop".to_string(),
+            summary: summary.to_string(),
+        });
+        PipelineInput::CommitFinished {
+            outcome: CommitOutcome::NoChanges,
         }
     }
 
@@ -564,6 +609,7 @@ fn model_call_request(parts: ModelCallRequestParts<'_>) -> ModelCallRequest {
         budget_remaining: None,
         routing_hints: Vec::new(),
         cache_policy: modulated_cache_policy(parts.modulation),
+        tools: Vec::new(),
     }
 }
 
@@ -873,6 +919,31 @@ mod tests {
         };
         let tempdir = tempfile::tempdir().expect("create tempdir");
         init_clean_git_workdir(tempdir.path());
+        let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
+
+        let input = driver.commit("test commit").await;
+
+        assert!(matches!(
+            input,
+            PipelineInput::CommitFinished {
+                outcome: CommitOutcome::NoChanges
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn commit_outside_git_worktree_returns_typed_no_changes() {
+        let services = EffectServices {
+            default_model: "mock-model".to_string(),
+            model_caller: Arc::new(RecordingModelCaller {
+                captured: Arc::new(Mutex::new(None)),
+            }),
+            prompt_assembler: Arc::new(StaticPromptAssembler),
+            feedback_sink: Arc::new(RecordingFeedbackSink),
+            gate_runner: Arc::new(UnusedGateRunner),
+            affect_policy: None,
+        };
+        let tempdir = tempfile::tempdir().expect("create tempdir");
         let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
 
         let input = driver.commit("test commit").await;

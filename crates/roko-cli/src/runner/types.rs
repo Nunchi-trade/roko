@@ -15,6 +15,25 @@ use roko_core::defaults::{
 };
 use roko_fs::RokoLayout;
 
+/// Effective plan wall-clock timeout in seconds.
+///
+/// `[timeouts].plan_total_secs` is the canonical setting. If that field is
+/// still at its default but the legacy `[runner].plan_timeout_secs` field was
+/// changed, honor the legacy value so older project configs keep working.
+#[must_use]
+pub fn effective_plan_timeout_secs(roko_config: &RokoConfig) -> u64 {
+    let timeout_secs = roko_config.timeouts.plan_total_secs.max(1);
+    let runner_secs = roko_config.runner.plan_timeout_secs;
+    if roko_config.timeouts.plan_total_secs == DEFAULT_PLAN_TIMEOUT_SECS
+        && runner_secs != DEFAULT_PLAN_TIMEOUT_SECS
+        && runner_secs > 0
+    {
+        runner_secs
+    } else {
+        timeout_secs
+    }
+}
+
 // ─── Agent Events ───────────────────────────────────────────────────────
 
 // Events emitted by provider runtime adapters. Re-exporting the canonical
@@ -1386,7 +1405,7 @@ impl RunConfig {
             .unwrap_or(DEFAULT_RUNNER_MAX_CONCURRENT_TASKS)
             .max(1);
         let timeout_secs = roko_config.timeouts.agent_dispatch().as_secs().max(1);
-        let plan_timeout_secs = roko_config.timeouts.plan_total().as_secs().max(1);
+        let plan_timeout_secs = effective_plan_timeout_secs(&roko_config);
         let daimon_state = Self::daimon_state_for_workdir(&workdir);
 
         Self {
@@ -1680,6 +1699,25 @@ mod tests {
     }
 
     #[test]
+    fn run_config_honors_legacy_runner_plan_timeout_when_timeouts_default() {
+        let roko_config = RokoConfig::from_toml(
+            r#"
+            [runner]
+            plan_timeout_secs = 14400
+            "#,
+        )
+        .expect("parse roko.toml");
+
+        let config = RunConfig::from_roko_config(
+            PathBuf::from("/tmp/work"),
+            PathBuf::from("/tmp/plan"),
+            roko_config,
+        );
+
+        assert_eq!(config.plan_timeout_secs, 14_400);
+    }
+
+    #[test]
     fn run_config_from_roko_toml_all_timeout_fields() {
         let roko_config = RokoConfig::from_toml(
             r#"
@@ -1789,6 +1827,31 @@ mod tests {
         assert_eq!(
             event_loop::health_check_timeout(&config),
             Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn event_loop_plan_timeout_uses_legacy_runner_value_when_canonical_default() {
+        use crate::runner::event_loop;
+        use std::time::Duration;
+
+        let roko_config = RokoConfig::from_toml(
+            r#"
+            [runner]
+            plan_timeout_secs = 14400
+            "#,
+        )
+        .expect("parse");
+
+        let config = RunConfig::from_roko_config(
+            PathBuf::from("/tmp/work"),
+            PathBuf::from("/tmp/plan"),
+            roko_config,
+        );
+
+        assert_eq!(
+            event_loop::plan_total_timeout(&config),
+            Duration::from_secs(14_400)
         );
     }
 

@@ -1,12 +1,88 @@
 //! End-to-end CLI test.
 //!
 //! Spawns the `roko` binary against a tempdir: runs `init`, then `run`
-//! with `cat` as the agent backend, and asserts that `.roko/engrams.jsonl`
-//! contains the full signal set (`Prompt`, `AgentOutput`, `Episode`, etc.).
+//! with a deterministic mock backend, and asserts that the current workflow
+//! artifacts are persisted (`runtime-events.jsonl`, `episodes.jsonl`, and
+//! `learn/efficiency.jsonl`).
 
 use assert_cmd::Command;
 use std::fs;
+use std::process::Command as ProcessCommand;
+use std::time::Duration;
 use tempfile::TempDir;
+
+const MOCK_DISPATCHER: &str = "mock-self-host-fixture";
+
+fn workflow_test_config(gate_program: &str, extra_prompt_config: &str) -> String {
+    format!(
+        r#"
+[agent]
+default_model = "mock-model"
+command = "cat"
+args = []
+timeout_ms = 30000
+
+[prompt]
+token_budget = 10000
+role = "You are a Roko test agent."
+{extra_prompt_config}
+
+[providers.mock]
+kind = "claude_cli"
+command = "cat"
+timeout_ms = 30000
+
+[models.mock-model]
+provider = "mock"
+slug = "mock-model"
+context_window = 8192
+supports_tools = false
+
+[pipeline.mechanical]
+strategist = false
+reviewers = false
+max_iterations = 1
+
+[pipeline.focused]
+strategist = false
+reviewers = false
+max_iterations = 1
+
+[[gate]]
+kind = "shell"
+program = "{gate_program}"
+args = []
+timeout_ms = 5000
+"#
+    )
+}
+
+fn isolated_roko(workdir: &std::path::Path) -> Command {
+    let mut cmd = Command::cargo_bin("roko").expect("roko binary");
+    cmd.timeout(Duration::from_secs(90))
+        .env("HOME", workdir)
+        .env("ROKO_DISPATCHER", MOCK_DISPATCHER)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("XDG_CONFIG_HOME");
+    cmd
+}
+
+fn seed_git_repo(workdir: &std::path::Path) {
+    for args in [
+        vec!["init"],
+        vec!["config", "user.name", "Roko E2E"],
+        vec!["config", "user.email", "roko-e2e@example.com"],
+        vec!["add", "-A"],
+        vec!["commit", "-m", "seed"],
+    ] {
+        let status = ProcessCommand::new("git")
+            .current_dir(workdir)
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git setup failed with {status}");
+    }
+}
 
 #[test]
 fn init_run_produces_expected_signals() {
@@ -31,72 +107,65 @@ fn init_run_produces_expected_signals() {
 
     // Replace the default config with a deterministic local backend so the
     // test does not depend on whatever provider `roko init` currently prefers.
-    let config = r#"
-[agent]
-command = "cat"
-args = []
-timeout_ms = 30000
-
-[prompt]
-token_budget = 1000
-role = "You are a Roko agent."
-
-[[gate]]
-kind = "shell"
-program = "true"
-args = []
-timeout_ms = 5000
-"#;
+    let config = workflow_test_config("true", "");
     fs::write(workdir.join("roko.toml"), config).unwrap();
+    seed_git_repo(workdir);
 
     // `roko run "hello"` with cat as the agent and the default `true` shell
     // gate → both agent and gate pass.
-    Command::cargo_bin("roko")
-        .unwrap()
+    let run = isolated_roko(workdir)
         .arg("run")
         .arg("write a hello function")
         .arg("--workdir")
         .arg(workdir)
         .assert()
         .success();
+    let stdout = String::from_utf8_lossy(&run.get_output().stdout);
+    assert!(
+        stdout.contains("workflow completed"),
+        "run output missing completion summary: {stdout}"
+    );
+    assert!(
+        stdout.contains("[PASS] shell"),
+        "run output missing shell gate pass: {stdout}"
+    );
 
-    // Read the JSONL log and check that every required kind is present.
-    let log = fs::read_to_string(workdir.join(".roko/engrams.jsonl")).unwrap();
-    assert!(!log.is_empty(), "engrams.jsonl is empty after run");
+    let runtime_log = fs::read_to_string(workdir.join(".roko/runtime-events.jsonl")).unwrap();
+    assert!(
+        runtime_log.contains("\"workflow_started\""),
+        "workflow start event missing: {runtime_log}"
+    );
+    assert!(
+        runtime_log.contains("\"agent_completed\""),
+        "agent completion event missing: {runtime_log}"
+    );
+    assert!(
+        runtime_log.contains("\"workflow_completed\""),
+        "workflow completion event missing: {runtime_log}"
+    );
 
-    let mut saw_prompt_section = false;
-    let mut saw_prompt = false;
-    let mut saw_agent_output = false;
-    let mut saw_episode = false;
-    let mut saw_verdict = false;
-    for line in log.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        // The JSONL kind field is a snake_case enum tag.
-        if line.contains("\"prompt_section\"") {
-            saw_prompt_section = true;
-        }
-        if line.contains("\"prompt\"") {
-            saw_prompt = true;
-        }
-        if line.contains("\"agent_output\"") {
-            saw_agent_output = true;
-        }
-        if line.contains("\"episode\"") {
-            saw_episode = true;
-        }
-        if line.contains("\"gate_verdict\"") {
-            saw_verdict = true;
-        }
-    }
-    assert!(saw_prompt_section, "no PromptSection signal persisted");
-    assert!(saw_prompt, "no Prompt signal persisted");
-    assert!(saw_agent_output, "no AgentOutput signal persisted");
-    assert!(saw_episode, "no Episode signal persisted");
-    assert!(saw_verdict, "no GateVerdict signal persisted");
+    let efficiency = fs::read_to_string(workdir.join(".roko/learn/efficiency.jsonl")).unwrap();
+    assert!(
+        efficiency.contains("\"kind\":\"model_call\""),
+        "model call feedback missing: {efficiency}"
+    );
+    assert!(
+        efficiency.contains("\"kind\":\"gate_result\"") && efficiency.contains("\"passed\":true"),
+        "gate pass feedback missing: {efficiency}"
+    );
+    assert!(
+        efficiency.contains("\"kind\":\"workflow_completed\""),
+        "workflow feedback missing: {efficiency}"
+    );
 
-    // `roko status` should succeed and mention non-zero signals.
+    let episodes = fs::read_to_string(workdir.join(".roko/episodes.jsonl")).unwrap();
+    assert!(
+        episodes.contains("\"success\":true"),
+        "successful episode missing: {episodes}"
+    );
+
+    // `roko status` should succeed and surface current workflow artifacts even
+    // though the WorkflowEngine no longer writes legacy engram episode signals.
     let status = Command::cargo_bin("roko")
         .unwrap()
         .arg("status")
@@ -110,12 +179,12 @@ timeout_ms = 5000
         "status output missing header: {stdout}"
     );
     assert!(
-        stdout.contains("episode"),
-        "status output missing episode kind: {stdout}"
+        stdout.contains("most recent episode: ep-"),
+        "status did not report an episode: {stdout}"
     );
     assert!(
-        stdout.contains("most recent episode"),
-        "status did not report an episode: {stdout}"
+        stdout.contains("gate verdicts: 1 pass / 0 fail"),
+        "status did not report gate result: {stdout}"
     );
 }
 
@@ -253,38 +322,43 @@ fn run_fails_when_gate_fails() {
         .success();
 
     // Replace roko.toml with one whose gate is `false` (always fails).
-    let failing_config = r#"
-[agent]
-command = "cat"
-args = []
-timeout_ms = 30000
-
-[prompt]
-token_budget = 1000
-role = "You are a Roko agent."
-
-[[gate]]
-kind = "shell"
-program = "false"
-args = []
-timeout_ms = 5000
-"#;
+    let failing_config = workflow_test_config("false", "");
     fs::write(workdir.join("roko.toml"), failing_config).unwrap();
+    seed_git_repo(workdir);
 
     // Exit code should be non-zero because the gate failed.
-    Command::cargo_bin("roko")
-        .unwrap()
+    let run = isolated_roko(workdir)
         .arg("run")
         .arg("smoke")
         .arg("--workdir")
         .arg(workdir)
         .assert()
         .failure();
+    let stdout = String::from_utf8_lossy(&run.get_output().stdout);
+    assert!(
+        stdout.contains("workflow failed"),
+        "run output missing failure summary: {stdout}"
+    );
+    assert!(
+        stdout.contains("[FAIL] shell"),
+        "run output missing shell gate failure: {stdout}"
+    );
 
-    // But the signals should still be persisted — the failure is reported, not swallowed.
-    let log = fs::read_to_string(workdir.join(".roko/engrams.jsonl")).unwrap();
-    assert!(log.contains("\"gate_verdict\""));
-    assert!(log.contains("\"episode\""));
+    // But the workflow artifacts should still be persisted — the failure is reported, not swallowed.
+    let efficiency = fs::read_to_string(workdir.join(".roko/learn/efficiency.jsonl")).unwrap();
+    assert!(
+        efficiency.contains("\"kind\":\"gate_result\"") && efficiency.contains("\"passed\":false"),
+        "gate failure feedback missing: {efficiency}"
+    );
+    assert!(
+        efficiency.contains("\"kind\":\"workflow_failed\""),
+        "workflow failure feedback missing: {efficiency}"
+    );
+    let episodes = fs::read_to_string(workdir.join(".roko/episodes.jsonl")).unwrap();
+    assert!(
+        episodes.contains("\"success\":false"),
+        "failed episode missing: {episodes}"
+    );
 }
 
 #[test]
@@ -305,31 +379,19 @@ fn prompt_files_are_injected_as_sections() {
         "# Bug report\nThe `greet()` function returns the wrong string.\n",
     )
     .unwrap();
-    let config = r#"
-[agent]
-command = "cat"
-args = []
-timeout_ms = 30000
-
-[prompt]
-token_budget = 10000
-role = "You are a Rust engineer."
-
+    let config = workflow_test_config(
+        "true",
+        r#"
 [[prompt.files]]
 path = "issue.md"
 name = "issue"
 priority = "high"
-
-[[gate]]
-kind = "shell"
-program = "true"
-args = []
-timeout_ms = 5000
-"#;
+"#,
+    );
     fs::write(workdir.join("roko.toml"), config).unwrap();
+    seed_git_repo(workdir);
 
-    let out = Command::cargo_bin("roko")
-        .unwrap()
+    isolated_roko(workdir)
         .arg("run")
         .arg("Suggest a fix for the bug described in the issue file.")
         .arg("--workdir")
@@ -337,27 +399,21 @@ timeout_ms = 5000
         .assert()
         .success();
 
-    // The cat-echoed output should contain the injected file contents.
-    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
-    assert!(
-        stdout.contains("cat"),
-        "expected agent output header: {stdout}"
-    );
-
-    let log = fs::read_to_string(workdir.join(".roko/engrams.jsonl")).unwrap();
+    let log = fs::read_to_string(workdir.join(".roko/runtime-events.jsonl")).unwrap();
     assert!(
         log.contains("Bug report"),
         "file contents should have reached the prompt: {log}"
     );
-    // There should be 3 prompt sections now (role + issue-file + task).
-    let section_count = log.matches("\"prompt_section\"").count();
+    // The workflow prompt should include the task plus the injected file section.
+    let efficiency = fs::read_to_string(workdir.join(".roko/learn/efficiency.jsonl")).unwrap();
     assert!(
-        section_count >= 3,
-        "expected >=3 prompt sections, got {section_count}"
+        efficiency.contains("role_identity") && efficiency.contains("task_context"),
+        "prompt section feedback missing: {efficiency}"
     );
 }
 
 #[test]
+#[cfg(feature = "legacy-orchestrate")]
 fn clean_output_strips_thinking_trace() {
     let tmp = TempDir::new().unwrap();
     let workdir = tmp.path();

@@ -760,6 +760,7 @@ fn model_call_request(
         budget_remaining: None,
         routing_hints: Vec::new(),
         cache_policy: CachePolicy::Default,
+        tools: Vec::new(),
     }
 }
 
@@ -1024,6 +1025,21 @@ mod tests {
             .expect("AppState::new"),
         );
         (dir, state)
+    }
+
+    fn test_cli_provider(command: impl Into<String>) -> ProviderConfig {
+        ProviderConfig {
+            kind: ProviderKind::ClaudeCli,
+            base_url: None,
+            api_key_env: None,
+            command: Some(command.into()),
+            args: None,
+            timeout_ms: Some(30_000),
+            ttft_timeout_ms: Some(5_000),
+            connect_timeout_ms: Some(1_000),
+            extra_headers: None,
+            max_concurrent: None,
+        }
     }
 
     #[test]
@@ -1294,7 +1310,12 @@ mod tests {
         let script = workdir.join("mock-provider.sh");
         std::fs::write(
             &script,
-            "#!/bin/sh\nsleep 0.01\nprintf 'gateway durable reply'\n",
+            concat!(
+                "#!/bin/sh\n",
+                "sleep 0.01\n",
+                "printf '%s\\n' '{\"type\":\"assistant\",\"subtype\":\"message\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"gateway durable reply\"}]}}'\n",
+                "printf '%s\\n' '{\"type\":\"result\",\"session_id\":\"gateway-durable-test\",\"model\":\"gateway-durable-model\",\"total_cost_usd\":0.000025,\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}'\n",
+            ),
         )
         .expect("write mock provider");
         #[cfg(unix)]
@@ -1310,6 +1331,10 @@ mod tests {
         let mut config = roko_core::config::schema::RokoConfig::default();
         config.agent.default_model = model.to_string();
         config.agent.command = Some(script.display().to_string());
+        config.providers.insert(
+            provider.to_string(),
+            test_cli_provider(script.display().to_string()),
+        );
         config.models.insert(
             model.to_string(),
             ModelProfile {
@@ -1454,7 +1479,48 @@ mod tests {
         // Submit 3 batch items and verify all complete.
         // The NoOpRuntime returns instantly, so buffer_unordered processes
         // all items concurrently within BATCH_CONCURRENCY.
-        let (_dir, state) = test_state();
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let model = "batch-test-model";
+        let provider = "batch-test-provider";
+        let script = workdir.join("mock-provider.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf 'batch reply'\n").expect("write mock provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&script)
+                .expect("mock provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).expect("chmod mock provider");
+        }
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.agent.default_model = model.to_string();
+        config.agent.command = Some(script.display().to_string());
+        config.providers.insert(
+            provider.to_string(),
+            test_cli_provider(script.display().to_string()),
+        );
+        config.models.insert(
+            model.to_string(),
+            ModelProfile {
+                provider: provider.to_string(),
+                slug: model.to_string(),
+                ..Default::default()
+            },
+        );
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let mut state = AppState::new(
+            workdir,
+            Arc::new(NoOpRuntime),
+            config.clone(),
+            deploy_backend,
+        )
+        .expect("AppState::new");
+        state.model_call_service =
+            Arc::new(ModelCallService::new(model.to_string()).with_config(config));
+        let state = Arc::new(state);
         let body = BatchSubmitRequest {
             requests: (0..3)
                 .map(|i| BatchRequestItem {

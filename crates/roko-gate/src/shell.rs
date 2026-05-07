@@ -9,6 +9,7 @@ use crate::compile_errors::{render_failure_classification, structured_gate_failu
 use crate::payload::GatePayload;
 use async_trait::async_trait;
 use roko_core::{Context, Signal, Verdict, Verify};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -75,6 +76,9 @@ impl Verify for ShellGate {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
         cmd.kill_on_drop(true);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        configure_child_process_group(&mut cmd);
 
         if let Some(ref p) = payload {
             cmd.current_dir(&p.working_dir);
@@ -86,13 +90,25 @@ impl Verify for ShellGate {
             }
         }
 
-        let output_future = async { cmd.output().await };
-        let result = timeout(Duration::from_millis(self.timeout_ms), output_future).await;
+        let child = cmd.spawn();
+        let (child_pid, result) = match child {
+            Ok(child) => {
+                let child_pid = child.id();
+                let result = timeout(
+                    Duration::from_millis(self.timeout_ms),
+                    child.wait_with_output(),
+                )
+                .await;
+                (child_pid, result.map_err(|_| ()))
+            }
+            Err(err) => (None, Ok(Err(err))),
+        };
         #[allow(clippy::cast_possible_truncation)]
         let elapsed = started.elapsed().as_millis() as u64;
 
         match result {
-            Err(_timeout) => {
+            Err(()) => {
+                terminate_child_process_group(child_pid).await;
                 let reason = format!("timed out after {} ms", self.timeout_ms);
                 let classification =
                     structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
@@ -141,6 +157,36 @@ impl Verify for ShellGate {
         &self.name
     }
 }
+
+#[cfg(unix)]
+fn configure_child_process_group(cmd: &mut Command) {
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_child_process_group(_cmd: &mut Command) {}
+
+#[cfg(unix)]
+async fn terminate_child_process_group(child_pid: Option<u32>) {
+    let Some(pid) = child_pid else {
+        return;
+    };
+    let group_arg = format!("-{pid}");
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(&group_arg)
+        .status()
+        .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(group_arg)
+        .status()
+        .await;
+}
+
+#[cfg(not(unix))]
+async fn terminate_child_process_group(_child_pid: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
@@ -205,6 +251,28 @@ mod tests {
         let v = gate.verify(&empty_signal(), &Context::at(0)).await;
         assert!(!v.passed);
         assert!(v.reason.contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_shell_descendants() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let marker = tempdir.path().join("timeout-marker");
+        let marker_arg = marker.to_string_lossy();
+        assert!(!marker_arg.contains('\''));
+        let command = format!("(sleep 1; touch '{marker_arg}') & wait");
+        let gate = ShellGate::new("bash", vec!["-c".into(), command])
+            .with_timeout_ms(scaled_test_timeout_ms(100));
+
+        let v = gate.verify(&empty_signal(), &Context::at(0)).await;
+
+        assert!(!v.passed);
+        assert!(v.reason.contains("timed out"));
+        tokio::time::sleep(Duration::from_millis(scaled_test_timeout_ms(1_500))).await;
+        assert!(
+            !marker.exists(),
+            "timed-out shell descendants should not keep running"
+        );
     }
 
     #[tokio::test]

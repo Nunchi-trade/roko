@@ -83,7 +83,7 @@ impl GateStats {
 
 /// Incremental reader and rolling aggregator for persisted gate verdicts.
 pub struct VerdictsAggregator {
-    runtime: Runtime,
+    runtime: Option<Runtime>,
     substrate: Arc<FileSubstrate>,
     cursor: SubstrateCursor,
     per_gate: HashMap<String, GateStats>,
@@ -119,7 +119,7 @@ impl VerdictsAggregator {
         };
 
         Ok(Self {
-            runtime,
+            runtime: Some(runtime),
             substrate,
             cursor: SubstrateCursor::default(),
             per_gate: HashMap::new(),
@@ -141,13 +141,13 @@ impl VerdictsAggregator {
         let mut verdicts = if tokio::runtime::Handle::try_current().is_ok() {
             // We're inside a tokio runtime — cannot call block_on on our
             // current-thread runtime here, so offload to a blocking task.
-            let rt_handle = self.runtime.handle().clone();
+            let rt_handle = self.runtime().handle().clone();
             tokio::task::spawn_blocking(move || rt_handle.block_on(substrate.query(&query, &ctx)))
                 .await
                 .map_err(|e| anyhow::anyhow!("verdict tick task panicked: {e}"))?
                 .context("query verdict substrate")?
         } else {
-            self.runtime
+            self.runtime()
                 .block_on(substrate.query(&query, &ctx))
                 .context("query verdict substrate")?
         };
@@ -187,7 +187,7 @@ impl VerdictsAggregator {
             .block_on(FileSubstrate::open(workdir.join(".roko")))
             .context("open verdict substrate")?;
         Ok(Self {
-            runtime,
+            runtime: Some(runtime),
             substrate: Arc::new(substrate),
             cursor: SubstrateCursor::default(),
             per_gate: HashMap::new(),
@@ -206,7 +206,7 @@ impl VerdictsAggregator {
         let query = self.cursor.query();
         let substrate = Arc::clone(&self.substrate);
         let mut verdicts = self
-            .runtime
+            .runtime()
             .block_on(substrate.query(&query, &ctx))
             .context("query verdict substrate")?;
         verdicts.sort_by(|lhs, rhs| {
@@ -244,6 +244,12 @@ impl VerdictsAggregator {
         self.recent_failures.iter().cloned().collect()
     }
 
+    fn runtime(&self) -> &Runtime {
+        self.runtime
+            .as_ref()
+            .expect("verdict aggregator runtime is present until drop")
+    }
+
     fn ingest(&mut self, signal: Engram, now: DateTime<Utc>) {
         let Some(gate) = extract_gate_name(&signal) else {
             self.cursor.mark_seen(&signal);
@@ -276,6 +282,17 @@ impl VerdictsAggregator {
         }
 
         self.cursor.mark_seen(&signal);
+    }
+}
+
+impl Drop for VerdictsAggregator {
+    fn drop(&mut self) {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let _ = std::thread::spawn(move || drop(runtime)).join();
+        }
     }
 }
 

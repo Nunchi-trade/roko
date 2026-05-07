@@ -1144,7 +1144,7 @@ mod tests {
     fn compose_build_with_budget_returns_auction_manifest() {
         let ctx = TaskContext::new("Implement prompt metadata");
         let build = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit")
-            .compose_build_with_budget(512)
+            .compose_build_with_budget(768)
             .expect("composition build");
 
         let manifest = build

@@ -67,6 +67,9 @@ fn plan_validate_help_shows_new_flags() {
 #[test]
 fn plan_validate_succeeds_for_well_formed_plan() {
     let temp = TempDir::new().unwrap();
+    // Create stub file so PLAN_031 file-reference check passes
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "").unwrap();
     write_plan(
         temp.path(),
         "good",
@@ -124,6 +127,8 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 #[test]
 fn plan_validate_warns_on_known_model_aliases() {
     let temp = TempDir::new().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "").unwrap();
     write_model_registry(temp.path());
     write_plan(
         temp.path(),
@@ -185,6 +190,8 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 #[test]
 fn plan_validate_preserves_unknown_model_warning() {
     let temp = TempDir::new().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "").unwrap();
     write_model_registry(temp.path());
     write_plan(
         temp.path(),
@@ -306,6 +313,8 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
 #[test]
 fn plan_validate_accepts_typed_acceptance_contract() {
     let temp = TempDir::new().unwrap();
+    // Create stub crate dir so PLAN_030 file-reference check passes
+    std::fs::create_dir_all(temp.path().join("crates/roko-gate/src")).unwrap();
     write_plan(
         temp.path(),
         "contract",
@@ -400,6 +409,8 @@ kind = "compile"
 #[test]
 fn plan_validate_accepts_architecture_queue_packets() {
     let temp = TempDir::new().unwrap();
+    // Create stub crate dir so PLAN_030 file-reference check passes
+    std::fs::create_dir_all(temp.path().join("crates/roko-core/src/config")).unwrap();
     write_plan(
         temp.path(),
         "architecture",
@@ -594,6 +605,17 @@ evidence_ref = "plans/architecture-core-queue/tasks.toml"
 #[test]
 fn plan_validate_accepts_complete_architecture_deferral_metadata() {
     let temp = TempDir::new().unwrap();
+    // The task references plans/architecture-core-queue/tasks.toml. We must create
+    // it as a valid plan because the validator discovers all plans/*/tasks.toml.
+    // The stub plan's files entry points at a file we also create.
+    std::fs::create_dir_all(temp.path().join("plans/architecture-core-queue")).unwrap();
+    std::fs::create_dir_all(temp.path().join("stub")).unwrap();
+    std::fs::write(temp.path().join("stub/lib.rs"), "").unwrap();
+    std::fs::write(
+        temp.path().join("plans/architecture-core-queue/tasks.toml"),
+        "[meta]\nplan = \"architecture-core-queue\"\n\n[[task]]\nid = \"S1\"\ntitle = \"Stub\"\nrole = \"implementer\"\nfiles = [\"stub/lib.rs\"]\ndepends_on = []\nverify = [{ phase = \"compile\", command = \"echo ok\" }]\n",
+    )
+    .unwrap();
     write_plan(
         temp.path(),
         "architecture",
@@ -652,8 +674,9 @@ evidence_ref = "plans/architecture-core-queue/tasks.toml"
 
     let assert = run_validate(&temp, &["plans"]).success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    // Two plans are discovered (the main one + the stub referenced by files).
     assert!(
-        stdout.contains("0 diagnostics in 1 plan"),
+        stdout.contains("0 diagnostics in 2 plans"),
         "unexpected stdout: {stdout}"
     );
 }

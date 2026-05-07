@@ -447,6 +447,7 @@ impl RunState {
         self.gate_output.clear();
         // iteration is per-task in self.iterations, set from executor state
         self.task_started_at = Instant::now();
+        self.last_dispatch_ms = 0;
         self.routing_context = None;
     }
 

@@ -216,6 +216,12 @@ impl Default for RokoConfig {
 /// `[providers.*]` config always takes precedence.
 #[must_use]
 pub fn synthesize_standard_providers() -> HashMap<String, ProviderConfig> {
+    synthesize_standard_providers_with_env(|key| std::env::var(key).ok())
+}
+
+fn synthesize_standard_providers_with_env(
+    env_fn: impl Fn(&str) -> Option<String>,
+) -> HashMap<String, ProviderConfig> {
     use super::provider::{
         default_provider_connect_timeout_ms, default_provider_timeout_ms,
         default_provider_ttft_timeout_ms,
@@ -250,11 +256,7 @@ pub fn synthesize_standard_providers() -> HashMap<String, ProviderConfig> {
 
     let mut providers = HashMap::new();
     for &(name, env_var, kind, base_url) in specs {
-        if std::env::var(env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-        {
+        if env_fn(env_var).filter(|value| !value.is_empty()).is_some() {
             providers.insert(
                 name.to_string(),
                 ProviderConfig {
@@ -347,9 +349,18 @@ impl RokoConfig {
     /// any TOML config, while explicit `[providers.*]` entries always win.
     #[must_use]
     pub fn effective_providers(&self) -> IndexMap<String, ProviderConfig> {
+        self.effective_providers_with_env(|key| std::env::var(key).ok())
+    }
+
+    fn effective_providers_with_env(
+        &self,
+        env_fn: impl Fn(&str) -> Option<String>,
+    ) -> IndexMap<String, ProviderConfig> {
         // Start with env-synthesized providers as the base layer.
         let mut providers: IndexMap<String, ProviderConfig> =
-            synthesize_standard_providers().into_iter().collect();
+            synthesize_standard_providers_with_env(env_fn)
+                .into_iter()
+                .collect();
 
         // User-defined providers override synthesized ones.
         for (name, pc) in &self.providers {
@@ -547,6 +558,14 @@ impl RokoConfig {
     /// a value in the process environment or in [`AgentConfig::env`].
     #[must_use]
     pub fn is_provider_available(&self, provider: &ProviderConfig) -> bool {
+        self.is_provider_available_with_env(provider, |name| std::env::var(name).ok())
+    }
+
+    fn is_provider_available_with_env(
+        &self,
+        provider: &ProviderConfig,
+        env_fn: impl Fn(&str) -> Option<String>,
+    ) -> bool {
         if matches!(
             provider.kind,
             ProviderKind::ClaudeCli | ProviderKind::CursorAcp
@@ -556,7 +575,7 @@ impl RokoConfig {
         match provider.api_key_env.as_ref().map(|s| s.trim()) {
             None => false,
             Some("") => true,
-            Some(name) => std::env::var(name).is_ok() || self.agent_env_value(name).is_some(),
+            Some(name) => env_fn(name).is_some() || self.agent_env_value(name).is_some(),
         }
     }
 
@@ -1866,7 +1885,7 @@ default_model = "claude-sonnet-4-6"
             ),
         ]);
 
-        let providers = cfg.effective_providers();
+        let providers = cfg.effective_providers_with_env(|_| None);
         assert!(providers.is_empty());
     }
 
@@ -2134,9 +2153,9 @@ default_model = "claude-sonnet-4-6"
             extra_headers: None,
             max_concurrent: None,
         };
-        assert!(!cfg.is_provider_available(&p));
+        assert!(!cfg.is_provider_available_with_env(&p, |_| None));
         cfg.agent.env = Some(vec![("OPENAI_API_KEY".into(), "sk-test".into())]);
-        assert!(cfg.is_provider_available(&p));
+        assert!(cfg.is_provider_available_with_env(&p, |_| None));
     }
 
     #[test]

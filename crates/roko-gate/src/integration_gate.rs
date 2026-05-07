@@ -309,7 +309,11 @@ async fn run_build_test(
 
     let payload: Option<GatePayload> = signal.body.as_json().ok();
     let mut cmd = Command::new(build.program());
-    for arg in build.test_args() {
+    let target_crates = payload
+        .as_ref()
+        .map(|p| p.target_crates.as_slice())
+        .unwrap_or(&[]);
+    for arg in build.scoped_test_args(target_crates) {
         cmd.arg(arg);
     }
     // Append `-- <pattern>` (or build-system equivalent).

@@ -34,7 +34,9 @@ use crate::verdict_scorer::{VerdictHistory, VerdictRecord};
 
 #[derive(Debug, Clone)]
 struct ActiveTurn {
+    plan_id: String,
     task_id: String,
+    attempt_id_base: String,
     model: String,
     provider: String,
     tool_calls: Vec<ToolCallMeta>,
@@ -42,8 +44,23 @@ struct ActiveTurn {
 
 impl ActiveTurn {
     fn from_started(task_id: &str, model: &str, provider: &str) -> Self {
+        let mut parts = task_id.splitn(3, ':');
+        let first = parts.next().unwrap_or_default();
+        let second = parts.next();
+        let third = parts.next();
+        let (plan_id, task_id, attempt_id_base) = match (second, third) {
+            (Some(task), Some(attempt)) => (
+                first.to_string(),
+                task.to_string(),
+                format!("{task}:{attempt}"),
+            ),
+            (Some(task), None) => (first.to_string(), task.to_string(), task.to_string()),
+            (None, _) => (String::new(), first.to_string(), first.to_string()),
+        };
         Self {
-            task_id: task_id.to_string(),
+            plan_id,
+            task_id,
+            attempt_id_base,
             model: model.to_string(),
             provider: provider.to_string(),
             tool_calls: Vec::new(),
@@ -148,13 +165,13 @@ pub async fn run_learning_subscriber(
                 costs.insert(cost_record);
 
                 let tools_used = tool_call_count.min(u32::MAX as usize) as u32;
-                let attempt_id = format!("{}:{turn}", turn_ctx.task_id);
+                let attempt_id = format!("{}:{turn}", turn_ctx.attempt_id_base);
                 let efficiency_event = AgentEfficiencyEvent {
                     agent_id: format!("{}:{turn}", turn_ctx.task_id),
                     role: String::new(),
                     backend: turn_ctx.provider.clone(),
                     model: turn_ctx.model.clone(),
-                    plan_id: String::new(),
+                    plan_id: turn_ctx.plan_id,
                     task_id: turn_ctx.task_id,
                     attempt_id,
                     input_tokens: u64::from(usage.input_tokens),

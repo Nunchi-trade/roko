@@ -121,6 +121,7 @@ struct LatencyRegistryEntry {
 /// Centralized latency registry keyed by `(model, provider)`.
 pub struct LatencyRegistry {
     stats: Arc<Mutex<HashMap<(String, String), LatencyStats>>>,
+    save_lock: Arc<Mutex<()>>,
     save_tx: Option<Sender<PersistCommand>>,
     save_worker: Option<JoinHandle<()>>,
 }
@@ -139,6 +140,7 @@ impl LatencyRegistry {
     pub fn new() -> Self {
         Self {
             stats: Arc::new(Mutex::new(HashMap::new())),
+            save_lock: Arc::new(Mutex::new(())),
             save_tx: None,
             save_worker: None,
         }
@@ -228,6 +230,7 @@ impl LatencyRegistry {
         entries.sort_by(|a, b| a.model.cmp(&b.model).then(a.provider.cmp(&b.provider)));
 
         let snapshot = LatencyRegistrySnapshot { entries };
+        let _guard = self.save_lock.lock();
         save_snapshot(path, &snapshot)
     }
 
@@ -252,9 +255,12 @@ impl LatencyRegistry {
 
     fn with_persistence(path: PathBuf, stats: HashMap<(String, String), LatencyStats>) -> Self {
         let stats = Arc::new(Mutex::new(stats));
-        let (save_tx, save_worker) = spawn_save_worker(path, Arc::clone(&stats));
+        let save_lock = Arc::new(Mutex::new(()));
+        let (save_tx, save_worker) =
+            spawn_save_worker(path, Arc::clone(&stats), Arc::clone(&save_lock));
         Self {
             stats,
+            save_lock,
             save_tx: Some(save_tx),
             save_worker: Some(save_worker),
         }
@@ -353,6 +359,7 @@ impl Drop for LatencyRegistry {
 fn spawn_save_worker(
     path: PathBuf,
     stats: Arc<Mutex<HashMap<(String, String), LatencyStats>>>,
+    save_lock: Arc<Mutex<()>>,
 ) -> (Sender<PersistCommand>, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
     let handle = thread::spawn(move || {
@@ -363,16 +370,19 @@ fn spawn_save_worker(
                         Ok(PersistCommand::Dirty) => continue,
                         Ok(PersistCommand::FlushAndStop) => {
                             let snapshot = snapshot_from_stats(&stats);
+                            let _guard = save_lock.lock();
                             let _ = save_snapshot(&path, &snapshot);
                             return;
                         }
                         Err(RecvTimeoutError::Timeout) => {
                             let snapshot = snapshot_from_stats(&stats);
+                            let _guard = save_lock.lock();
                             let _ = save_snapshot(&path, &snapshot);
                             break;
                         }
                         Err(RecvTimeoutError::Disconnected) => {
                             let snapshot = snapshot_from_stats(&stats);
+                            let _guard = save_lock.lock();
                             let _ = save_snapshot(&path, &snapshot);
                             return;
                         }
@@ -380,6 +390,7 @@ fn spawn_save_worker(
                 },
                 Ok(PersistCommand::FlushAndStop) => {
                     let snapshot = snapshot_from_stats(&stats);
+                    let _guard = save_lock.lock();
                     let _ = save_snapshot(&path, &snapshot);
                     return;
                 }

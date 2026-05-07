@@ -28,52 +28,43 @@ use tokio::time::{Duration, timeout};
 
 /// Build the Claude CLI `--settings` JSON payload with safety hooks.
 ///
-/// The hooks block the destructive commands that should never be launched by
-/// a model in this workspace: branch checkout/switch/rename, branch pushes,
-/// and common filesystem-destruction shells.
+/// Claude Code hook entries do not support per-hook condition fields. Keep the
+/// filtering inside one command so ordinary Bash calls are allowed while the
+/// destructive commands that should never be launched by a model in this
+/// workspace are blocked.
 #[must_use]
 pub fn build_settings_json() -> String {
     serde_json::json!({
         "hooks": {
             "PreToolUse": [{
                 "matcher": "Bash",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "if": "Bash(git checkout *)",
-                        "command": "echo 'BLOCKED: git checkout forbidden in plan worktrees' >&2 && exit 2"
-                    },
-                    {
-                        "type": "command",
-                        "if": "Bash(git switch *)",
-                        "command": "echo 'BLOCKED: git switch forbidden in plan worktrees' >&2 && exit 2"
-                    },
-                    {
-                        "type": "command",
-                        "if": "Bash(git branch -m *)",
-                        "command": "echo 'BLOCKED: branch rename forbidden in plan worktrees' >&2 && exit 2"
-                    },
-                    {
-                        "type": "command",
-                        "if": "Bash(git push *)",
-                        "command": "echo 'BLOCKED: agents must not push — roko handles merges' >&2 && exit 2"
-                    },
-                    {
-                        "type": "command",
-                        "if": "Bash(rm -rf *)",
-                        "command": "echo 'BLOCKED: destructive file deletion forbidden' >&2 && exit 2"
-                    },
-                    {
-                        "type": "command",
-                        "if": "Bash(rm -fr *)",
-                        "command": "echo 'BLOCKED: destructive file deletion forbidden' >&2 && exit 2"
-                    },
-                    {
-                        "type": "command",
-                        "if": "Bash(rm -r *)",
-                        "command": "echo 'BLOCKED: destructive file deletion forbidden' >&2 && exit 2"
-                    }
-                ]
+                "hooks": [{
+                    "type": "command",
+                    "command": r#"command -v python3 >/dev/null 2>&1 || exit 0
+python3 -c 'import json, re, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+tool_input = data.get("tool_input") or data.get("toolInput") or {}
+command = tool_input.get("command") or data.get("command") or ""
+if not isinstance(command, str):
+    sys.exit(0)
+checks = [
+    (r"^\s*git\s+checkout(?:\s|$)", "BLOCKED: git checkout forbidden in plan worktrees"),
+    (r"^\s*git\s+switch(?:\s|$)", "BLOCKED: git switch forbidden in plan worktrees"),
+    (r"^\s*git\s+branch\s+-m(?:\s|$)", "BLOCKED: branch rename forbidden in plan worktrees"),
+    (r"^\s*git\s+push(?:\s|$)", "BLOCKED: agents must not push - roko handles merges"),
+    (r"(^|[;&|]\s*)rm\s+-[A-Za-z]*r[A-Za-z]*f[A-Za-z]*(?:\s|$)", "BLOCKED: destructive file deletion forbidden"),
+    (r"(^|[;&|]\s*)rm\s+-[A-Za-z]*f[A-Za-z]*r[A-Za-z]*(?:\s|$)", "BLOCKED: destructive file deletion forbidden"),
+    (r"(^|[;&|]\s*)rm\s+-[A-Za-z]*r[A-Za-z]*(?:\s|$)", "BLOCKED: destructive file deletion forbidden"),
+]
+for pattern, message in checks:
+    if re.search(pattern, command):
+        print(message, file=sys.stderr)
+        sys.exit(2)
+sys.exit(0)'"#
+                }]
             }]
         }
     })
@@ -949,8 +940,10 @@ const fn track_pids() -> bool {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command as StdCommand, Stdio};
     use tempfile::tempdir;
 
     fn prompt(text: &str) -> Signal {
@@ -964,15 +957,61 @@ mod tests {
             .pointer("/hooks/PreToolUse/0/hooks")
             .and_then(Value::as_array)
             .expect("hooks array");
-        assert!(hooks.len() >= 4);
-        let matcher_strings: Vec<&str> = hooks
-            .iter()
-            .filter_map(|hook| hook.get("if").and_then(Value::as_str))
-            .collect();
-        assert!(matcher_strings.contains(&"Bash(git checkout *)"));
-        assert!(matcher_strings.contains(&"Bash(git switch *)"));
-        assert!(matcher_strings.contains(&"Bash(git branch -m *)"));
-        assert!(matcher_strings.contains(&"Bash(git push *)"));
+        assert_eq!(hooks.len(), 1);
+        let hook = hooks.first().expect("single hook");
+        assert!(
+            hook.get("if").is_none(),
+            "Claude hooks do not honor per-hook condition fields"
+        );
+        let command = hook
+            .get("command")
+            .and_then(Value::as_str)
+            .expect("hook command");
+        assert!(command.contains("tool_input"));
+        assert!(command.contains("git\\s+checkout"));
+        assert!(command.contains("git\\s+switch"));
+        assert!(command.contains("git\\s+branch"));
+        assert!(command.contains("git\\s+push"));
+        assert!(command.contains("rm"));
+    }
+
+    #[test]
+    fn settings_hook_allows_safe_bash_and_blocks_destructive_bash() {
+        let value: Value = serde_json::from_str(&build_settings_json()).unwrap();
+        let command = value
+            .pointer("/hooks/PreToolUse/0/hooks/0/command")
+            .and_then(Value::as_str)
+            .expect("hook command");
+
+        assert_eq!(run_hook_command(command, "echo ok").code(), Some(0));
+        assert_eq!(
+            run_hook_command(command, "git checkout main").code(),
+            Some(2)
+        );
+    }
+
+    fn run_hook_command(command: &str, bash_command: &str) -> std::process::ExitStatus {
+        let mut child = StdCommand::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn hook command");
+        let payload = serde_json::json!({
+            "tool_input": {
+                "command": bash_command,
+            },
+        })
+        .to_string();
+        child
+            .stdin
+            .as_mut()
+            .expect("hook stdin")
+            .write_all(payload.as_bytes())
+            .expect("write hook payload");
+        child.wait().expect("wait for hook")
     }
 
     #[test]

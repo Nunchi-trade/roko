@@ -214,6 +214,7 @@ async fn run(
     topic_handler: Option<Arc<dyn TopicHandler>>,
     mut outbound_rx: mpsc::UnboundedReceiver<AgentInboundFrame>,
 ) -> Result<()> {
+    let mut outbound_open = true;
     loop {
         tokio::select! {
             // Incoming frames from the relay.
@@ -232,7 +233,7 @@ async fn run(
                 }
             }
             // Outbound pub/sub frames queued via RelayHandle.
-            frame = outbound_rx.recv() => {
+            frame = outbound_rx.recv(), if outbound_open => {
                 match frame {
                     Some(frame) => {
                         let json = serde_json::to_string(&frame)?;
@@ -240,8 +241,9 @@ async fn run(
                             break;
                         }
                     }
-                    // All RelayHandle senders dropped — no more outbound frames possible.
-                    None => break,
+                    // All RelayHandle senders dropped. Keep the websocket open
+                    // so relay request/response frames can still reach the agent.
+                    None => outbound_open = false,
                 }
             }
         }

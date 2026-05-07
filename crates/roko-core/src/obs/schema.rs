@@ -239,6 +239,7 @@ pub const CANONICAL_METRICS: &[MetricDescriptor] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn canonical_metrics_includes_new_families() {
@@ -279,13 +280,21 @@ mod tests {
     }
 
     #[test]
-    fn all_descriptors_have_labels() {
+    fn descriptor_labels_are_valid() {
         for desc in CANONICAL_METRICS {
-            assert!(
-                !desc.labels.is_empty(),
-                "metric {name} has no labels",
-                name = desc.name
-            );
+            let mut seen = BTreeSet::new();
+            for label in desc.labels {
+                assert!(
+                    !label.trim().is_empty(),
+                    "metric {name} has an empty label",
+                    name = desc.name
+                );
+                assert!(
+                    seen.insert(label),
+                    "metric {name} repeats label {label}",
+                    name = desc.name
+                );
+            }
         }
     }
 }

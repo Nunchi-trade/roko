@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 
 use roko_core::defaults::DEFAULT_RUNNER_RETRY_STRATEGY_PIVOT_ATTEMPT;
-use tracing::{error, warn};
+use tracing::{debug, error};
 
 /// Pre-serialized, unified state snapshot ready for a single atomic disk write.
 pub struct SnapshotPayload {
@@ -58,14 +58,23 @@ impl SnapshotWriter {
         }
     }
 
-    /// Enqueue a snapshot for async write. Non-blocking: drops the payload if
-    /// the channel is full (the writer will catch up with the next one).
+    /// Enqueue a snapshot for async write.
+    ///
+    /// The hot path is non-blocking. Under disk backpressure, this applies
+    /// backpressure instead of dropping the newest snapshot; stale intermediate
+    /// snapshots are still coalesced by the writer thread.
     pub fn write(&self, payload: SnapshotPayload) {
         let Some(tx) = self.tx.as_ref() else { return };
         match tx.try_send(WriterMsg::Write(payload)) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                warn!("snapshot writer channel full -- dropping intermediate snapshot");
+            Err(TrySendError::Full(WriterMsg::Write(payload))) => {
+                debug!("snapshot writer channel full -- waiting to preserve latest snapshot");
+                if tx.send(WriterMsg::Write(payload)).is_err() {
+                    error!("snapshot writer thread has stopped -- snapshot lost");
+                }
+            }
+            Err(TrySendError::Full(WriterMsg::Flush)) => {
+                debug!("snapshot writer channel full while flushing");
             }
             Err(TrySendError::Disconnected(_)) => {
                 error!("snapshot writer thread has stopped -- snapshot lost");

@@ -20,7 +20,6 @@ use crate::chat_session::ChatAgentSession;
 use crate::config::RepoRegistry;
 use crate::model_selection::resolve_effective_model;
 use crate::serve_runtime::RokoCliRuntime;
-use roko_core::agent::ProviderKind;
 use roko_core::config::schema::RokoConfig;
 
 /// Main unified entry point: auto-detect auth, launch chat.
@@ -67,17 +66,15 @@ pub async fn cmd_unified_chat(
     // 5. Load config for serve (best-effort, respects explicit --config override)
     let config = load_config_or_defaults(config_path, &workdir)?;
 
-    // 5b. Aggregate provider readiness: warn/abort if no providers are usable.
+    // 5b. Check the default model's provider only (not all configured providers).
     {
-        let issues = roko_agent::provider::check_provider_readiness(&boot.config);
-        if !issues.is_empty() {
-            let all_blocked = roko_agent::provider::report_readiness_issues(&issues, &boot.config);
-            if all_blocked {
-                anyhow::bail!(
-                    "no usable providers: all referenced providers have configuration issues. \
-                     Run `roko config providers available` for setup instructions."
-                );
-            }
+        let dm = boot.config.agent.default_model.trim();
+        if !dm.is_empty() && !boot.config.provider_available_for_model_key(dm) {
+            tracing::warn!(
+                model = dm,
+                "default model's provider is not available — dispatch may fail; \
+                 run `roko config providers health` to diagnose"
+            );
         }
     }
 
@@ -153,9 +150,8 @@ pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
     let mut session = match build_oneshot_session(&config, &auth, workdir.clone()) {
         Ok(session) => session,
         Err(e) => {
-            let blocked = DispatchDirectFallbackBlocked::ChatSessionInit { source: e };
-            tracing::warn!("{blocked:#}");
-            eprintln!("error: {blocked:#}");
+            tracing::warn!("ChatAgentSession init failed: {e:#}");
+            eprintln!("error: {e:#}");
             return Ok(1);
         }
     };
@@ -273,27 +269,14 @@ fn load_auto_start_config(config: &crate::config::Config) -> bool {
     config.serve.auto_start
 }
 
-#[derive(Debug, thiserror::Error)]
-enum DispatchDirectFallbackBlocked {
-    #[error(
-        "ChatAgentSession initialization failed; refusing to fall back to deprecated dispatch_direct path: {source:#}"
-    )]
-    ChatSessionInit {
-        #[source]
-        source: anyhow::Error,
-    },
-}
-
 fn build_oneshot_session(
     config: &crate::config::Config,
     auth: &AuthMethod,
     workdir: PathBuf,
 ) -> Result<ChatAgentSession> {
-    // One-shot chat currently has a Claude CLI implementation only.
-    if !matches!(auth, &AuthMethod::ClaudeCli) {
+    if matches!(auth, AuthMethod::NeedsSetup) {
         return Err(anyhow::anyhow!(
-            "ChatAgentSession oneshot currently supports Claude CLI auth, got {}",
-            auth.label()
+            "no authentication configured — run `roko config init` or set ANTHROPIC_API_KEY"
         ));
     }
 
@@ -312,12 +295,6 @@ fn build_oneshot_session(
 
     let selection = resolve_effective_model(None, None, None, None, &model_config, None)
         .context("resolve oneshot model selection")?;
-    if selection.provider_kind != ProviderKind::ClaudeCli.label() {
-        return Err(anyhow::anyhow!(
-            "ChatAgentSession oneshot currently supports Claude CLI provider, got {}",
-            selection.provider_kind
-        ));
-    }
     ChatAgentSession::new(config, workdir, selection)
 }
 
@@ -355,18 +332,5 @@ mod tests {
         assert!(!load_auto_start_config(&config));
         config.serve.auto_start = true;
         assert!(load_auto_start_config(&config));
-    }
-
-    #[test]
-    fn dispatch_direct_fallback_blocked_error_names_raw_path() {
-        let err = DispatchDirectFallbackBlocked::ChatSessionInit {
-            source: anyhow::anyhow!("synthetic session init failure"),
-        };
-        let message = err.to_string();
-
-        assert!(message.contains("ChatAgentSession initialization failed"));
-        assert!(message.contains("refusing to fall back"));
-        assert!(message.contains("dispatch_direct"));
-        assert!(message.contains("synthetic session init failure"));
     }
 }

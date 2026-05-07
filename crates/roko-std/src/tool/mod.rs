@@ -1,4 +1,4 @@
-//! Static registry of Roko's 16 built-in tools (§36.9, §36.b).
+//! Static registry of Roko's built-in tools (§36.9, §36.b).
 //!
 //! [`StaticToolRegistry`] is the day-one [`ToolRegistry`] every Roko
 //! deployment consults. It holds the 16 canonical built-ins
@@ -17,7 +17,7 @@
 //! - **Per-role filtering**: [`StaticToolRegistry::for_role`] delegates
 //!   to the shared `role_allowlist` helper so hosted backends (Claude)
 //!   and raw backends (Ollama) see the same tool set.
-//! - **Compile-time guarantees**: the 16 built-ins are a fixed array;
+//! - **Compile-time guarantees**: the built-ins are a fixed set;
 //!   a runtime test asserts name uniqueness so we cannot accidentally
 //!   ship a duplicate.
 //!

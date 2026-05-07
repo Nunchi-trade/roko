@@ -4092,13 +4092,15 @@ program = "echo"
     }
 
     #[test]
-    fn load_resolved_config_returns_defaults_when_no_config() {
+    fn load_resolved_config_has_no_project_sources_without_project_config() {
         let dir = tempfile::tempdir().unwrap();
         let resolved = load_resolved_config(dir.path()).unwrap();
-        // Default source for all fields when no config files exist.
-        assert_eq!(resolved.sources.agent_command, Source::Default);
-        assert_eq!(resolved.sources.agent_model, Source::Default);
-        assert_eq!(resolved.sources.providers, Source::Default);
+        // This loader intentionally includes the user's global config, so the
+        // exact source can be Global on developer machines with ~/.roko/config.toml.
+        assert_eq!(resolved.paths.project, None);
+        assert_ne!(resolved.sources.agent_command, Source::Project);
+        assert_ne!(resolved.sources.agent_model, Source::Project);
+        assert_ne!(resolved.sources.providers, Source::Project);
     }
 
     #[test]

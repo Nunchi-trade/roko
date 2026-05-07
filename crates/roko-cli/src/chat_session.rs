@@ -656,6 +656,7 @@ impl ChatAgentSession {
             budget_remaining: None,
             routing_hints: Vec::new(),
             cache_policy: CachePolicy::Bypass,
+            tools: Vec::new(),
         }
     }
 

@@ -207,12 +207,12 @@ mod plan_validation {
             let diagnostics = first_diagnostics(&report);
             assert!(
                 diagnostics.iter().any(|diag| {
-                    diag.rule_id == "PLAN_009"
+                    diag.rule_id == "PLAN_012"
                         && diag.task_id.as_deref() == Some("T1")
                         && diag.message.contains("uses model alias 'sonnet'")
                         && diag.message.contains("claude-sonnet-4-6")
                 }),
-                "alias should produce PLAN_009 warning: {diagnostics:?}"
+                "alias should produce PLAN_012 warning: {diagnostics:?}"
             );
         }
 

@@ -53,105 +53,132 @@ pub fn spawn_gate(
                 "gate semaphore acquired"
             );
         }
-        let start = Instant::now();
-        let signal = gate_signal(&plan_id, &task_id, rung, &workdir, &target_crates);
-        let ctx = roko_core::Context::now();
-        let limit = Duration::from_secs(timeout_secs.max(1));
-
-        info!(
-            plan_id = %plan_id,
-            task_id = %task_id,
-            rung,
-            timeout_secs,
-            verify_step_count = verify_steps.len(),
-            "gate rung starting"
-        );
-
-        let workdir_for_run = workdir.clone();
-        let run = async {
-            let inputs = RungExecutionInputs::default();
-            let config = RungExecutionConfig {
-                source_roots: Some(vec![workdir_for_run]),
-                timeout_ms: Some(timeout_secs.saturating_mul(1000)),
-                ..Default::default()
-            };
-            let pipeline = if gates_config.has_custom_rungs() {
-                GatePipelineBuilder::from_config(&gates_config, complexity)
-            } else {
-                GatePipelineBuilder::from_config_with_execution(
-                    &gates_config,
-                    complexity,
-                    inputs,
-                    config,
-                )
-            };
-
-            let mut verdicts = vec![pipeline.verify(&signal, &ctx).await];
-            verdicts.extend(run_verify_steps(&signal, &ctx, &task_id, verify_steps).await);
-            verdicts
-        };
-
-        let verdicts = match timeout(limit, run).await {
-            Ok(verdicts) => verdicts,
-            Err(_) => vec![
-                Verdict::fail(
-                    format!("gate-timeout:rung-{rung}"),
-                    format!("gate timed out after {timeout_secs}s"),
-                )
-                .with_error_digest(format!(
-                    "timeout: gate rung {rung} exceeded {timeout_secs}s"
-                )),
-            ],
-        };
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        let passed = verdicts.iter().all(|v| v.passed);
-        let output = render_output(&verdicts);
-        let failure_kind = (!passed).then(|| classify_failure_kind(&verdicts, &output));
-
-        let summaries: Vec<GateVerdictSummary> = verdicts
-            .iter()
-            .map(|v| GateVerdictSummary {
-                gate_name: v.gate.clone(),
-                passed: v.passed,
-                summary: v.reason.clone(),
-                error_digest: v.error_digest.clone(),
-                failure_kind: (!v.passed)
-                    .then(|| classify_failure_kind(std::slice::from_ref(v), &v.reason)),
-            })
-            .collect();
-
-        let output_preview: String = output.chars().take(200).collect();
-        let verdict_names: Vec<&str> = summaries.iter().map(|v| v.gate_name.as_str()).collect();
-        info!(
-            plan_id = %plan_id,
-            task_id = %task_id,
-            rung,
-            passed,
-            duration_ms,
-            verdict_count = summaries.len(),
-            verdicts = ?verdict_names,
-            output_preview = %output_preview,
-            "gate completed"
-        );
-
-        let completion = GateCompletion {
-            kind: GateCompletionKind::Gate,
+        let completion = run_gate_once(
             plan_id,
             task_id,
             rung,
-            passed,
-            failure_kind,
-            verdicts: summaries,
-            output,
-            duration_ms,
-        };
+            workdir,
+            gates_config,
+            complexity,
+            verify_steps,
+            timeout_secs,
+            target_crates,
+        )
+        .await;
 
         if let Err(e) = gate_tx.send(completion).await {
             error!(err = %e, "failed to send gate completion — channel closed");
             return;
         }
     });
+}
+
+/// Run a gate rung to completion and return its summary.
+pub async fn run_gate_once(
+    plan_id: String,
+    task_id: String,
+    rung: u32,
+    workdir: PathBuf,
+    gates_config: GatesConfig,
+    complexity: PlanComplexity,
+    verify_steps: Vec<VerifyStep>,
+    timeout_secs: u64,
+    target_crates: Vec<String>,
+) -> GateCompletion {
+    let start = Instant::now();
+    let signal = gate_signal(&plan_id, &task_id, rung, &workdir, &target_crates);
+    let ctx = roko_core::Context::now();
+    let limit = Duration::from_secs(timeout_secs.max(1));
+
+    info!(
+        plan_id = %plan_id,
+        task_id = %task_id,
+        rung,
+        timeout_secs,
+        verify_step_count = verify_steps.len(),
+        "gate rung starting"
+    );
+
+    let workdir_for_run = workdir.clone();
+    let run = async {
+        let inputs = RungExecutionInputs::default();
+        let config = RungExecutionConfig {
+            source_roots: Some(vec![workdir_for_run]),
+            timeout_ms: Some(timeout_secs.saturating_mul(1000)),
+            ..Default::default()
+        };
+        let pipeline = if gates_config.has_custom_rungs() {
+            GatePipelineBuilder::from_config(&gates_config, complexity)
+        } else {
+            GatePipelineBuilder::from_config_with_execution(
+                &gates_config,
+                complexity,
+                inputs,
+                config,
+            )
+        };
+
+        let mut verdicts = vec![pipeline.verify(&signal, &ctx).await];
+        verdicts.extend(run_verify_steps(&signal, &ctx, &task_id, verify_steps).await);
+        verdicts
+    };
+
+    let verdicts = match timeout(limit, run).await {
+        Ok(verdicts) => verdicts,
+        Err(_) => vec![
+            Verdict::fail(
+                format!("gate-timeout:rung-{rung}"),
+                format!("gate timed out after {timeout_secs}s"),
+            )
+            .with_error_digest(format!(
+                "timeout: gate rung {rung} exceeded {timeout_secs}s"
+            )),
+        ],
+    };
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    let passed = verdicts.iter().all(|v| v.passed);
+    let output = render_output(&verdicts);
+    let failure_kind = (!passed).then(|| classify_failure_kind(&verdicts, &output));
+
+    let summaries: Vec<GateVerdictSummary> = verdicts
+        .iter()
+        .map(|v| GateVerdictSummary {
+            gate_name: v.gate.clone(),
+            passed: v.passed,
+            summary: v.reason.clone(),
+            error_digest: v.error_digest.clone(),
+            failure_kind: (!v.passed)
+                .then(|| classify_failure_kind(std::slice::from_ref(v), &v.reason)),
+        })
+        .collect();
+
+    let preview_limit = if passed { 500 } else { 4_000 };
+    let output_preview: String = output.chars().take(preview_limit).collect();
+    let verdict_names: Vec<&str> = summaries.iter().map(|v| v.gate_name.as_str()).collect();
+    info!(
+        plan_id = %plan_id,
+        task_id = %task_id,
+        rung,
+        passed,
+        duration_ms,
+        verdict_count = summaries.len(),
+        verdicts = ?verdict_names,
+        output_preview = %output_preview,
+        "gate completed"
+    );
+
+    GateCompletion {
+        kind: GateCompletionKind::Gate,
+        plan_id,
+        task_id,
+        rung,
+        passed,
+        failure_kind,
+        verdicts: summaries,
+        output,
+        duration_ms,
+    }
 }
 
 /// Spawn plan-level verify steps as a background task.
@@ -311,9 +338,7 @@ async fn run_verify_steps(
     let mut verdicts = Vec::new();
     for (i, step) in verify_steps.iter().enumerate() {
         let step_start = Instant::now();
-        let gate = ShellGate::new("sh", vec!["-c".into(), step.command.clone()])
-            .with_name(format!("task-verify:{}:{}", task_id, step.phase))
-            .with_timeout_ms(step.timeout_ms);
+        let gate = verify_step_gate(task_id, step);
         let verdict = gate.verify(signal, ctx).await;
         info!(
             task_id = %task_id,
@@ -321,6 +346,7 @@ async fn run_verify_steps(
             total_steps = verify_steps.len(),
             phase = %step.phase,
             command = %step.command,
+            timeout_ms = step.timeout_ms,
             passed = verdict.passed,
             elapsed_ms = step_start.elapsed().as_millis() as u64,
             "verify step completed"
@@ -330,28 +356,55 @@ async fn run_verify_steps(
     verdicts
 }
 
+fn verify_step_gate(task_id: &str, step: &VerifyStep) -> ShellGate {
+    ShellGate::new(
+        "bash",
+        vec![
+            "-o".into(),
+            "pipefail".into(),
+            "-c".into(),
+            step.command.clone(),
+        ],
+    )
+    .with_name(format!("task-verify:{}:{}", task_id, step.phase))
+    .with_timeout_ms(step.timeout_ms)
+}
+
 fn render_output(verdicts: &[Verdict]) -> String {
     verdicts
         .iter()
-        .map(|v| {
-            let digest = v
-                .error_digest
-                .as_deref()
-                .or(v.detail.as_deref())
-                .unwrap_or("");
-            if digest.is_empty() {
-                format!("{}: {}", v.gate, if v.passed { "pass" } else { "FAIL" })
-            } else {
-                format!(
-                    "{}: {} — {}",
-                    v.gate,
-                    if v.passed { "pass" } else { "FAIL" },
-                    digest
-                )
-            }
-        })
+        .map(render_verdict_output)
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+fn render_verdict_output(v: &Verdict) -> String {
+    let status = if v.passed { "pass" } else { "FAIL" };
+    let detail = v.detail.as_deref().unwrap_or("").trim();
+    let digest = v.error_digest.as_deref().unwrap_or("").trim();
+    let reason = v.reason.trim();
+
+    let message = if v.passed {
+        first_non_empty([detail, reason, digest])
+    } else if !detail.is_empty() && !digest.is_empty() {
+        format!("{detail}\n\nclassification:\n{digest}")
+    } else {
+        first_non_empty([detail, reason, digest])
+    };
+
+    if message.is_empty() {
+        format!("{}: {status}", v.gate)
+    } else {
+        format!("{}: {status} — {message}", v.gate)
+    }
+}
+
+fn first_non_empty<const N: usize>(values: [&str; N]) -> String {
+    values
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn classify_failure_kind(verdicts: &[Verdict], output: &str) -> RunnerFailureKind {
@@ -383,11 +436,87 @@ fn classify_failure_kind(verdicts: &[Verdict], output: &str) -> RunnerFailureKin
         roko_gate::GateFailureAction::Retry => {
             if rendered.contains("external_environment") {
                 RunnerFailureKind::Transient
-            } else if fallback == RunnerFailureKind::Unknown {
-                RunnerFailureKind::Permanent
             } else {
-                fallback
+                match fallback {
+                    RunnerFailureKind::Resource | RunnerFailureKind::Transient => fallback,
+                    RunnerFailureKind::Permanent
+                    | RunnerFailureKind::Structural
+                    | RunnerFailureKind::Unknown => RunnerFailureKind::Structural,
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_recommended_gate_digest_remains_retryable() {
+        let digest = r#"{
+  "gate": "task-verify:C01:structural",
+  "primary": "unknown",
+  "failure_kind": "permanent",
+  "retry_policy": {
+    "retryable": true,
+    "cooldown_secs": 0,
+    "include_error_digest": true,
+    "generate_reflection": true,
+    "regenerate_verify": false
+  },
+  "summary": "exit code: 1",
+  "classes": ["unknown"],
+  "compile_errors": [],
+  "error_count": 0,
+  "warning_count": 0,
+  "cargo_fix_candidate": false,
+  "agent_retry_needed": true,
+  "recommended_action": "retry",
+  "replan_candidate": false,
+  "blocking_findings": [],
+  "duration_ms": 10,
+  "raw_excerpt": ""
+}"#;
+        let verdict =
+            Verdict::fail("task-verify:C01:structural", "exit code: 1").with_error_digest(digest);
+
+        let kind = classify_failure_kind(&[verdict], "");
+
+        assert_eq!(kind, RunnerFailureKind::Structural);
+        assert!(kind.is_retryable());
+    }
+
+    #[test]
+    fn failed_gate_output_prefers_command_detail_before_classification() {
+        let verdict = Verdict::fail("task-verify:V03:test", "exit code: 1")
+            .with_detail("failures:\n    workspace_tests::regression\n")
+            .with_error_digest(r#"{"recommended_action":"retry"}"#);
+
+        let rendered = render_output(&[verdict]);
+
+        assert!(rendered.contains("workspace_tests::regression"));
+        assert!(rendered.contains("classification:"));
+        assert!(
+            rendered.find("workspace_tests::regression").unwrap()
+                < rendered.find("classification:").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_steps_fail_when_a_piped_command_fails_before_tail() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let signal = gate_signal("plan", "task", 2, tempdir.path(), &[]);
+        let ctx = roko_core::Context::now();
+        let step = VerifyStep {
+            phase: "test".to_string(),
+            command: "false | tail -1".to_string(),
+            fail_msg: None,
+            timeout_ms: 10_000,
+        };
+
+        let verdicts = run_verify_steps(&signal, &ctx, "T01", vec![step]).await;
+
+        assert_eq!(verdicts.first().map(|verdict| verdict.passed), Some(false));
     }
 }

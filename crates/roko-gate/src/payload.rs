@@ -160,13 +160,14 @@ impl BuildSystem {
     /// the list is empty or the build system is not Cargo.
     #[must_use]
     pub fn scoped_check_args(self, crates: &[String]) -> Vec<String> {
+        let crates = cargo_package_scope(crates);
         if self != Self::Cargo || crates.is_empty() {
             return self.check_args().iter().map(|s| (*s).to_owned()).collect();
         }
         let mut args = vec!["check".to_owned()];
         for krate in crates {
             args.push("-p".to_owned());
-            args.push(krate.clone());
+            args.push(krate.to_owned());
         }
         args.push("--lib".to_owned());
         args
@@ -187,6 +188,25 @@ impl BuildSystem {
             Self::Forge => &["test"],
             Self::Make => &["test"],
         }
+    }
+
+    /// Build a scoped test command targeting specific crates.
+    ///
+    /// When `crates` is non-empty, emits `-p <name>` for each crate instead
+    /// of `--workspace`. Falls back to [`test_args`](Self::test_args) when
+    /// the list is empty or the build system is not Cargo.
+    #[must_use]
+    pub fn scoped_test_args(self, crates: &[String]) -> Vec<String> {
+        let crates = cargo_package_scope(crates);
+        if self != Self::Cargo || crates.is_empty() {
+            return self.test_args().iter().map(|s| (*s).to_owned()).collect();
+        }
+        let mut args = vec!["test".to_owned()];
+        for krate in crates {
+            args.push("-p".to_owned());
+            args.push(krate.to_owned());
+        }
+        args
     }
 
     /// The default "lint" command for this build system.
@@ -223,13 +243,14 @@ impl BuildSystem {
     /// the list is empty or the build system is not Cargo.
     #[must_use]
     pub fn scoped_lint_args(self, crates: &[String]) -> Vec<String> {
+        let crates = cargo_package_scope(crates);
         if self != Self::Cargo || crates.is_empty() {
             return self.lint_args().iter().map(|s| (*s).to_owned()).collect();
         }
         let mut args = vec!["clippy".to_owned()];
         for krate in crates {
             args.push("-p".to_owned());
-            args.push(krate.clone());
+            args.push(krate.to_owned());
         }
         args.push("--lib".to_owned());
         args.push("--no-deps".to_owned());
@@ -316,6 +337,14 @@ impl TestSelector {
     }
 }
 
+fn cargo_package_scope(crates: &[String]) -> Vec<&str> {
+    crates
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !name.is_empty() && *name != "workspace")
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +388,53 @@ mod tests {
     #[test]
     fn build_system_check_args() {
         assert!(BuildSystem::Cargo.check_args().contains(&"check"));
+    }
+
+    #[test]
+    fn cargo_scoped_test_args_use_packages_not_workspace() {
+        let args =
+            BuildSystem::Cargo.scoped_test_args(&["roko-acp".to_string(), "roko-gate".to_string()]);
+
+        assert_eq!(
+            args,
+            vec![
+                "test".to_string(),
+                "-p".to_string(),
+                "roko-acp".to_string(),
+                "-p".to_string(),
+                "roko-gate".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cargo_workspace_sentinel_uses_workspace_args() {
+        let crates = ["workspace".to_string()];
+
+        assert_eq!(
+            BuildSystem::Cargo.scoped_check_args(&crates),
+            BuildSystem::Cargo
+                .check_args()
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            BuildSystem::Cargo.scoped_test_args(&crates),
+            BuildSystem::Cargo
+                .test_args()
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            BuildSystem::Cargo.scoped_lint_args(&crates),
+            BuildSystem::Cargo
+                .lint_args()
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

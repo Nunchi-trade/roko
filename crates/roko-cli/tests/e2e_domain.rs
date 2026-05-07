@@ -138,7 +138,9 @@ title = "Code task"
 description = "A code-domain task"
 domain = "code"
 role = "implementer"
+files = ["README.md"]
 depends_on = ["t1"]
+verify = [{ phase = "test", command = "true" }]
 "#,
     )
     .unwrap();
@@ -202,7 +204,9 @@ title = "Custom domain task"
 description = "A task with a user-defined domain"
 domain = "blockchain-audit"
 role = "implementer"
+files = ["README.md"]
 depends_on = []
+verify = [{ phase = "test", command = "true" }]
 "#,
     )
     .unwrap();

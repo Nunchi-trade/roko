@@ -93,6 +93,7 @@ libc = "0.2"
 fs2 = "0.4"
 pulldown-cmark = "0.12"
 webbrowser = { workspace = true }
+glob = { workspace = true }
 
 [dev-dependencies]
 agent-relay = { path = "../../apps/agent-relay" }

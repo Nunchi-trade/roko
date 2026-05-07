@@ -6,8 +6,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use http_body_util::BodyExt;
 use roko_core::config::ServeAuthConfig;
@@ -88,7 +90,7 @@ fn test_app_state() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
         enabled: false,
         ..ServeAuthConfig::default()
     };
-    let router = build_router(Arc::clone(&state), &[], auth);
+    let router = build_test_router(Arc::clone(&state), &[], auth);
     (dir, state, router)
 }
 
@@ -113,8 +115,38 @@ fn test_app_with_auth(api_key: &str) -> (tempfile::TempDir, axum::Router) {
         )
         .expect("AppState::new"),
     );
-    let router = build_router(Arc::clone(&state), &[], auth);
+    let router = build_test_router(Arc::clone(&state), &[], auth);
     (dir, router)
+}
+
+fn build_test_router(
+    state: Arc<AppState>,
+    cors_origins: &[String],
+    auth: ServeAuthConfig,
+) -> axum::Router {
+    build_router(state, cors_origins, auth)
+        .reset_fallback()
+        .fallback(test_api_or_spa_fallback)
+}
+
+async fn test_api_or_spa_fallback(req: Request<Body>) -> Response {
+    let path = req.uri().path().to_string();
+    if matches!(path.as_str(), "/api" | "/ws" | "/roko-ws")
+        || path.starts_with("/api/")
+        || path.starts_with("/ws/")
+        || path.starts_with("/roko-ws/")
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "not_found",
+                "message": format!("No route matches {path}"),
+            })),
+        )
+            .into_response();
+    }
+
+    roko_serve::embedded::serve_embedded(req).await
 }
 
 /// Send a GET request and return `(StatusCode, serde_json::Value)`.
@@ -654,7 +686,7 @@ async fn stable_projection_frames_include_version_and_explicit_missing_state() {
     );
     assert_eq!(
         learning["state"]["policy_updates"]["endpoint"],
-        "/api/learning/policy-updates"
+        "/api/projections/runtime_feedback"
     );
 }
 

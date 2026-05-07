@@ -242,8 +242,7 @@ impl TaskQualityProfile {
 }
 
 /// Domain of work — drives gate selection and orchestration templates (ORCH-09).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TaskDomain {
     /// Source code changes (compile, test, clippy gates).
@@ -271,6 +270,25 @@ impl TaskDomain {
         }
     }
 
+    /// Parse a domain label from task metadata.
+    ///
+    /// Unknown non-empty labels are valid custom domains so teams can attach
+    /// their own gate profiles without changing the core enum.
+    pub fn from_label(label: &str) -> Option<Self> {
+        let label = label.trim();
+        if label.is_empty() {
+            return None;
+        }
+
+        Some(match label {
+            "code" | "coding" => Self::Code,
+            "chain" => Self::Chain,
+            "research" => Self::Research,
+            "docs" | "documentation" => Self::Docs,
+            other => Self::Custom(other.to_string()),
+        })
+    }
+
     /// Return the default gate names for this domain.
     #[must_use]
     pub fn default_gates(&self) -> Vec<&'static str> {
@@ -281,6 +299,26 @@ impl TaskDomain {
             Self::Docs => vec!["lint", "spell", "link-check"],
             Self::Custom(_) => vec!["compile", "test"],
         }
+    }
+}
+
+impl Serialize for TaskDomain {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.label())
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskDomain {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let label = String::deserialize(deserializer)?;
+        Self::from_label(&label)
+            .ok_or_else(|| de::Error::custom("task domain label cannot be empty"))
     }
 }
 

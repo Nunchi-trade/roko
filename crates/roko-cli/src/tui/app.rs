@@ -4,13 +4,17 @@
 //! TuiAction dispatch, PostFX pipeline, and atmosphere animations.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io;
-use std::io::Stdout;
+use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc as std_mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc as std_mpsc,
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use crossterm::cursor;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, KeyEvent, MouseEvent, MouseEventKind,
 };
@@ -110,6 +114,20 @@ pub struct App {
     pending_approval_response: Option<oneshot::Sender<bool>>,
     /// Owning handle for the in-process or connected state hub.
     _state_hub: Option<crate::state_hub::SharedStateHub>,
+    /// Whether this app should refresh the StateHub from on-disk dashboard state.
+    ///
+    /// Standalone `roko dashboard` uses a local hub backed by disk replay.
+    /// Connected approval/dashboard sessions receive live events from their
+    /// caller and must not import stale historical runs from disk.
+    replay_disk_snapshots: bool,
+    /// Optional signal used by an owning command to shut down the TUI.
+    shutdown_rx: Option<std_mpsc::Receiver<()>>,
+    /// Whether this connected TUI should exit when its observed run completes.
+    exit_on_plan_completion: bool,
+    /// Whether to enable terminal mouse reporting while the TUI is active.
+    capture_mouse: bool,
+    /// Whether a plan has been observed in this connected TUI session.
+    connected_plan_observed: bool,
     /// Live dashboard snapshot receiver from `StateHub` when connected.
     pub snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::DashboardSnapshot>>,
     /// Last error entry surfaced from the live snapshot stream.
@@ -360,12 +378,95 @@ impl std::fmt::Debug for App {
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 
+const TERMINAL_RESET_SEQUENCE: &[u8] =
+    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[?25h\x1b[0m";
+
+static TERMINAL_CLEANUP_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+static TERMINAL_SIGNAL_CLEANUP_INSTALLED: AtomicBool = AtomicBool::new(false);
+
 struct PanicHookRestoreGuard(Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>);
 
 impl Drop for PanicHookRestoreGuard {
     fn drop(&mut self) {
         let hook = Arc::clone(&self.0);
         std::panic::set_hook(Box::new(move |panic_info| hook(panic_info)));
+    }
+}
+
+struct TerminalCleanupGuard {
+    active: bool,
+}
+
+impl TerminalCleanupGuard {
+    fn arm() -> Self {
+        TERMINAL_CLEANUP_ACTIVE.store(true, Ordering::SeqCst);
+        install_terminal_signal_cleanup();
+        Self { active: true }
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        self.active = false;
+        App::cleanup_terminal()
+    }
+}
+
+impl Drop for TerminalCleanupGuard {
+    fn drop(&mut self) {
+        if self.active {
+            App::cleanup_terminal_best_effort();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn install_terminal_signal_cleanup() {
+    if TERMINAL_SIGNAL_CLEANUP_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    // SAFETY: installing a process signal handler requires libc. The handler
+    // only performs async-signal-safe writes and then restores the default
+    // disposition before re-raising the original signal.
+    #[allow(unsafe_code)]
+    unsafe {
+        let handler = terminal_signal_handler as *const () as libc::sighandler_t;
+        let _ = libc::signal(libc::SIGINT, handler);
+        let _ = libc::signal(libc::SIGTERM, handler);
+        let _ = libc::signal(libc::SIGHUP, handler);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_terminal_signal_cleanup() {}
+
+#[cfg(unix)]
+extern "C" fn terminal_signal_handler(signal: libc::c_int) {
+    if TERMINAL_CLEANUP_ACTIVE.load(Ordering::SeqCst) {
+        // SAFETY: write(2) is async-signal-safe. The reset bytes are a static
+        // buffer and both file descriptors are process constants.
+        #[allow(unsafe_code)]
+        unsafe {
+            let _ = libc::write(
+                libc::STDOUT_FILENO,
+                TERMINAL_RESET_SEQUENCE.as_ptr().cast(),
+                TERMINAL_RESET_SEQUENCE.len(),
+            );
+            let _ = libc::write(
+                libc::STDERR_FILENO,
+                TERMINAL_RESET_SEQUENCE.as_ptr().cast(),
+                TERMINAL_RESET_SEQUENCE.len(),
+            );
+        }
+    }
+
+    // SAFETY: restore the default signal disposition and re-raise the signal
+    // so process semantics remain the same after best-effort terminal reset.
+    #[allow(unsafe_code)]
+    unsafe {
+        let _ = libc::signal(signal, libc::SIG_DFL);
+        let _ = libc::raise(signal);
     }
 }
 
@@ -437,7 +538,7 @@ impl App {
         if count > 0 {
             tracing::info!(count, path = %events_path.display(), "replayed events from log");
         }
-        Self::new_connected_with_state_hub(root, None, state_hub)
+        Self::new_connected_with_state_hub(root, None, state_hub, true)
     }
 
     /// Build a new app from a workspace root with an initial page selection.
@@ -451,13 +552,14 @@ impl App {
         if count > 0 {
             tracing::info!(count, path = %events_path.display(), "replayed events from log");
         }
-        Self::new_connected_with_state_hub(root, initial_page, state_hub)
+        Self::new_connected_with_state_hub(root, initial_page, state_hub, true)
     }
 
     fn new_with_page_inner(
         root: impl AsRef<Path>,
         initial_page: Option<PageId>,
         state_hub: Option<crate::state_hub::SharedStateHub>,
+        replay_disk_snapshots: bool,
     ) -> Self {
         let workdir = root.as_ref().to_path_buf();
         let terminal_size = size().unwrap_or((80, 24));
@@ -503,6 +605,11 @@ impl App {
             approval_rx: None,
             pending_approval_response: None,
             _state_hub: state_hub,
+            replay_disk_snapshots,
+            shutdown_rx: None,
+            exit_on_plan_completion: false,
+            capture_mouse: false,
+            connected_plan_observed: false,
             snapshot_rx: None,
             last_snapshot_error_marker: None,
             agent_stream_clients: HashMap::new(),
@@ -535,15 +642,21 @@ impl App {
         initial_page: Option<PageId>,
         state_hub: &crate::state_hub::SharedStateHub,
     ) -> Self {
-        Self::new_connected_with_state_hub(root, initial_page, state_hub.clone())
+        Self::new_connected_with_state_hub(root, initial_page, state_hub.clone(), false)
     }
 
     fn new_connected_with_state_hub(
         root: impl AsRef<Path>,
         initial_page: Option<PageId>,
         state_hub: crate::state_hub::SharedStateHub,
+        replay_disk_snapshots: bool,
     ) -> Self {
-        let mut app = Self::new_with_page_inner(root, initial_page, Some(state_hub.clone()));
+        let mut app = Self::new_with_page_inner(
+            root,
+            initial_page,
+            Some(state_hub.clone()),
+            replay_disk_snapshots,
+        );
         let snapshot_rx = state_hub.snapshot();
         // Verdicts aggregator starts as None; populated on first async tick.
         if snapshot_has_content(&snapshot_rx.borrow()) {
@@ -557,6 +670,31 @@ impl App {
         }
         app.snapshot_rx = Some(snapshot_rx);
         app
+    }
+
+    /// Configure this app to exit when the provided shutdown signal arrives.
+    #[must_use]
+    pub fn with_shutdown_receiver(mut self, shutdown_rx: std_mpsc::Receiver<()>) -> Self {
+        self.shutdown_rx = Some(shutdown_rx);
+        self
+    }
+
+    /// Configure this app to close automatically after its connected run ends.
+    #[must_use]
+    pub const fn with_exit_on_plan_completion(mut self) -> Self {
+        self.exit_on_plan_completion = true;
+        self
+    }
+
+    /// Configure this app to run without terminal mouse reporting.
+    ///
+    /// This is useful for embedded approval UIs owned by long-running commands:
+    /// keyboard controls still work, and abnormal process termination cannot
+    /// leave the caller's shell printing mouse escape sequences.
+    #[must_use]
+    pub const fn without_mouse_capture(mut self) -> Self {
+        self.capture_mouse = false;
+        self
     }
 
     /// Install a live process supervisor used for per-agent process metrics.
@@ -590,13 +728,14 @@ impl App {
         let _restore_hook = PanicHookRestoreGuard(previous_hook);
 
         std::panic::set_hook(Box::new(move |panic_info| {
-            let _ = Self::cleanup_terminal();
+            Self::cleanup_terminal_best_effort();
             panic_hook(panic_info);
         }));
 
-        let mut terminal = Self::enter_terminal()?;
+        let mut terminal_guard = TerminalCleanupGuard::arm();
+        let mut terminal = self.enter_terminal()?;
         let result = self.main_loop(&mut terminal);
-        let cleanup = Self::leave_terminal();
+        let cleanup = terminal_guard.restore();
 
         match (result, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
@@ -660,6 +799,11 @@ impl App {
         // Event loop
         // ---------------------------------------------------------------
         while self.running {
+            self.drain_shutdown_signal();
+            if !self.running {
+                break;
+            }
+
             self.drain_snapshot_channel();
             match events.next().context("poll TUI event")? {
                 Event::Key(key) => {
@@ -2361,14 +2505,16 @@ impl App {
 
     /// Full refresh — async version for the connected `run()` path.
     async fn refresh_snapshot_async(&mut self) {
-        self.data = DashboardData::load_best_effort(&self.workdir);
-        self.scaffold = DashboardScaffold::new_in(&self.workdir);
-        self.last_data_gen = self.data.generation;
-        self.tui_state.update_from_snapshot(&self.data);
-        if let Some(state_hub) = &self._state_hub {
-            let _ = state_hub.bootstrap_from_workdir(&self.workdir);
-            let events_path = self.workdir.join(".roko").join("events.jsonl");
-            state_hub.replay_log_into_snapshot(&events_path);
+        if self.replay_disk_snapshots || self._state_hub.is_none() {
+            self.data = DashboardData::load_best_effort(&self.workdir);
+            self.scaffold = DashboardScaffold::new_in(&self.workdir);
+            self.last_data_gen = self.data.generation;
+            self.tui_state.update_from_snapshot(&self.data);
+            if let Some(state_hub) = &self._state_hub {
+                let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+                let events_path = self.workdir.join(".roko").join("events.jsonl");
+                state_hub.replay_log_into_snapshot(&events_path);
+            }
         }
         self.reseed_verdicts_aggregator().await;
         self.refresh_verdicts_from_aggregator().await;
@@ -2383,14 +2529,16 @@ impl App {
 
     /// Full refresh — sync version for the standalone `main_loop` path.
     fn refresh_snapshot(&mut self) {
-        self.data = DashboardData::load_best_effort(&self.workdir);
-        self.scaffold = DashboardScaffold::new_in(&self.workdir);
-        self.last_data_gen = self.data.generation;
-        self.tui_state.update_from_snapshot(&self.data);
-        if let Some(state_hub) = &self._state_hub {
-            let _ = state_hub.bootstrap_from_workdir(&self.workdir);
-            let events_path = self.workdir.join(".roko").join("events.jsonl");
-            state_hub.replay_log_into_snapshot(&events_path);
+        if self.replay_disk_snapshots || self._state_hub.is_none() {
+            self.data = DashboardData::load_best_effort(&self.workdir);
+            self.scaffold = DashboardScaffold::new_in(&self.workdir);
+            self.last_data_gen = self.data.generation;
+            self.tui_state.update_from_snapshot(&self.data);
+            if let Some(state_hub) = &self._state_hub {
+                let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+                let events_path = self.workdir.join(".roko").join("events.jsonl");
+                state_hub.replay_log_into_snapshot(&events_path);
+            }
         }
         self.reseed_verdicts_aggregator_blocking();
         self.refresh_verdicts_from_aggregator_blocking();
@@ -2498,6 +2646,7 @@ impl App {
         {
             Ok(()) => {
                 self.tui_state.config_pending.clear();
+                self.fx_config = EffectsConfig::load_from_root(&self.workdir);
                 self.pending_refresh = true;
                 self.notifications.push(super::modals::Notification::info(
                     "Config saved and reloaded",
@@ -2783,12 +2932,14 @@ impl App {
                 // `tick_snapshot()` call and eliminates the dual data
                 // pipeline.
                 if let Some(state_hub) = &self._state_hub {
-                    let _ = state_hub.bootstrap_from_workdir(&self.workdir);
-                    // Replay events.jsonl for any events not covered by
-                    // the bootstrap snapshot (e.g. orchestrator events
-                    // written since last bootstrap).
-                    let events_path = self.workdir.join(".roko").join("events.jsonl");
-                    state_hub.replay_log_into_snapshot(&events_path);
+                    if self.replay_disk_snapshots {
+                        let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+                        // Replay events.jsonl for any events not covered by
+                        // the bootstrap snapshot (e.g. orchestrator events
+                        // written since last bootstrap).
+                        let events_path = self.workdir.join(".roko").join("events.jsonl");
+                        state_hub.replay_log_into_snapshot(&events_path);
+                    }
                 } else if self.snapshot_rx.is_none() {
                     // Legacy fallback: no StateHub and no snapshot_rx.
                     self.tick_snapshot();
@@ -2825,14 +2976,7 @@ impl App {
     }
 
     fn drain_snapshot_channel(&mut self) {
-        let (snapshot_rx, tui_state, notifications, last_marker) = (
-            &mut self.snapshot_rx,
-            &mut self.tui_state,
-            &mut self.notifications,
-            &mut self.last_snapshot_error_marker,
-        );
-
-        let Some(rx) = snapshot_rx.as_mut() else {
+        let Some(rx) = self.snapshot_rx.as_mut() else {
             return;
         };
 
@@ -2840,8 +2984,48 @@ impl App {
             return;
         }
 
-        let snapshot = rx.borrow_and_update();
-        apply_dashboard_snapshot(tui_state, notifications, last_marker, &snapshot);
+        let snapshot = rx.borrow_and_update().clone();
+        apply_dashboard_snapshot(
+            &mut self.tui_state,
+            &mut self.notifications,
+            &mut self.last_snapshot_error_marker,
+            &snapshot,
+        );
+        self.update_plan_completion_exit(&snapshot);
+    }
+
+    fn drain_shutdown_signal(&mut self) {
+        let Some(rx) = self.shutdown_rx.as_ref() else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(()) | Err(std_mpsc::TryRecvError::Disconnected) => {
+                self.running = false;
+            }
+            Err(std_mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn update_plan_completion_exit(&mut self, snapshot: &roko_core::DashboardSnapshot) {
+        if !self.exit_on_plan_completion {
+            return;
+        }
+
+        let has_active_plan =
+            snapshot.stats.plans_active > 0 || snapshot.plans.values().any(|plan| plan.active);
+        let has_finished_plan = snapshot.stats.plans_completed > 0
+            || snapshot.stats.plans_failed > 0
+            || snapshot
+                .plans
+                .values()
+                .any(|plan| !plan.active && (plan.phase == "completed" || plan.phase == "failed"));
+
+        self.connected_plan_observed |= has_active_plan || has_finished_plan;
+
+        if self.connected_plan_observed && !has_active_plan {
+            self.running = false;
+        }
     }
 
     fn request_agent_topology_refresh(&mut self) {
@@ -3056,11 +3240,15 @@ impl App {
         }
     }
 
-    fn enter_terminal() -> Result<TuiTerminal> {
+    fn enter_terminal(&self) -> Result<TuiTerminal> {
         enable_raw_mode().context("enable raw mode")?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-            .context("enter alternate screen")?;
+        if self.capture_mouse {
+            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+                .context("enter alternate screen")?;
+        } else {
+            execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
+        }
         Terminal::new(CrosstermBackend::new(stdout)).context("create terminal")
     }
 
@@ -3069,10 +3257,23 @@ impl App {
     }
 
     fn cleanup_terminal() -> Result<()> {
-        disable_raw_mode().context("disable raw mode")?;
-        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
-            .context("leave alternate screen")?;
+        Self::cleanup_terminal_best_effort();
         Ok(())
+    }
+
+    fn cleanup_terminal_best_effort() {
+        TERMINAL_CLEANUP_ACTIVE.store(false, Ordering::SeqCst);
+
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = execute!(
+            stdout,
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            cursor::Show
+        );
+        let _ = stdout.write_all(TERMINAL_RESET_SEQUENCE);
+        let _ = stdout.flush();
     }
 }
 
@@ -3357,6 +3558,98 @@ mod tests {
         let hub = crate::state_hub::shared_state_hub();
         let app = App::new_connected(dir.path(), &hub);
         assert!(app.snapshot_rx.is_some());
+    }
+
+    #[test]
+    fn terminal_reset_sequence_disables_mouse_and_alternate_screen() {
+        let sequence = std::str::from_utf8(TERMINAL_RESET_SEQUENCE).unwrap();
+        assert!(sequence.contains("\x1b[?1000l"));
+        assert!(sequence.contains("\x1b[?1002l"));
+        assert!(sequence.contains("\x1b[?1003l"));
+        assert!(sequence.contains("\x1b[?1006l"));
+        assert!(sequence.contains("\x1b[?1049l"));
+        assert!(sequence.contains("\x1b[?25h"));
+    }
+
+    #[test]
+    fn app_defaults_to_keyboard_only_terminal_mode() {
+        let dir = tempdir().unwrap();
+        let app = App::new(dir.path());
+        assert!(!app.capture_mouse);
+    }
+
+    #[test]
+    fn approval_tui_can_disable_mouse_capture() {
+        let dir = tempdir().unwrap();
+        let app = App::new(dir.path()).without_mouse_capture();
+        assert!(!app.capture_mouse);
+    }
+
+    #[test]
+    fn shutdown_signal_stops_app() {
+        let dir = tempdir().unwrap();
+        let (shutdown_tx, shutdown_rx) = std_mpsc::channel();
+        let mut app = App::new(dir.path()).with_shutdown_receiver(shutdown_rx);
+
+        shutdown_tx.send(()).unwrap();
+        app.drain_shutdown_signal();
+
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn connected_app_exits_after_observed_plan_completion() {
+        let dir = tempdir().unwrap();
+        let hub = crate::state_hub::shared_state_hub();
+        let mut app = App::new_connected(dir.path(), &hub).with_exit_on_plan_completion();
+
+        hub.publish(roko_core::DashboardEvent::PlanStarted {
+            plan_id: "live-plan".to_string(),
+        });
+        app.drain_snapshot_channel();
+        assert!(app.running);
+
+        hub.publish(roko_core::DashboardEvent::PlanCompleted {
+            plan_id: "live-plan".to_string(),
+            success: true,
+        });
+        app.drain_snapshot_channel();
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn connected_app_refresh_does_not_replay_disk_state() {
+        let dir = tempdir().unwrap();
+        let roko_dir = dir.path().join(".roko");
+        std::fs::create_dir_all(&roko_dir).expect("roko dir");
+        let stale_event = serde_json::to_string(&roko_core::DashboardEvent::PlanStarted {
+            plan_id: "old-plan".to_string(),
+        })
+        .expect("event json");
+        std::fs::write(roko_dir.join("events.jsonl"), format!("{stale_event}\n"))
+            .expect("events log");
+
+        let hub = crate::state_hub::shared_state_hub();
+        let mut app = App::new_connected(dir.path(), &hub);
+
+        app.refresh_snapshot();
+        app.drain_snapshot_channel();
+        assert!(
+            app.tui_state.plans.iter().all(|plan| plan.id != "old-plan"),
+            "connected app imported stale disk plan"
+        );
+
+        hub.publish(roko_core::DashboardEvent::PlanStarted {
+            plan_id: "live-plan".to_string(),
+        });
+        app.drain_snapshot_channel();
+        assert!(
+            app.tui_state
+                .plans
+                .iter()
+                .any(|plan| plan.id == "live-plan"),
+            "connected app should still receive live StateHub updates"
+        );
     }
 
     #[test]

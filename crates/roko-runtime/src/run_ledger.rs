@@ -77,81 +77,17 @@ impl RunLedger {
         duration_secs: f64,
         events: Vec<RuntimeEventEnvelope>,
     ) -> WorkflowRunReport {
-        let mut agent_turns = 0_u32;
-        let mut token_usage = 0_u64;
-        let mut cost_total = 0.0_f64;
-        let mut saw_cost = false;
-        let mut output = None;
-        let mut selected_agent = None;
-        let mut fallback_requested_model: Option<String> = None;
+        let agent_fields = AgentReportFields::from_outcomes(&self.agent_outcomes);
+        let (model, provider) = resolve_report_model(&agent_fields, &events);
 
-        for outcome in &self.agent_outcomes {
-            agent_turns = agent_turns.saturating_add(1);
-            match outcome {
-                AgentOutcome::Completed {
-                    role,
-                    output: agent_output,
-                    final_model,
-                    provider_id,
-                    requested_model,
-                    usage,
-                    ..
-                } => {
-                    output = Some(agent_output.clone());
-                    token_usage = token_usage.saturating_add(usage.total_tokens);
-                    cost_total += usage.cost_usd;
-                    saw_cost = true;
-                    if selected_agent.is_none() || role == "implementer" {
-                        selected_agent = Some((final_model.clone(), provider_id.clone()));
-                    }
-                    if fallback_requested_model.is_none() {
-                        if let Some(m) = non_empty(requested_model) {
-                            fallback_requested_model = Some(m.to_owned());
-                        }
-                    }
-                }
-                AgentOutcome::Failed { message, .. } => {
-                    if output.is_none() {
-                        output = Some(message.clone());
-                    }
-                }
-            }
-        }
-
-        // When no agent completed, scan the event list for an AgentSpawned model as
-        // a final fallback before resorting to "unconfigured".
-        let spawned_model = if selected_agent.is_none() && fallback_requested_model.is_none() {
-            let mut implementer: Option<String> = None;
-            let mut first: Option<String> = None;
-            for envelope in &events {
-                if let RuntimeEvent::AgentSpawned { role, model, .. } = &envelope.payload {
-                    if let Some(m) = non_empty(model) {
-                        if role == "implementer" {
-                            implementer = Some(m.to_owned());
-                            break;
-                        }
-                        first.get_or_insert_with(|| m.to_owned());
-                    }
-                }
-            }
-            implementer.or(first)
+        let gates = if self.gate_runs.is_empty() {
+            gate_outcomes_from_events(&events)
         } else {
-            None
+            self.gate_runs
+                .iter()
+                .map(GateRunOutcome::to_report_gate)
+                .collect()
         };
-
-        let (model, provider) = selected_agent
-            .map(|(model, provider)| {
-                let provider = non_empty(&provider).map(ToOwned::to_owned);
-                (model, provider)
-            })
-            .unwrap_or_else(|| {
-                (
-                    fallback_requested_model
-                        .or(spawned_model)
-                        .unwrap_or_else(|| "unconfigured".to_string()),
-                    None,
-                )
-            });
 
         WorkflowRunReport {
             run_id: self.run_id.clone(),
@@ -159,22 +95,15 @@ impl RunLedger {
             model,
             provider,
             prompt_summary: summarize_text(&self.prompt, 120),
-            output: output.unwrap_or_else(|| {
-                if success {
-                    "success".to_string()
-                } else {
-                    "workflow did not produce agent output".to_string()
-                }
-            }),
-            agent_turns,
-            token_usage,
-            cost: saw_cost.then_some(cost_total),
+            output: agent_fields
+                .output
+                .clone()
+                .unwrap_or_else(|| default_report_output(success)),
+            agent_turns: agent_fields.agent_turns,
+            token_usage: agent_fields.token_usage,
+            cost: agent_fields.cost(),
             duration_secs,
-            gates: self
-                .gate_runs
-                .iter()
-                .map(GateRunOutcome::to_report_gate)
-                .collect(),
+            gates,
             events,
             checkpoint_path: self
                 .checkpoint_path
@@ -255,6 +184,150 @@ impl RunLedger {
             phase,
             requested_at_ms,
         });
+    }
+}
+
+fn gate_outcomes_from_events(events: &[RuntimeEventEnvelope]) -> Vec<GateOutcome> {
+    events
+        .iter()
+        .filter_map(|envelope| match &envelope.payload {
+            RuntimeEvent::GatePassed {
+                gate_name,
+                duration_ms,
+                ..
+            } => Some(GateOutcome {
+                name: gate_name.clone(),
+                passed: true,
+                output: None,
+                duration_ms: *duration_ms,
+            }),
+            RuntimeEvent::GateFailed {
+                gate_name,
+                output,
+                duration_ms,
+                ..
+            } => Some(GateOutcome {
+                name: gate_name.clone(),
+                passed: false,
+                output: Some(output.clone()),
+                duration_ms: *duration_ms,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct AgentReportFields {
+    agent_turns: u32,
+    token_usage: u64,
+    cost_total: f64,
+    saw_cost: bool,
+    output: Option<String>,
+    selected_agent: Option<(String, String)>,
+    fallback_requested_model: Option<String>,
+}
+
+impl AgentReportFields {
+    fn from_outcomes(outcomes: &[AgentOutcome]) -> Self {
+        let mut fields = Self::default();
+        for outcome in outcomes {
+            fields.agent_turns = fields.agent_turns.saturating_add(1);
+            match outcome {
+                AgentOutcome::Completed {
+                    role,
+                    output,
+                    final_model,
+                    provider_id,
+                    requested_model,
+                    usage,
+                    ..
+                } => fields.record_completed(
+                    role,
+                    output,
+                    final_model,
+                    provider_id,
+                    requested_model,
+                    usage,
+                ),
+                AgentOutcome::Failed { message, .. } => fields.record_failed(message),
+            }
+        }
+        fields
+    }
+
+    fn record_completed(
+        &mut self,
+        role: &str,
+        output: &str,
+        final_model: &str,
+        provider_id: &str,
+        requested_model: &str,
+        usage: &TokenUsage,
+    ) {
+        self.output = Some(output.to_string());
+        self.token_usage = self.token_usage.saturating_add(usage.total_tokens);
+        self.cost_total += usage.cost_usd;
+        self.saw_cost = true;
+        if self.selected_agent.is_none() || role == "implementer" {
+            self.selected_agent = Some((final_model.to_string(), provider_id.to_string()));
+        }
+        if self.fallback_requested_model.is_none() {
+            if let Some(model) = non_empty(requested_model) {
+                self.fallback_requested_model = Some(model.to_string());
+            }
+        }
+    }
+
+    fn record_failed(&mut self, message: &str) {
+        if self.output.is_none() {
+            self.output = Some(message.to_string());
+        }
+    }
+
+    fn cost(&self) -> Option<f64> {
+        self.saw_cost.then_some(self.cost_total)
+    }
+}
+
+fn resolve_report_model(
+    fields: &AgentReportFields,
+    events: &[RuntimeEventEnvelope],
+) -> (String, Option<String>) {
+    if let Some((model, provider)) = &fields.selected_agent {
+        return (model.clone(), non_empty(provider).map(ToOwned::to_owned));
+    }
+
+    let model = fields
+        .fallback_requested_model
+        .clone()
+        .or_else(|| spawned_model_from_events(events))
+        .unwrap_or_else(|| "unconfigured".to_string());
+    (model, None)
+}
+
+fn spawned_model_from_events(events: &[RuntimeEventEnvelope]) -> Option<String> {
+    let mut implementer: Option<String> = None;
+    let mut first: Option<String> = None;
+    for envelope in events {
+        if let RuntimeEvent::AgentSpawned { role, model, .. } = &envelope.payload {
+            if let Some(model) = non_empty(model) {
+                if role == "implementer" {
+                    implementer = Some(model.to_string());
+                    break;
+                }
+                first.get_or_insert_with(|| model.to_string());
+            }
+        }
+    }
+    implementer.or(first)
+}
+
+fn default_report_output(success: bool) -> String {
+    if success {
+        "success".to_string()
+    } else {
+        "workflow did not produce agent output".to_string()
     }
 }
 

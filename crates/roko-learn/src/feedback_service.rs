@@ -4,7 +4,7 @@
 //! existing learning infrastructure as append-only efficiency JSONL events.
 
 use crate::cascade_router::CascadeRouter;
-use crate::episode_logger::{Episode, EpisodeLogger, Usage};
+use crate::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
 use crate::model_call_feedback::observe_model_call_on_router;
 use crate::section_effect::SectionEffectivenessRegistry;
 use async_trait::async_trait;
@@ -637,6 +637,7 @@ impl FeedbackService {
             .filter_map(|event| {
                 if let FeedbackEvent::WorkflowComplete {
                     run_id,
+                    model,
                     success,
                     outcome,
                     total_cost_usd,
@@ -645,13 +646,29 @@ impl FeedbackService {
                     ..
                 } = event
                 {
+                    let gate_verdicts = buf
+                        .iter()
+                        .filter_map(|event| match event {
+                            FeedbackEvent::GateResult {
+                                run_id: gate_run_id,
+                                gate_name,
+                                passed,
+                                ..
+                            } if gate_run_id == run_id => {
+                                Some(GateVerdict::new(gate_name.clone(), *passed))
+                            }
+                            _ => None,
+                        })
+                        .collect();
                     Some(build_episode_from_workflow(
                         run_id,
+                        model.as_deref(),
                         *success,
                         outcome,
                         *total_cost_usd,
                         *total_tokens,
                         *duration_ms,
+                        gate_verdicts,
                     ))
                 } else {
                     None
@@ -766,26 +783,33 @@ impl Drop for FeedbackService {
 
 fn build_episode_from_workflow(
     run_id: &str,
+    model: Option<&str>,
     success: bool,
     outcome: &str,
     total_cost_usd: f64,
     total_tokens: u64,
     duration_ms: u64,
+    gate_verdicts: Vec<GateVerdict>,
 ) -> Episode {
     let mut episode = Episode::new("workflow", run_id);
     episode.kind = "workflow_complete".to_string();
     episode.id = format!("ep-{run_id}");
     episode.episode_id = episode.id.clone();
+    episode.model = model.unwrap_or_default().to_string();
     episode.trigger_kind = "workflow_complete".to_string();
     episode.success = success;
     episode.duration_secs = duration_ms as f64 / 1000.0;
     episode.tokens_used = total_tokens;
+    episode.gate_verdicts = gate_verdicts;
     episode.usage = Usage {
         cost_usd: total_cost_usd,
         cost_usd_without_cache: total_cost_usd,
         wall_ms: duration_ms,
         ..Usage::default()
     };
+    episode
+        .extra
+        .insert("run_id".to_string(), serde_json::json!(run_id));
     if !episode.success {
         episode.failure_reason = Some(outcome.to_string());
     }
@@ -857,6 +881,14 @@ mod tests {
         let logger = EpisodeLogger::new(&episodes_path);
         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
 
+        svc.record(FeedbackEvent::GateResult {
+            run_id: "r1".into(),
+            gate_name: "compile".into(),
+            passed: true,
+            duration_ms: 3000,
+        })
+        .await
+        .unwrap();
         svc.record(FeedbackEvent::WorkflowComplete {
             event_type: "workflow_completed".into(),
             run_id: "r1".into(),
@@ -877,6 +909,16 @@ mod tests {
             episodes
                 .iter()
                 .any(|episode| episode.kind == "workflow_complete")
+        );
+        let episode = episodes
+            .iter()
+            .find(|episode| episode.kind == "workflow_complete")
+            .unwrap();
+        assert_eq!(episode.model, "sonnet");
+        assert_eq!(episode.extra.get("run_id"), Some(&serde_json::json!("r1")));
+        assert_eq!(
+            episode.gate_verdicts,
+            vec![GateVerdict::new("compile", true)]
         );
     }
 

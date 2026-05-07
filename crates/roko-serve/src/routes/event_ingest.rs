@@ -208,14 +208,14 @@ mod tests {
     use axum::body::Body;
     use axum::extract::connect_info::MockConnectInfo;
     use axum::http::Request;
-    use http_body_util::BodyExt;
     use roko_core::config::schema::RokoConfig;
     use tower::ServiceExt as _;
 
     /// Build a test state + router using the same pattern as routes/mod.rs tests.
     fn build_test_state_and_router(
-        config: RokoConfig,
+        mut config: RokoConfig,
     ) -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
+        config.serve.auth.enabled = false;
         let dir = tempfile::tempdir().expect("tempdir");
         let deploy = Arc::from(
             crate::deploy::create_backend("manual", None, None, None).expect("manual backend"),
@@ -373,6 +373,7 @@ mod tests {
     async fn non_loopback_without_auth_is_forbidden() {
         // Configure a non-loopback bind so the security check rejects.
         let mut config = RokoConfig::default();
+        config.serve.auth.enabled = false;
         config.server.bind = "0.0.0.0".to_string();
 
         let (_dir, _state, router) = {

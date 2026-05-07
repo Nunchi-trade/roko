@@ -164,7 +164,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = ConfigCache::new_static(dir.path()).unwrap();
         let config = cache.get();
-        assert_eq!(*config, RokoConfig::default());
+        let expected = load_config_with_options(dir.path(), &LoadOptions::default()).unwrap();
+        assert_eq!(*config, expected);
     }
 
     #[test]
@@ -252,7 +253,7 @@ base_url = "https://added.example/v1"
         std::fs::write(dir.path().join("roko.toml"), "config_version = 2\n").unwrap();
 
         let cache = ConfigCache::new_static(dir.path()).unwrap();
-        assert!(cache.get().providers.is_empty());
+        assert!(!cache.get().providers.contains_key("reload-test"));
 
         // Write a new config with a provider.
         std::fs::write(

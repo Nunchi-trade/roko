@@ -523,6 +523,8 @@ pub struct RuntimeProjectionSet {
 pub struct RuntimeFeedbackProjection {
     /// Durable runner/runtime event records from `.roko/events.jsonl`.
     pub runner_events: Vec<Value>,
+    /// Legacy signal/engram records from `.roko/engrams.jsonl`.
+    pub engram_events: Vec<Value>,
     /// Episode records read from project learning stores.
     pub episodes: Vec<Episode>,
     /// Agent efficiency events read from `.roko/learn/efficiency.jsonl`.
@@ -557,6 +559,8 @@ pub struct RuntimeFeedbackProjection {
     pub knowledge_path: PathBuf,
     /// Durable runner event JSONL path.
     pub runner_events_path: PathBuf,
+    /// Legacy signal/engram JSONL path.
+    pub engram_path: PathBuf,
 }
 
 impl RuntimeProjectionSet {
@@ -1145,6 +1149,8 @@ impl RuntimeProjectionSet {
     fn gate_sources(&self) -> Vec<String> {
         let mut sources = vec!["state_hub".to_string()];
         sources.extend(path_list(&self.feedback.episode_paths));
+        sources.push(self.feedback.engram_path.display().to_string());
+        sources.push(self.feedback.runner_events_path.display().to_string());
         sources.push(
             self.feedback
                 .provider_model_outcomes_path
@@ -1239,6 +1245,12 @@ impl RuntimeProjectionSet {
                     "signature": verdict.signature,
                     "timestamp_ms": millis_from_datetime(episode.completed_at),
                 }));
+            }
+        }
+
+        for entry in &self.feedback.engram_events {
+            if let Some(row) = engram_gate_evidence(entry, query) {
+                values.push(row);
             }
         }
 
@@ -1587,6 +1599,7 @@ impl RuntimeFeedbackProjection {
         let executor_state_path = roko.join("state").join("executor.json");
         let knowledge_path = roko.join("neuro").join("knowledge.jsonl");
         let runner_events_path = roko.join("events.jsonl");
+        let engram_path = roko.join("engrams.jsonl");
 
         let episodes = read_project_episodes_lossy(workdir)
             .await
@@ -1607,9 +1620,11 @@ impl RuntimeFeedbackProjection {
                 ))
             })?;
         let runner_events = read_jsonl_values(&runner_events_path).await?;
+        let engram_events = read_jsonl_values(&engram_path).await?;
 
         Ok(Self {
             runner_events,
+            engram_events,
             episodes,
             efficiency_events,
             cost_records,
@@ -1630,6 +1645,7 @@ impl RuntimeFeedbackProjection {
             executor_state_path,
             knowledge_path,
             runner_events_path,
+            engram_path,
         })
     }
 }
@@ -2452,6 +2468,74 @@ fn outcome_status_label(status: ProviderModelOutcomeStatus) -> String {
         .unwrap_or_else(|| format!("{status:?}").to_ascii_lowercase())
 }
 
+fn engram_gate_evidence(entry: &Value, query: &ProjectionQuery) -> Option<Value> {
+    let kind = entry.get("kind").and_then(Value::as_str)?;
+    if !(kind == "gate_verdict" || kind.starts_with("gate:") || kind.starts_with("gate_")) {
+        return None;
+    }
+
+    let gate = entry
+        .pointer("/tags/gate")
+        .and_then(Value::as_str)
+        .or_else(|| entry.pointer("/body/data/gate").and_then(Value::as_str))
+        .or_else(|| entry.pointer("/body/gate").and_then(Value::as_str))
+        .or_else(|| kind.strip_prefix("gate:"))
+        .or_else(|| kind.strip_prefix("gate_"))?;
+    if !gate_name_matches(gate, query) {
+        return None;
+    }
+
+    let passed = entry
+        .pointer("/tags/passed")
+        .and_then(Value::as_str)
+        .and_then(parse_bool)
+        .or_else(|| entry.pointer("/body/data/passed").and_then(Value::as_bool))
+        .or_else(|| entry.pointer("/body/passed").and_then(Value::as_bool))?;
+
+    let mut row = json!({
+        "source": "engram_log",
+        "id": entry.get("id").cloned().unwrap_or(Value::Null),
+        "plan_id": entry
+            .pointer("/tags/plan_id")
+            .and_then(Value::as_str)
+            .or_else(|| entry.pointer("/body/data/plan_id").and_then(Value::as_str))
+            .or_else(|| entry.pointer("/body/plan_id").and_then(Value::as_str))
+            .unwrap_or("unknown"),
+        "task_id": entry
+            .pointer("/tags/task_id")
+            .and_then(Value::as_str)
+            .or_else(|| entry.pointer("/body/data/task_id").and_then(Value::as_str))
+            .or_else(|| entry.pointer("/body/task_id").and_then(Value::as_str))
+            .unwrap_or_default(),
+        "gate": gate,
+        "passed": passed,
+        "timestamp_ms": entry.get("created_at_ms").cloned().unwrap_or(Value::Null),
+    });
+
+    if let Some(duration_ms) = entry
+        .pointer("/body/data/duration_ms")
+        .and_then(Value::as_u64)
+        .or_else(|| entry.pointer("/body/duration_ms").and_then(Value::as_u64))
+        .or_else(|| entry.pointer("/tags/duration_ms").and_then(Value::as_u64))
+    {
+        row["duration_ms"] = Value::from(duration_ms);
+    }
+
+    if let Some(rung) = entry
+        .pointer("/tags/rung")
+        .or_else(|| entry.pointer("/body/data/rung"))
+        .or_else(|| entry.pointer("/body/rung"))
+        .and_then(|raw| {
+            raw.as_u64()
+                .or_else(|| raw.as_str().and_then(|text| text.parse::<u64>().ok()))
+        })
+    {
+        row["rung"] = Value::from(rung);
+    }
+
+    Some(row)
+}
+
 fn value_str<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or_default()
 }
@@ -2488,24 +2572,39 @@ fn limited_values(mut values: Vec<Value>, limit: usize) -> Vec<Value> {
 }
 
 fn dedupe_and_sort_evidence(values: Vec<Value>) -> Vec<Value> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
+    let mut by_key = BTreeMap::new();
     for value in values {
         let key = format!(
-            "{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}",
             value_str(&value, "plan_id"),
             value_str(&value, "task_id"),
             value_str(&value, "provider"),
             value_str(&value, "model"),
             value_str(&value, "gate"),
+            value_bool(&value, "passed"),
             value_ts(&value)
         );
-        if seen.insert(key) {
-            out.push(value);
-        }
+        by_key
+            .entry(key)
+            .and_modify(|existing| {
+                if evidence_detail_score(&value) > evidence_detail_score(existing) {
+                    *existing = value.clone();
+                }
+            })
+            .or_insert(value);
     }
+    let mut out = by_key.into_values().collect::<Vec<_>>();
     out.sort_by_key(|v| std::cmp::Reverse(value_ts(v)));
     out
+}
+
+fn evidence_detail_score(value: &Value) -> u8 {
+    u8::from(value.get("id").is_some_and(|id| !id.is_null()))
+        + u8::from(value.get("duration_ms").is_some_and(Value::is_number))
+        + u8::from(value.get("rung").is_some_and(Value::is_number))
+        + u8::from(!value_str(value, "source").is_empty())
+        + u8::from(!value_str(value, "provider").is_empty())
+        + u8::from(!value_str(value, "model").is_empty())
 }
 
 #[derive(Debug, Default)]

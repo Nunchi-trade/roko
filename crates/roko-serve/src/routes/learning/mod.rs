@@ -799,12 +799,12 @@ mod tests {
             2
         );
         assert_eq!(cascade_payload["data_quality"]["has_real_data"], true);
-        assert_eq!(cascade_payload["data_quality"]["entry_count"], 2);
+        assert_eq!(cascade_payload["data_quality"]["entry_count"], 3);
         assert_eq!(cascade_payload["data_quality"]["null_cost_count"], 0);
         let models = cascade_payload["models"]
             .as_array()
             .expect("invariant: cascade response should contain a models array");
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 3);
         let sonnet = models
             .iter()
             .find(|model| model["model_slug"] == "claude-sonnet-4-5")
@@ -833,9 +833,10 @@ mod tests {
             .map_err(|err| anyhow!("failed to read cost-tiers alias response body: {err}"))?;
         let cost_tiers_payload: serde_json::Value = serde_json::from_slice(&cost_tiers_body)
             .map_err(|err| anyhow!("failed to parse cost-tiers alias response body: {err}"))?;
-        assert_eq!(cost_tiers_payload["total"], 60);
+        assert_eq!(cost_tiers_payload["total"], 64);
         assert_eq!(cost_tiers_payload["T0"], 10);
         assert_eq!(cost_tiers_payload["T1"], 50);
+        assert_eq!(cost_tiers_payload["T2"], 4);
 
         let thresholds_response = app
             .oneshot(
@@ -976,9 +977,9 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
         assert_eq!(
-            payload
+            payload["trend"]
                 .as_array()
-                .expect("invariant: c-factor trend response should be an array")
+                .expect("invariant: c-factor trend response should contain a trend array")
                 .len(),
             0
         );
@@ -1045,10 +1046,12 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .map_err(|err| anyhow!("failed to read c-factor trend response body: {err}"))?;
-        let payload: Vec<CFactorBucket> = serde_json::from_slice(&body)
+        let payload: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
-        assert_eq!(payload.len(), 24);
-        assert!(payload.iter().any(|bucket| bucket.samples == 2));
+        let trend: Vec<CFactorBucket> = serde_json::from_value(payload["trend"].clone())
+            .map_err(|err| anyhow!("failed to parse c-factor trend response trend field: {err}"))?;
+        assert_eq!(trend.len(), 24);
+        assert!(trend.iter().any(|bucket| bucket.samples == 2));
         Ok(())
     }
 

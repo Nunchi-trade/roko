@@ -1200,8 +1200,9 @@ mod tests {
     fn terminal_command_event_lifecycle_records_started_output_and_exited() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
         let manager = SessionManager::new(tempdir.path().to_path_buf());
-        let (id, reader, sess_gen) =
-            manager.create_session(80, 24, Some("/bin/echo roko-command-event"), None)?;
+        let (id, reader, sess_gen) = manager.create_session(80, 24, Some("/bin/sh"), None)?;
+
+        manager.send_input(&id, b"printf 'roko-command-event\\n'\nexit\n")?;
 
         let output = read_reader_to_end(reader, Duration::from_secs(3))?;
         let output = String::from_utf8_lossy(&output);
@@ -1221,7 +1222,7 @@ mod tests {
                     command,
                     cwd
                 } if command_id == &id
-                    && command == "/bin/echo roko-command-event"
+                    && command == "/bin/sh"
                     && cwd.as_deref() == Some(tempdir.path().to_string_lossy().as_ref())
             )),
             "started event missing from {events:?}"

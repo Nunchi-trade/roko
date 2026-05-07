@@ -328,7 +328,7 @@ impl VerdictHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Kind, Score, Signal};
+    use roko_core::{Body, Context, Kind, Signal};
 
     fn verdict_engram(gate: &str, passed: bool, age_ms: i64) -> Signal {
         let now = chrono::Utc::now().timestamp_millis();

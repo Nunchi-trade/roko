@@ -1,7 +1,7 @@
 //! Cross-backend equivalence test for the tool registry.
 //!
 //! Verifies that tool definitions are consistent across the static
-//! registry, that all 16 tools are present, that there are no duplicate
+//! registry, that all shipped tools are present, that there are no duplicate
 //! names, and that every schema is valid JSON.
 
 use std::collections::HashSet;
@@ -10,9 +10,9 @@ use roko_core::tool::ToolRegistry;
 use roko_std::{ROKO_BUILTIN_TOOLS, StaticToolRegistry, TOOL_COUNT};
 
 #[test]
-fn all_16_tools_present_in_static_registry() {
+fn all_shipped_tools_present_in_static_registry() {
     let reg = StaticToolRegistry::new();
-    assert_eq!(reg.all().len(), 16);
+    assert_eq!(reg.all().len(), TOOL_COUNT);
     assert_eq!(reg.len(), TOOL_COUNT);
 }
 

@@ -251,12 +251,18 @@ pub fn run_sample_plan(workdir: &Path) -> Value {
     //
     // The plan run includes gate compilation which can be slow, so we
     // enforce a timeout. If it doesn't finish, we kill and read partial output.
-    let mut child = ProcessCommand::new(cargo_bin("roko"))
+    let mut command = ProcessCommand::new(cargo_bin("roko"));
+    command
         .current_dir(workdir)
         .arg("--json")
         .arg("plan")
         .arg("run")
-        .arg("plans")
+        .arg("plans");
+    #[cfg(feature = "legacy-runner-v2")]
+    {
+        command.arg("--engine").arg("runner-v2");
+    }
+    let mut child = command
         // Isolate from user's global config / API keys so the mock
         // agent command from roko.toml is used.
         .env("HOME", workdir)

@@ -18,7 +18,7 @@
 //! (`ROKO` magic + length + payload + BLAKE3 hash + `END!` trailer) and
 //! verifies integrity on load.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -149,7 +149,8 @@ impl ExecutorSnapshot {
     ///
     /// Returns an error if serialization fails.
     pub fn compute_hash(&self) -> Result<[u8; 32], serde_json::Error> {
-        let value = serde_json::to_value(self)?;
+        let mut value = serde_json::to_value(self)?;
+        sort_json_objects(&mut value);
         let canonical = serde_json::to_vec(&value)?;
         Ok(SnapshotVerifier::compute_hash(&canonical))
     }
@@ -362,6 +363,30 @@ impl ExecutorSnapshot {
             speculative_executions: HashMap::new(),
             timestamp_ms,
         })
+    }
+}
+
+fn sort_json_objects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted = std::mem::take(map)
+                .into_iter()
+                .map(|(key, mut value)| {
+                    sort_json_objects(&mut value);
+                    (key, value)
+                })
+                .collect::<BTreeMap<_, _>>();
+            map.extend(sorted);
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                sort_json_objects(value);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
     }
 }
 

@@ -1325,6 +1325,7 @@ impl Agent for DreamReviewAgent {
                     budget_remaining: None,
                     routing_hints: Vec::new(),
                     cache_policy: CachePolicy::Default,
+                    tools: Vec::new(),
                 };
 
                 match model_caller.call(request).await {

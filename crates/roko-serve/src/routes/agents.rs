@@ -2252,6 +2252,14 @@ mode = "self_hosted"
         let tempdir = tempdir().expect("tempdir");
         let mut config = RokoConfig::default();
         config.agent.default_model = "claude-sonnet-4-20250514".into();
+        config.models.insert(
+            "claude-sonnet-4-20250514".into(),
+            ModelProfile {
+                provider: "claude_cli".into(),
+                slug: "claude-sonnet-4-20250514".into(),
+                ..ModelProfile::default()
+            },
+        );
         let state = Arc::new(
             AppState::new(
                 tempdir.path().to_path_buf(),

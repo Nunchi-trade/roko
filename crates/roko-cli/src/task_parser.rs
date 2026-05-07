@@ -675,7 +675,10 @@ pub struct VerifyStep {
 }
 
 fn default_verify_timeout() -> u64 {
-    60_000
+    roko_core::config::TimeoutConfig::default()
+        .gate_test()
+        .as_secs()
+        .saturating_mul(1000)
 }
 
 /// The full parsed tasks.toml.
@@ -1129,6 +1132,9 @@ fn extract_toml_payload(content: &str) -> String {
 pub fn repair_toml(raw: &str) -> String {
     let t0 = std::time::Instant::now();
     let mut s = extract_toml_payload(raw);
+    if toml::from_str::<toml::Value>(&s).is_ok() {
+        return s;
+    }
 
     // Strip trailing prose after last ]]
     if let Some(pos) = s.rfind("]]") {
@@ -1316,6 +1322,7 @@ command = "cargo check -p roko-cli"
         assert_eq!(ctx.read_files[0].lines.as_deref(), Some("40-80"));
         assert_eq!(ctx.anti_patterns.len(), 1);
         assert_eq!(task.verify.len(), 2);
+        assert_eq!(task.verify[0].timeout_ms, 900_000);
         let rendered = toml::to_string(&parsed).unwrap();
         assert!(rendered.contains("frequency = \"delta\""));
         assert!(rendered.contains("replan_strategy = \"decompose\""));

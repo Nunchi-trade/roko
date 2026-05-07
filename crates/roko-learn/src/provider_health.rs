@@ -181,6 +181,7 @@ struct ProviderHealthRegistrySnapshot {
 /// provides a disk-backed persistence layer for the runtime circuit breaker.
 pub struct ProviderHealthRegistry {
     providers: Arc<Mutex<HashMap<String, ProviderHealth>>>,
+    save_lock: Arc<Mutex<()>>,
     save_tx: Option<Sender<PersistCommand>>,
     save_worker: Option<JoinHandle<()>>,
 }
@@ -199,6 +200,7 @@ impl ProviderHealthRegistry {
     pub fn new() -> Self {
         Self {
             providers: Arc::new(Mutex::new(HashMap::new())),
+            save_lock: Arc::new(Mutex::new(())),
             save_tx: None,
             save_worker: None,
         }
@@ -302,6 +304,7 @@ impl ProviderHealthRegistry {
         let snapshot = ProviderHealthRegistrySnapshot {
             providers: self.providers.lock().clone(),
         };
+        let _guard = self.save_lock.lock();
         save_snapshot(path, &snapshot)
     }
 
@@ -319,9 +322,12 @@ impl ProviderHealthRegistry {
 
     fn with_persistence(path: PathBuf, providers: HashMap<String, ProviderHealth>) -> Self {
         let providers = Arc::new(Mutex::new(providers));
-        let (save_tx, save_worker) = spawn_save_worker(path, Arc::clone(&providers));
+        let save_lock = Arc::new(Mutex::new(()));
+        let (save_tx, save_worker) =
+            spawn_save_worker(path, Arc::clone(&providers), Arc::clone(&save_lock));
         Self {
             providers,
+            save_lock,
             save_tx: Some(save_tx),
             save_worker: Some(save_worker),
         }
@@ -354,6 +360,7 @@ impl Drop for ProviderHealthRegistry {
 fn spawn_save_worker(
     path: PathBuf,
     providers: Arc<Mutex<HashMap<String, ProviderHealth>>>,
+    save_lock: Arc<Mutex<()>>,
 ) -> (Sender<PersistCommand>, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
     let handle = thread::spawn(move || {
@@ -366,6 +373,7 @@ fn spawn_save_worker(
                             let snapshot = ProviderHealthRegistrySnapshot {
                                 providers: providers.lock().clone(),
                             };
+                            let _guard = save_lock.lock();
                             let _ = save_snapshot(&path, &snapshot);
                             return;
                         }
@@ -373,6 +381,7 @@ fn spawn_save_worker(
                             let snapshot = ProviderHealthRegistrySnapshot {
                                 providers: providers.lock().clone(),
                             };
+                            let _guard = save_lock.lock();
                             let _ = save_snapshot(&path, &snapshot);
                             break;
                         }
@@ -380,6 +389,7 @@ fn spawn_save_worker(
                             let snapshot = ProviderHealthRegistrySnapshot {
                                 providers: providers.lock().clone(),
                             };
+                            let _guard = save_lock.lock();
                             let _ = save_snapshot(&path, &snapshot);
                             return;
                         }
@@ -389,6 +399,7 @@ fn spawn_save_worker(
                     let snapshot = ProviderHealthRegistrySnapshot {
                         providers: providers.lock().clone(),
                     };
+                    let _guard = save_lock.lock();
                     let _ = save_snapshot(&path, &snapshot);
                     return;
                 }

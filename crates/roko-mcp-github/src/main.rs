@@ -1239,6 +1239,7 @@ fn github_client() -> Result<Client, JsonRpcError> {
         .map_err(|err| JsonRpcError::internal_error(format!("build GitHub client: {err}")))
 }
 
+#[cfg(not(test))]
 fn github_token() -> Result<String, JsonRpcError> {
     match env::var("GITHUB_TOKEN") {
         Ok(token) if !token.trim().is_empty() => Ok(token),
@@ -1252,6 +1253,11 @@ fn github_token() -> Result<String, JsonRpcError> {
             "read GITHUB_TOKEN from environment: {err}"
         ))),
     }
+}
+
+#[cfg(test)]
+fn github_token() -> Result<String, JsonRpcError> {
+    Ok("test-token".to_string())
 }
 
 const RATE_LIMIT_REMAINING_THRESHOLD: u32 = 10;
@@ -2885,17 +2891,14 @@ mod tests {
                 .expect("read request line");
             assert!(request_line.starts_with("GET /repos/octo/hello-world/issues?"));
 
-            let mut saw_headers = false;
             loop {
                 let mut header_line = String::new();
                 reader.read_line(&mut header_line).expect("read header");
                 let header = header_line.trim_end();
                 if header.is_empty() {
-                    saw_headers = true;
                     break;
                 }
             }
-            assert!(saw_headers);
 
             let mut writer = stream;
             let response_body = json!([

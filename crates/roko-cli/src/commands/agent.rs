@@ -24,8 +24,6 @@ pub(crate) async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<i32> {
                 if !dm.trim().is_empty() {
                     crate::commands::util::preflight_provider_for_model(&chat_config, dm)?;
                 }
-                // Aggregate provider readiness: warn/abort if no providers are usable.
-                crate::commands::util::preflight_providers_aggregate(&chat_config)?;
             }
             let resolved = load_resolved_config(&workdir)?;
             let config = resolved.config;

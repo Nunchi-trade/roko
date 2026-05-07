@@ -5342,6 +5342,7 @@ mod tests {
         registry.record_failure("zai", ErrorClass::Unknown);
         registry.record_failure("zai", ErrorClass::Unknown);
         registry.save(&health_path).unwrap();
+        drop(registry);
 
         // Open a LearningRuntime and verify the in-memory tracker reflects
         // the persisted Open state.
@@ -5356,6 +5357,7 @@ mod tests {
         let registry2 = ProviderHealthRegistry::load_or_new(&health_path);
         registry2.record_success("zai");
         registry2.save(&health_path).unwrap();
+        drop(registry2);
 
         let runtime2 = LearningRuntime::open_under(&learn_root).await.unwrap();
         assert!(

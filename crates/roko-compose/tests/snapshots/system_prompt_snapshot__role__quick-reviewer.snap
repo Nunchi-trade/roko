@@ -49,22 +49,9 @@ Prefer deterministic fixtures and readable snapshot diffs.
 
 You have MCP server tools. Use them for file reading, searching, and navigation instead of shelling out. They are faster and do not consume subprocess budget.
 
-Claude tool allowlist: Read,Edit,Bash
+Runtime tool allowlist: Read,Edit,Bash
 
 Use only the tools granted to your role.
-
-## Domain Context
-
-Plan: UX37
-Task: Capture a deterministic golden prompt for this role.
-Goal: Keep system prompt composition deterministic and auditable.
-Workspace: crates/roko-compose
-Use the real RoleSystemPromptSpec path with fixed skills, playbooks, signals, and policy guidance.
-
-## Relevant Context
-### Workspace Notes
-- Snapshot output groups live prompt sections into six audit buckets.
-- Keep fixtures stable across runs.
 
 ## Active Signals
 
@@ -78,24 +65,6 @@ Use the real RoleSystemPromptSpec path with fixed skills, playbooks, signals, an
 Plan: UX37
 Goal: Keep system prompt composition deterministic and auditable.
 Task: Capture a deterministic golden prompt for this role.
-
-## Relevant Techniques
-
-### Playbook: snapshot-prompts (pb-snapshot-prompts)
-
-Goal: Audit system prompt rendering
-Success rate: 90%
-Steps:
-- [compose_prompt] Build the prompt from a fully-populated deterministic spec.
-- [review_snapshot] Review the diff and accept the updated snapshot.
-
-
-### snapshot_guardrails
-
-When to use: snapshot tests and prompt-audit
-How to apply: Populate every prompt layer with fixed literals, then diff the rendered output.
-Success rate: 95%
-
 
 ## Anti-Patterns
 
@@ -158,24 +127,9 @@ Prefer deterministic fixtures and readable snapshot diffs.
 
 You have MCP server tools. Use them for file reading, searching, and navigation instead of shelling out. They are faster and do not consume subprocess budget.
 
-Claude tool allowlist: Read,Edit,Bash
+Runtime tool allowlist: Read,Edit,Bash
 
 Use only the tools granted to your role.
-
-<!-- CONTEXT -->
-## Domain Context
-
-Plan: UX37
-Task: Capture a deterministic golden prompt for this role.
-Goal: Keep system prompt composition deterministic and auditable.
-Workspace: crates/roko-compose
-Use the real RoleSystemPromptSpec path with fixed skills, playbooks, signals, and policy guidance.
-
-<!-- CONTEXT -->
-## Relevant Context
-### Workspace Notes
-- Snapshot output groups live prompt sections into six audit buckets.
-- Keep fixtures stable across runs.
 
 <!-- MEMORY -->
 ## Active Signals
@@ -191,25 +145,6 @@ Use the real RoleSystemPromptSpec path with fixed skills, playbooks, signals, an
 Plan: UX37
 Goal: Keep system prompt composition deterministic and auditable.
 Task: Capture a deterministic golden prompt for this role.
-
-<!-- SKILLS -->
-## Relevant Techniques
-
-### Playbook: snapshot-prompts (pb-snapshot-prompts)
-
-Goal: Audit system prompt rendering
-Success rate: 90%
-Steps:
-- [compose_prompt] Build the prompt from a fully-populated deterministic spec.
-- [review_snapshot] Review the diff and accept the updated snapshot.
-
-
-### snapshot_guardrails
-
-When to use: snapshot tests and prompt-audit
-How to apply: Populate every prompt layer with fixed literals, then diff the rendered output.
-Success rate: 95%
-
 
 <!-- POLICY -->
 ## Anti-Patterns

@@ -1,6 +1,6 @@
 //! Chain domain tool definitions for DeFi operations.
 //!
-//! These [`ToolDef`] registrations define the 10 core DeFi tools specified in
+//! These [`ToolDef`] registrations define the core DeFi tools specified in
 //! `docs/v1/18-tools/03-chain-domain-tools.md`. The tools use the [`ChainClient`]
 //! and [`ChainWallet`] traits for EVM interaction, allowing the same tool
 //! definitions to work against both mocked and live backends.
@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 /// Number of chain domain tools (10 core + 4 wallet management + 3 knowledge).
 pub const CHAIN_TOOL_COUNT: usize = 17;
 
-/// All 14 chain domain tool definitions.
+/// All chain domain tool definitions.
 pub static CHAIN_DOMAIN_TOOLS: LazyLock<[ToolDef; CHAIN_TOOL_COUNT]> = LazyLock::new(|| {
     [
         balance_tool_def(),
@@ -46,7 +46,7 @@ pub static CHAIN_DOMAIN_TOOLS: LazyLock<[ToolDef; CHAIN_TOOL_COUNT]> = LazyLock:
     ]
 });
 
-/// Canonical names of the 14 chain domain tools.
+/// Canonical names of the chain domain tools.
 pub const CHAIN_TOOL_NAMES: [&str; CHAIN_TOOL_COUNT] = [
     "chain.balance",
     "chain.transfer",

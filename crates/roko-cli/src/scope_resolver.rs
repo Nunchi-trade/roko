@@ -63,18 +63,18 @@ impl ScopeResolver {
             "workflow",
         ];
 
-        if chars <= 100
-            && words <= 16
-            && trivial_markers.iter().any(|marker| lower.contains(marker))
-        {
-            return PlanComplexity::Trivial;
-        }
-
         if words >= 60
             || sentence_count >= 3
             || complex_markers.iter().any(|marker| lower.contains(marker))
         {
             return PlanComplexity::Complex;
+        }
+
+        if chars <= 100
+            && words <= 16
+            && trivial_markers.iter().any(|marker| lower.contains(marker))
+        {
+            return PlanComplexity::Trivial;
         }
 
         if words >= 18 || standard_markers.iter().any(|marker| lower.contains(marker)) {

@@ -1134,6 +1134,9 @@ async fn semantic_validate_config(
     client: &reqwest::Client,
 ) -> SemanticValidationReport {
     let mut report = SemanticValidationReport::default();
+    // Use effective_providers for model-reference validation (includes synthesized),
+    // but iterate config.providers for base_url reachability probes (synthesized
+    // providers have hardcoded URLs that shouldn't be probed).
     let providers = config.effective_providers();
     let models = config.effective_models();
 
@@ -1194,7 +1197,8 @@ async fn semantic_validate_config(
         }
     }
 
-    let mut provider_entries = providers.iter().collect::<Vec<_>>();
+    // Only probe user-declared providers (not synthesized ones with hardcoded URLs).
+    let mut provider_entries = config.providers.iter().collect::<Vec<_>>();
     provider_entries.sort_by(|a, b| a.0.cmp(b.0));
     let mut unreachable_providers = BTreeSet::new();
 

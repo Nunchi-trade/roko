@@ -311,7 +311,14 @@ async fn handle_request(
             };
             let result = sessions.create_session(params);
             let session_id = result.session_id.clone();
-            let bare_mode = sessions.roko_config.agent.bare_mode;
+            // Auto-detect bare mode from workspace; config `bare_mode = false`
+            // is an explicit override to full mode.
+            let config_override = if !sessions.roko_config.agent.bare_mode {
+                Some(false)
+            } else {
+                None
+            };
+            let bare_mode = crate::session::resolve_bare_mode(config_override, &sessions.workdir);
             send_success(transport, id, result).await?;
             send_slash_commands_notification(transport, &session_id, bare_mode).await
         }
@@ -417,7 +424,12 @@ async fn handle_request(
                 }
             };
             let session_id = params.session_id.clone();
-            let bare_mode = sessions.roko_config.agent.bare_mode;
+            let config_override = if !sessions.roko_config.agent.bare_mode {
+                Some(false)
+            } else {
+                None
+            };
+            let bare_mode = crate::session::resolve_bare_mode(config_override, &sessions.workdir);
             send_success(transport, id, result).await?;
             send_slash_commands_notification(transport, &session_id, bare_mode).await?;
             if let Some(session) = sessions.get_session(&session_id) {

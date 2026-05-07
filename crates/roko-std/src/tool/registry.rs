@@ -1,4 +1,4 @@
-//! [`StaticToolRegistry`] — compile-time registry of the 16 built-ins (§36.9).
+//! [`StaticToolRegistry`] — compile-time registry of shipped built-ins (§36.9).
 //!
 //! This unit struct implements [`roko_core::tool::ToolRegistry`] over
 //! the shared [`super::builtin::ROKO_BUILTIN_TOOLS`] slice. Every Roko
@@ -11,11 +11,11 @@ use roko_core::tool::{ToolDef, ToolRegistry};
 
 use super::builtin::ROKO_BUILTIN_TOOLS;
 
-/// Registry of the 16 built-in Roko tools (§36.b).
+/// Registry of the built-in Roko tools (§36.b).
 ///
 /// Zero-sized: the definitions live in the
 /// [`ROKO_BUILTIN_TOOLS`] static. Lookups are a linear scan —
-/// 16 entries is small enough that a hashmap would be slower after
+/// The built-in set is small enough that a hashmap would be slower after
 /// allocation overhead.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StaticToolRegistry;
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn builtin_count_matches() {
-        assert_eq!(TOOL_COUNT, 33);
+        assert_eq!(TOOL_COUNT, 37);
         assert_eq!(ROKO_BUILTIN_TOOLS.len(), TOOL_COUNT);
         assert_eq!(BUILTIN_TOOL_NAMES.len(), TOOL_COUNT);
     }

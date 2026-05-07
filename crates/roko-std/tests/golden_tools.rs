@@ -1,4 +1,4 @@
-//! Golden-file tests for the 16 built-in tool definitions.
+//! Golden-file tests for the standard built-in tool definitions.
 //!
 //! Each test verifies that a tool's [`ToolDef`] has:
 //! - A non-empty canonical name
@@ -8,7 +8,7 @@
 //! These are definition-level golden tests — they do NOT execute handlers.
 
 use roko_core::tool::ToolRegistry;
-use roko_std::{ROKO_BUILTIN_TOOLS, StaticToolRegistry};
+use roko_std::{ROKO_BUILTIN_TOOLS, StaticToolRegistry, TOOL_COUNT};
 
 /// Helper: look up a tool by name and assert its definition is well-formed.
 fn assert_golden(name: &str) {
@@ -125,9 +125,8 @@ fn golden_run_tests() {
 // ── Aggregate checks ──────────────────────────────────────────────────
 
 #[test]
-fn golden_all_16_present() {
-    // 16 std + 17 chain = 33 total built-in tools.
-    assert_eq!(ROKO_BUILTIN_TOOLS.len(), 33);
+fn golden_all_shipped_tools_present() {
+    assert_eq!(ROKO_BUILTIN_TOOLS.len(), TOOL_COUNT);
     let expected = [
         "read_file",
         "write_file",
@@ -163,7 +162,13 @@ fn golden_all_16_present() {
         "chain.post_insight",
         "chain.search_insights",
         "chain.confirm_insight",
+        // ISFR domain tools
+        "isfr.read_rates",
+        "isfr.read_rate_history",
+        "isfr.oracle_status",
+        "isfr.source_status",
     ];
+    assert_eq!(expected.len(), TOOL_COUNT);
     for name in expected {
         assert_golden(name);
     }

@@ -111,5 +111,5 @@ fail_msg = "roko-core must compile cleanly"
 
 [[task.verify]]
 phase = "test"
-command = "cargo test -p roko-core -- share_token_format --nocapture 2>&1 | tail -10"
+command = "cargo test -p roko-core --lib -- share_token_format --nocapture 2>&1 | tee /tmp/roko-e2e-share-token-test.log | tail -10 && grep -q '1 passed' /tmp/roko-e2e-share-token-test.log"
 fail_msg = "share_token_format test must pass"

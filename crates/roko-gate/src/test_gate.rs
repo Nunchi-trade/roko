@@ -147,7 +147,7 @@ impl Verify for TestGate {
         };
 
         let mut cmd = Command::new(self.build_system.program());
-        for arg in self.build_system.test_args() {
+        for arg in self.build_system.scoped_test_args(&payload.target_crates) {
             cmd.arg(arg);
         }
         for arg in self.selector.extra_args(self.build_system) {

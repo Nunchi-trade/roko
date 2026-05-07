@@ -1,5 +1,7 @@
 //! Snapshot coverage for canonical role system prompts.
 
+use std::collections::BTreeSet;
+
 use roko_compose::system_prompt_builder::normalize_for_caching;
 use roko_compose::{
     ContextChunk, ContextSource, PadState, PromptSection, RoleSystemPromptSpec, TaskContext,
@@ -7,15 +9,6 @@ use roko_compose::{
 use roko_core::AgentRole;
 use roko_learn::playbook::{Playbook, PlaybookStep};
 use roko_learn::skill_library::Skill;
-
-const SNAPSHOT_LAYER_HEADERS: [&str; 6] = [
-    "<!-- ROLE -->",
-    "<!-- SKILLS -->",
-    "<!-- TOOLS -->",
-    "<!-- CONTEXT -->",
-    "<!-- MEMORY -->",
-    "<!-- POLICY -->",
-];
 
 fn canonical_roles() -> Vec<AgentRole> {
     std::iter::once(AgentRole::Conductor)
@@ -159,11 +152,25 @@ fn render_snapshot(role: AgentRole, prompt: &str, sections: &[PromptSection]) ->
     normalize_for_caching(&parts.join("\n"))
 }
 
-fn assert_all_snapshot_layers_present(snapshot: &str) {
-    for header in SNAPSHOT_LAYER_HEADERS {
+fn assert_expected_snapshot_layers_present(snapshot: &str, sections: &[PromptSection]) {
+    assert!(
+        snapshot.contains("<!-- LIVE PROMPT -->"),
+        "snapshot output missing live prompt header"
+    );
+    assert!(
+        snapshot.contains("<!-- LAYERED VIEW -->"),
+        "snapshot output missing layered view header"
+    );
+
+    let expected_headers = sections
+        .iter()
+        .map(|section| snapshot_bucket(&section.name))
+        .collect::<BTreeSet<_>>();
+
+    for header in expected_headers {
         assert!(
             snapshot.contains(header),
-            "snapshot output missing required layer header {header}"
+            "snapshot output missing emitted layer header {header}"
         );
     }
 }
@@ -173,12 +180,16 @@ fn canonical_system_prompts_match_snapshots() {
     for role in canonical_roles() {
         let spec = fixture_spec(role);
         let prompt = spec.build();
-        let sections = spec.build_sections();
+        let sections = spec
+            .build_sections()
+            .into_iter()
+            .map(PromptSection::enforce_hard_cap)
+            .collect::<Vec<_>>();
 
         assert_prompt_contains_all_section_content(&prompt, &sections);
 
         let snapshot = render_snapshot(role, &prompt, &sections);
-        assert_all_snapshot_layers_present(&snapshot);
+        assert_expected_snapshot_layers_present(&snapshot, &sections);
 
         insta::assert_snapshot!(format!("role__{}", role.label()), snapshot);
     }

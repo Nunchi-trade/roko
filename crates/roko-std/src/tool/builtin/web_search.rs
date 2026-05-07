@@ -216,6 +216,7 @@ async fn call_gateway(model_caller: Arc<dyn ModelCaller>, query: &str) -> ToolRe
             budget_remaining: None,
             routing_hints: Vec::new(),
             cache_policy: CachePolicy::Default,
+            tools: Vec::new(),
         })
         .await;
 

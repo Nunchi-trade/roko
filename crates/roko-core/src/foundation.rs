@@ -9,6 +9,7 @@
 //! - `EffectExecutor` - execute side-effects (implemented by roko-runtime)
 
 use crate::runtime_event::RuntimeEvent;
+use crate::tool::ToolDef;
 use crate::{Result, RokoError};
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -62,6 +63,10 @@ pub struct ModelCallRequest {
     /// Cache behavior for this request.
     #[serde(default)]
     pub cache_policy: CachePolicy,
+    /// Tool definitions to include in the model call.
+    /// Empty means no tools are sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDef>,
 }
 
 /// Caller-surface constants for `ModelCallRequest::caller`.

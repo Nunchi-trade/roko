@@ -618,7 +618,10 @@ fn script_roots_from_env() -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn resolves_script_in_scripts_subdirectory() {
@@ -747,11 +750,15 @@ mod tests {
     }
 
     fn temp_dir() -> PathBuf {
+        let unique = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let dir = env::temp_dir().join(format!("roko-mcp-scripts-{nanos}"));
+        let dir = env::temp_dir().join(format!(
+            "roko-mcp-scripts-{}-{nanos}-{unique}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }
