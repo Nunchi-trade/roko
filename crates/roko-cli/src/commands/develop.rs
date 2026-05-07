@@ -37,6 +37,7 @@ pub(crate) async fn cmd_develop(
             Some(None), // --continue with no specific ID
             false,
             provider,
+            Vec::new(),
         )
         .await;
     }
@@ -62,6 +63,7 @@ pub(crate) async fn cmd_develop(
             None,
             false,
             provider,
+            Vec::new(),
         )
         .await;
     }
@@ -81,6 +83,7 @@ pub(crate) async fn cmd_develop(
             None,
             false,
             provider,
+            Vec::new(),
         )
         .await?;
         if code == EXIT_SUCCESS && std::io::stderr().is_terminal() {
@@ -107,6 +110,7 @@ pub(crate) async fn cmd_develop(
         None,
         false,
         provider.clone(),
+        Vec::new(),
     )
     .await?;
 
@@ -136,6 +140,7 @@ pub(crate) async fn cmd_develop(
         None,
         false,
         provider,
+        Vec::new(),
     )
     .await?;
 
