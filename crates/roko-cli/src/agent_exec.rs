@@ -380,7 +380,9 @@ pub fn classify_agent_crash(stderr: &str) -> AgentCrashClass {
     if stderr.contains("model_not_found") || stderr.contains("does not exist") {
         return AgentCrashClass::ModelNotFound;
     }
-    if stderr.contains("connection") || stderr.contains("timeout") || stderr.contains("ECONNREFUSED")
+    if stderr.contains("connection")
+        || stderr.contains("timeout")
+        || stderr.contains("ECONNREFUSED")
     {
         return AgentCrashClass::NetworkError;
     }
@@ -647,7 +649,10 @@ tool_format = "openai_json"
             AgentCrashClass::Unknown,
         ];
         for v in variants {
-            assert!(!v.recovery_hint().is_empty(), "{v:?} hint must not be empty");
+            assert!(
+                !v.recovery_hint().is_empty(),
+                "{v:?} hint must not be empty"
+            );
         }
     }
 }
