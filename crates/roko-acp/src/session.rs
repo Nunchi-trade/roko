@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -1454,6 +1454,30 @@ const BARE_MODE_COMMANDS: &[&str] = &[
     "enhance-prd",
     "analyze",
 ];
+
+/// Auto-detect bare mode from workspace state.
+///
+/// - If `config_override` is `Some(true)` or `Some(false)`, use that value directly
+///   (explicit `bare_mode = true/false` in config overrides auto-detect).
+/// - Otherwise, auto-detect: if `.roko/` directory exists in `workdir` with workspace
+///   state (signals, episodes, etc.) → full mode (`false`); if no meaningful `.roko/`
+///   → bare mode (`true`), limiting commands to those appropriate for non-roko projects.
+pub fn resolve_bare_mode(config_override: Option<bool>, workdir: &Path) -> bool {
+    if let Some(explicit) = config_override {
+        return explicit;
+    }
+    // Auto-detect from workspace state:
+    // A roko workspace has `.roko/` with state content, or `roko.toml` at root.
+    let roko_dir = workdir.join(".roko");
+    let has_roko_dir = roko_dir.is_dir()
+        && (roko_dir.join("state").is_dir()
+            || roko_dir.join("signals.jsonl").exists()
+            || roko_dir.join("episodes.jsonl").exists());
+    let has_config = workdir.join("roko.toml").is_file();
+
+    // Full mode if this looks like a roko workspace, bare mode otherwise.
+    !(has_roko_dir || has_config)
+}
 
 fn bare_mode_allows_command(name: &str) -> bool {
     BARE_MODE_COMMANDS.contains(&name)
