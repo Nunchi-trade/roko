@@ -22,9 +22,8 @@ use super::util::cmd_init;
 ///
 /// When `yes` is true, skip all prompts and use the first available provider.
 pub(crate) async fn cmd_setup(cli: &Cli, workdir: Option<PathBuf>, yes: bool) -> Result<i32> {
-    let workdir = workdir.unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    });
+    let workdir =
+        workdir.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     println!("roko setup");
     println!("==========\n");
