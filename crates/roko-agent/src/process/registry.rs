@@ -145,6 +145,10 @@ pub fn cleanup_orphaned_agents() {
         }
     }
 
+    if let Ok(mut set) = spawned_pids().lock() {
+        set.retain(|pid| *pid == our_pid && pids.contains(pid));
+    }
+    persist_pids();
     let _ = std::fs::remove_file(&path);
     if killed > 0 {
         tracing::warn!(

@@ -3,7 +3,7 @@ plan = "P06-process-management"
 iteration = 1
 total = 7
 done = 7
-status = "complete"
+status = "done"
 max_parallel = 2
 estimated_total_minutes = 70
 
@@ -23,6 +23,7 @@ estimated_total_minutes = 70
 id = "T1"
 title = "Wire set_process_group and register_spawned_pid into ExecAgent::run"
 status = "done"
+role = "implementer"
 files = [
     "crates/roko-agent/src/exec.rs",
 ]
@@ -32,6 +33,13 @@ acceptance = [
     "grep -n 'unregister_pid' crates/roko-agent/src/exec.rs returns a match",
     "grep -n 'spawn()' crates/roko-agent/src/exec.rs returns a match (switched from .output())",
     "cargo test -p roko-agent -- exec 2>&1 | grep -v FAILED | tail -5",
+]
+verify = [
+    { phase = "structural", command = "grep -n 'set_process_group' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent must set a process group before spawn" },
+    { phase = "structural", command = "grep -n 'register_spawned_pid' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent must register spawned child PIDs" },
+    { phase = "structural", command = "grep -n 'unregister_pid' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent must unregister child PIDs after exit" },
+    { phase = "structural", command = "grep -n 'spawn()' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent must spawn manually instead of using output()" },
+    { phase = "test", command = "cargo test -p roko-agent -- exec 2>&1 | grep -v FAILED | tail -5", fail_msg = "ExecAgent tests must pass" },
 ]
 depends_on = []
 
@@ -50,6 +58,7 @@ depends_on = []
 id = "T2"
 title = "Replace blunt timeout drop with kill_tree SIGTERM-then-SIGKILL escalation in ExecAgent"
 status = "done"
+role = "implementer"
 files = [
     "crates/roko-agent/src/exec.rs",
 ]
@@ -59,6 +68,13 @@ acceptance = [
     "grep -n 'GRACE_SIGTERM_MS\\|grace_ms' crates/roko-agent/src/exec.rs returns a match",
     "cargo test -p roko-agent -- exec::tests::exec_timeout_kills_process 2>&1 | grep -E 'ok|FAILED'",
     "cargo test -p roko-agent -- tests::kill_tree 2>&1 | grep -E 'ok|FAILED'",
+]
+verify = [
+    { phase = "structural", command = "grep -n 'kill_tree' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent timeout path must use kill_tree" },
+    { phase = "structural", command = "grep -nE 'with_kill_grace_ms|kill_grace_ms' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent must expose configurable kill grace" },
+    { phase = "structural", command = "grep -nE 'GRACE_SIGTERM_MS|grace_ms' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent must use the configured SIGTERM grace" },
+    { phase = "test", command = "cargo test -p roko-agent -- exec::tests::exec_timeout_kills_process 2>&1 | grep -E 'ok|FAILED'", fail_msg = "ExecAgent timeout test must pass" },
+    { phase = "test", command = "cargo test -p roko-agent --test process_integration kill_tree 2>&1 | grep -E 'ok|FAILED'", fail_msg = "kill_tree integration test must pass" },
 ]
 depends_on = ["T1"]
 
@@ -75,6 +91,7 @@ depends_on = ["T1"]
 id = "T3"
 title = "Wire classify_benign_stderr and warn-once suppression into ExecAgent stderr handling"
 status = "done"
+role = "implementer"
 files = [
     "crates/roko-agent/src/exec.rs",
 ]
@@ -83,6 +100,12 @@ acceptance = [
     "grep -n 'benign_stderr_warn_once' crates/roko-agent/src/exec.rs returns a match",
     "cargo test -p roko-agent -- exec::tests::exec_stderr_warning 2>&1 | grep -E 'ok|FAILED'",
     "cargo test -p roko-agent 2>&1 | grep -E '^test result'",
+]
+verify = [
+    { phase = "structural", command = "grep -n 'classify_benign_stderr' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent must classify benign stderr" },
+    { phase = "structural", command = "grep -n 'benign_stderr_warn_once' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent must warn once for benign stderr" },
+    { phase = "test", command = "cargo test -p roko-agent -- exec::tests::exec_stderr_warning 2>&1 | grep -E 'ok|FAILED'", fail_msg = "stderr warning test must pass" },
+    { phase = "test", command = "cargo test -p roko-agent 2>&1 | grep -E '^test result'", fail_msg = "roko-agent tests must pass" },
 ]
 depends_on = ["T1"]
 
@@ -100,6 +123,7 @@ depends_on = ["T1"]
 id = "T4"
 title = "Wire process group, PID registry, kill_tree, and benign stderr into ClaudeCliAgent"
 status = "done"
+role = "implementer"
 files = [
     "crates/roko-agent/src/claude_cli_agent.rs",
 ]
@@ -109,6 +133,13 @@ acceptance = [
     "grep -n 'kill_tree' crates/roko-agent/src/claude_cli_agent.rs returns a match",
     "grep -n 'classify_benign_stderr' crates/roko-agent/src/claude_cli_agent.rs returns a match",
     "cargo test -p roko-agent 2>&1 | grep -E '^test result'",
+]
+verify = [
+    { phase = "structural", command = "grep -n 'set_process_group' crates/roko-agent/src/claude_cli_agent.rs", fail_msg = "ClaudeCliAgent must set process groups" },
+    { phase = "structural", command = "grep -n 'register_spawned_pid' crates/roko-agent/src/claude_cli_agent.rs", fail_msg = "ClaudeCliAgent must register child PIDs" },
+    { phase = "structural", command = "grep -n 'kill_tree' crates/roko-agent/src/claude_cli_agent.rs", fail_msg = "ClaudeCliAgent must use kill_tree on timeout" },
+    { phase = "structural", command = "grep -n 'classify_benign_stderr' crates/roko-agent/src/claude_cli_agent.rs", fail_msg = "ClaudeCliAgent must classify benign stderr" },
+    { phase = "test", command = "cargo test -p roko-agent 2>&1 | grep -E '^test result'", fail_msg = "roko-agent tests must pass" },
 ]
 depends_on = []
 
@@ -127,6 +158,7 @@ depends_on = []
 id = "T5"
 title = "Add ResourceLimits struct and apply_resource_limits pre-exec hook to process module"
 status = "done"
+role = "implementer"
 files = [
     "crates/roko-agent/src/process/limits.rs",
     "crates/roko-agent/src/process/mod.rs",
@@ -140,6 +172,15 @@ acceptance = [
     "grep -n 'ResourceLimits' crates/roko-agent/src/process/mod.rs returns a match",
     "grep -n 'with_resource_limits' crates/roko-agent/src/exec.rs returns a match",
     "cargo test -p roko-agent 2>&1 | grep -E '^test result'",
+]
+verify = [
+    { phase = "structural", command = "test -f crates/roko-agent/src/process/limits.rs", fail_msg = "process limits module must exist" },
+    { phase = "structural", command = "grep -n 'ResourceLimits' crates/roko-agent/src/process/limits.rs", fail_msg = "ResourceLimits must be defined" },
+    { phase = "structural", command = "grep -n 'apply_resource_limits' crates/roko-agent/src/process/limits.rs", fail_msg = "apply_resource_limits must be defined" },
+    { phase = "structural", command = "grep -n 'pub mod limits' crates/roko-agent/src/process/mod.rs", fail_msg = "process limits module must be exported" },
+    { phase = "structural", command = "grep -n 'ResourceLimits' crates/roko-agent/src/process/mod.rs", fail_msg = "ResourceLimits must be re-exported" },
+    { phase = "structural", command = "grep -n 'with_resource_limits' crates/roko-agent/src/exec.rs", fail_msg = "ExecAgent must expose resource limits builder" },
+    { phase = "test", command = "cargo test -p roko-agent 2>&1 | grep -E '^test result'", fail_msg = "roko-agent tests must pass" },
 ]
 depends_on = []
 
@@ -160,6 +201,7 @@ depends_on = []
 id = "T6"
 title = "Wire orphan reaper startup and GracefulShutdown SIGTERM handler into CLI main"
 status = "done"
+role = "implementer"
 files = [
     "crates/roko-cli/src/main.rs",
     "crates/roko-cli/Cargo.toml",
@@ -168,7 +210,13 @@ acceptance = [
     "grep -n 'cleanup_orphaned_agents' crates/roko-cli/src/main.rs returns a match",
     "grep -n 'GracefulShutdown' crates/roko-cli/src/main.rs returns a match",
     "grep -n 'signal\\|SIGTERM' crates/roko-cli/src/main.rs returns a match",
-    "cargo check -p roko-cli 2>&1 | grep -E '^error' | wc -l | grep '^0$'",
+    "cargo check -p roko-cli 2>&1 | awk '/^error/ { found=1 } END { exit found ? 1 : 0 }'",
+]
+verify = [
+    { phase = "structural", command = "grep -n 'cleanup_orphaned_agents' crates/roko-cli/src/main.rs", fail_msg = "CLI startup must call cleanup_orphaned_agents" },
+    { phase = "structural", command = "grep -n 'GracefulShutdown' crates/roko-cli/src/main.rs", fail_msg = "CLI main must wire GracefulShutdown" },
+    { phase = "structural", command = "grep -nE 'signal|SIGTERM' crates/roko-cli/src/main.rs", fail_msg = "CLI main must install a SIGTERM signal handler" },
+    { phase = "compile", command = "cargo check -p roko-cli 2>&1 | awk '/^error/ { found=1 } END { exit found ? 1 : 0 }'", fail_msg = "roko-cli must compile without errors" },
 ]
 depends_on = []
 
@@ -187,6 +235,7 @@ depends_on = []
 id = "T7"
 title = "Add integration tests for orphan reaper: dead PIDs removed, live PID kept"
 status = "done"
+role = "implementer"
 files = [
     "crates/roko-agent/tests/process_integration.rs",
 ]
@@ -195,5 +244,11 @@ acceptance = [
     "grep -n 'registered_pids' crates/roko-agent/tests/process_integration.rs returns a match",
     "grep -n 'register_spawned_pid' crates/roko-agent/tests/process_integration.rs returns a match",
     "cargo test -p roko-agent --test process_integration 2>&1 | grep -E 'ok|FAILED'",
+]
+verify = [
+    { phase = "structural", command = "grep -n 'cleanup_orphaned_agents' crates/roko-agent/tests/process_integration.rs", fail_msg = "orphan reaper integration test must call cleanup_orphaned_agents" },
+    { phase = "structural", command = "grep -n 'registered_pids' crates/roko-agent/tests/process_integration.rs", fail_msg = "orphan reaper test must inspect registered_pids" },
+    { phase = "structural", command = "grep -n 'register_spawned_pid' crates/roko-agent/tests/process_integration.rs", fail_msg = "orphan reaper test must register spawned pids" },
+    { phase = "test", command = "cargo test -p roko-agent --test process_integration 2>&1 | grep -E 'ok|FAILED'", fail_msg = "process integration tests must pass" },
 ]
 depends_on = ["T1"]

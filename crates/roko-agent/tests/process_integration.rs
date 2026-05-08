@@ -50,3 +50,29 @@ async fn kill_tree_terminates_sleep_with_setpgid() {
         "child pid {pid} should be dead after kill_tree"
     );
 }
+
+#[test]
+fn cleanup_orphaned_agents_removes_dead_pids_and_keeps_live_pid() {
+    use roko_agent::process::{
+        cleanup_orphaned_agents, register_spawned_pid, registered_pids, unregister_pid,
+    };
+
+    let fake_pid = 99_999_999;
+    let live_pid = std::process::id();
+
+    register_spawned_pid(fake_pid);
+    register_spawned_pid(live_pid);
+    cleanup_orphaned_agents();
+
+    let pids = registered_pids();
+    assert!(
+        !pids.contains(&fake_pid),
+        "dead process pid should be removed from registry"
+    );
+    assert!(
+        pids.contains(&live_pid),
+        "current process pid should remain registered"
+    );
+
+    unregister_pid(live_pid);
+}

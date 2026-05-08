@@ -59,6 +59,7 @@ use super::persist::{self, GateThresholds, PersistPaths};
 use super::plan_loader::Plan;
 use super::snapshot_writer::{SnapshotPayload, SnapshotWriter};
 use super::state::RunState;
+use super::task_dag::task_status_is_terminal;
 use super::tui_bridge::TuiBridge;
 use super::types::{
     AgentCompletionSummary, AgentDispatchOutcome, AgentEvent, GateCompletion, GateCompletionKind,
@@ -609,6 +610,7 @@ pub async fn run(
         }
     } else {
         seed_completed_tasks_from_plan_status(&mut state, &plans);
+        initialize_terminal_plan_phases(&mut executor, &state, &plans);
     }
 
     let mut agent_handles: HashMap<String, AgentHandle> = HashMap::new();
@@ -1444,6 +1446,7 @@ pub async fn run(
                                 .any(|t| {
                                     !completed.contains(&t.id)
                                         && !failed.contains(&t.id)
+                                        && !task_status_is_terminal(&t.status)
                                         && t.is_ready_with_plan_deps(completed, &completed_plans)
                                 })
                         })
@@ -1700,6 +1703,7 @@ pub async fn run(
                                 tasks.values().any(|t| {
                                     !completed.contains(&t.id)
                                         && !failed.contains(&t.id)
+                                        && !task_status_is_terminal(&t.status)
                                         && t.is_ready_with_plan_deps(completed, &completed_plans)
                                 })
                             })
@@ -2202,6 +2206,7 @@ fn handle_agent_failure(
             tasks.values().any(|t| {
                 !completed.contains(&t.id)
                     && !failed.contains(&t.id)
+                    && !task_status_is_terminal(&t.status)
                     && t.is_ready_with_plan_deps(completed, &completed_plans)
             })
         })
@@ -3481,7 +3486,7 @@ fn restore_state_from_resume_snapshot(
 fn seed_completed_tasks_from_plan_status(state: &mut RunState, plans: &[Plan]) {
     for plan in plans {
         for task in &plan.tasks.tasks {
-            if task.status.eq_ignore_ascii_case("done") {
+            if task_status_is_terminal(&task.status) {
                 state.mark_task_completed(&plan.id, &task.id);
             }
         }
@@ -3493,6 +3498,35 @@ fn seed_completed_tasks_from_plan_status(state: &mut RunState, plans: &[Plan]) {
             tasks_completed = state.tasks_completed,
             "seeded completed tasks from plan status"
         );
+    }
+}
+
+fn initialize_terminal_plan_phases(
+    executor: &mut ParallelExecutor,
+    state: &RunState,
+    plans: &[Plan],
+) {
+    for plan in plans {
+        if plan.tasks.tasks.is_empty() {
+            continue;
+        }
+        let completed = state.plan_completed_tasks(&plan.id);
+        let all_tasks_terminal = plan
+            .tasks
+            .tasks
+            .iter()
+            .all(|task| completed.contains(&task.id) || task_status_is_terminal(&task.status));
+
+        if all_tasks_terminal
+            && let Some(plan_state) = executor.plan_state_mut(&plan.id)
+            && !plan_state.is_terminal()
+        {
+            plan_state.current_phase = PlanPhase::Gating;
+            info!(
+                plan_id = %plan.id,
+                "initialized completed plan at gating phase"
+            );
+        }
     }
 }
 
@@ -3897,6 +3931,7 @@ async fn dispatch_action(
                         .find(|t| {
                             !completed.contains(&t.id)
                                 && !failed.contains(&t.id)
+                                && !task_status_is_terminal(&t.status)
                                 && t.is_ready_with_plan_deps(completed, &completed_plans)
                         })
                         .map(|t| t.id.clone())
@@ -6192,6 +6227,59 @@ depends_on = []
 
         assert_eq!(state.tasks_completed, 2);
         assert_eq!(state.plan_completed_tasks("seed-test"), ["T1", "T3"]);
+    }
+
+    #[test]
+    fn completed_plan_initializes_at_gating_phase() {
+        let tasks = TasksFile::parse_str(
+            r#"
+[meta]
+plan = "done-plan"
+total = 2
+done = 2
+status = "done"
+
+[[task]]
+id = "T1"
+title = "one"
+status = "done"
+tier = "focused"
+role = "implementer"
+files = ["Cargo.toml"]
+verify = [{ phase = "structural", command = "true" }]
+depends_on = []
+
+[[task]]
+id = "T2"
+title = "two"
+status = "complete"
+tier = "focused"
+role = "implementer"
+files = ["Cargo.toml"]
+verify = [{ phase = "structural", command = "true" }]
+depends_on = []
+"#,
+        )
+        .unwrap();
+        let plan = Plan {
+            id: "done-plan".to_string(),
+            dir: std::path::PathBuf::from("plans/done-plan"),
+            tasks,
+            prd_excerpt: String::new(),
+        };
+        let mut state = RunState::new(2);
+        let mut executor = ParallelExecutor::new(ExecutorConfig::default());
+        executor.add_plan(OrcPlanState::new("done-plan"));
+
+        seed_completed_tasks_from_plan_status(&mut state, std::slice::from_ref(&plan));
+        initialize_terminal_plan_phases(&mut executor, &state, &[plan]);
+
+        assert!(matches!(
+            executor
+                .plan_state("done-plan")
+                .map(|state| &state.current_phase),
+            Some(PlanPhase::Gating)
+        ));
     }
 
     #[test]

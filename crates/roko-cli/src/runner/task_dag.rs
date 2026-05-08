@@ -37,6 +37,15 @@ pub type PlanId = String;
 /// Task identifier (matches `TaskDef::id`).
 pub type TaskId = String;
 
+/// Whether a task's declared plan-file status is terminal.
+#[must_use]
+pub(crate) fn task_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "done" | "complete" | "completed" | "skipped"
+    )
+}
+
 // ─── Skipped reason ─────────────────────────────────────────────────────
 
 /// Why a downstream task was marked as skipped.
@@ -190,6 +199,9 @@ impl TaskDag {
             if completed_in_plan.contains(&task.id) {
                 return false;
             }
+            if task_status_is_terminal(&task.status) {
+                return false;
+            }
             task.is_ready_with_plan_deps(completed_in_plan, completed_plans)
         })
     }
@@ -216,6 +228,9 @@ impl TaskDag {
                     }
                 }
                 if completed_in_plan.contains(&task.id) {
+                    return false;
+                }
+                if task_status_is_terminal(&task.status) {
                     return false;
                 }
                 task.is_ready_with_plan_deps(completed_in_plan, completed_plans)
@@ -450,6 +465,27 @@ mod tests {
         assert!(dag.mark_running("p1", "B"));
         let next = dag.next_ready_task("p1", &tasks, &[], &[]);
         assert!(next.is_none());
+    }
+
+    #[test]
+    fn ready_resolution_skips_terminal_task_statuses() {
+        let dag = TaskDag::default();
+        let mut done = task("A", &[]);
+        done.status = "done".to_string();
+        let mut complete = task("B", &[]);
+        complete.status = "complete".to_string();
+        let ready = task("C", &[]);
+        let tasks: Vec<&TaskDef> = vec![&done, &complete, &ready];
+
+        let ready_tasks = dag.ready_tasks("p1", &tasks, &[], &[]);
+
+        assert_eq!(
+            ready_tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["C"]
+        );
     }
 
     #[test]

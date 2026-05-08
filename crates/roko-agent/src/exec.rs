@@ -8,8 +8,9 @@
 
 use crate::agent::{Agent, AgentResult, derived_output};
 use crate::process::{
-    GRACE_STDIN_CLOSE_MS, benign_stderr_warn_once, classify_benign_stderr, kill_tree,
-    register_spawned_pid, set_process_group, unregister_pid,
+    GRACE_SIGTERM_MS, GRACE_STDIN_CLOSE_MS, ResourceLimits, apply_resource_limits,
+    benign_stderr_warn_once, classify_benign_stderr, kill_tree, register_spawned_pid,
+    set_process_group, unregister_pid,
 };
 use crate::safety::SafetyLayer;
 use crate::usage::Usage;
@@ -45,6 +46,8 @@ pub struct ExecAgent {
     current_dir: Option<PathBuf>,
     safety: SafetyLayer,
     timeout_ms: u64,
+    kill_grace_ms: u64,
+    resource_limits: Option<ResourceLimits>,
     name: String,
 }
 
@@ -61,6 +64,8 @@ impl ExecAgent {
             current_dir: None,
             safety,
             timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            kill_grace_ms: GRACE_SIGTERM_MS,
+            resource_limits: None,
             name,
         }
     }
@@ -69,6 +74,13 @@ impl ExecAgent {
     #[must_use]
     pub const fn with_timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = ms;
+        self
+    }
+
+    /// Override the SIGTERM grace period used before SIGKILL on timeout.
+    #[must_use]
+    pub const fn with_kill_grace_ms(mut self, grace_ms: u64) -> Self {
+        self.kill_grace_ms = grace_ms;
         self
     }
 
@@ -104,6 +116,13 @@ impl ExecAgent {
     #[must_use]
     pub fn with_current_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.current_dir = Some(dir.into());
+        self
+    }
+
+    /// Apply OS resource limits to the spawned subprocess.
+    #[must_use]
+    pub fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
+        self.resource_limits = Some(limits);
         self
     }
 
@@ -159,6 +178,9 @@ impl Agent for ExecAgent {
         cmd.stderr(Stdio::piped());
         cmd.kill_on_drop(true);
         set_process_group(&mut cmd);
+        if let Some(limits) = &self.resource_limits {
+            apply_resource_limits(&mut cmd, limits);
+        }
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -281,7 +303,7 @@ impl Agent for ExecAgent {
             }
             Err(_) => {
                 heartbeat_handle.abort();
-                let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
+                let _ = kill_tree(&mut child, Duration::from_millis(self.kill_grace_ms)).await;
                 if track_pids()
                     && let Some(pid) = pid
                 {

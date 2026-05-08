@@ -1,0 +1,187 @@
+[meta]
+plan = "architecture-defi-critical-path"
+queue_kind = "architecture_implementation"
+iteration = 1
+total = 3
+done = 0
+status = "ready"
+max_parallel = 1
+estimated_total_minutes = 360
+
+[[task]]
+id = "D01-chain-registry-indexer-foundation"
+title = "Implement chain registry client and event indexer foundation"
+description = "Create the chain-side primitives needed by the architecture queue: knowledge registry accessors, indexer state, and compile-time wiring."
+role = "implementer"
+status = "ready"
+tier = "integrative"
+model_hint = "claude-sonnet-4-6"
+max_loc = 500
+files = [
+    "crates/roko-chain/src/knowledge_registry.rs",
+    "crates/roko-chain/src/indexer.rs",
+    "crates/roko-chain/src/lib.rs",
+]
+depends_on = []
+
+[task.context]
+read_files = [
+    { path = "crates/roko-chain/src/agent_registry.rs", why = "existing registry client conventions" },
+    { path = "crates/roko-chain/src/reputation_registry.rs", why = "registry query and event patterns" },
+    { path = "crates/roko-chain/src/validation_registry.rs", why = "chain validation registry conventions" },
+]
+symbols = ["AgentRegistry", "ReputationRegistry", "ValidationRegistry"]
+anti_patterns = [
+    "Do not require chain configuration for ordinary local-only agent runs.",
+    "Do not add runtime network calls to compile-time tests.",
+]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-chain 2>&1 | tail -10"
+fail_msg = "roko-chain must compile after registry and indexer wiring"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-chain --lib --no-run 2>&1 | tail -10"
+fail_msg = "roko-chain tests must build"
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-chain"
+required = true
+
+[[task.acceptance_contract.gates]]
+id = "test-build"
+kind = "test"
+command = "cargo test -p roko-chain --lib --no-run"
+required = true
+
+[task.acceptance_contract.parity_ledger]
+required = true
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "DEFI.D01.chain-registry-indexer"
+source_ref = "plans/architecture-core-queue/tasks.toml#Q14-chain-registries-defi-foundation"
+evidence_ref = "crates/roko-chain/src/knowledge_registry.rs"
+
+[[task]]
+id = "D02-serve-registry-passport-routes"
+title = "Add serve routes for registries and passport lifecycle"
+description = "Expose registry query routes and passport lifecycle hooks through roko-serve without making chain support mandatory for local agent operations."
+role = "implementer"
+status = "ready"
+tier = "integrative"
+model_hint = "claude-sonnet-4-6"
+max_loc = 500
+files = [
+    "crates/roko-serve/src/routes/registries.rs",
+    "crates/roko-serve/src/routes/agents.rs",
+    "crates/roko-serve/src/routes/mod.rs",
+]
+depends_on = ["D01-chain-registry-indexer-foundation"]
+
+[task.context]
+read_files = [
+    { path = "crates/roko-serve/src/routes/agents.rs", why = "agent lifecycle route conventions" },
+    { path = "crates/roko-serve/src/routes/mod.rs", why = "route module wiring" },
+]
+symbols = ["passport", "registries"]
+anti_patterns = [
+    "Do not panic when chain configuration is absent.",
+    "Do not block existing agent create/list routes on chain RPC availability.",
+]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-serve -p roko-chain 2>&1 | tail -10"
+fail_msg = "serve and chain crates must compile after route wiring"
+
+[[task.verify]]
+phase = "structural"
+command = "grep -R \"passport\\|registr\" crates/roko-serve/src/routes crates/roko-chain/src | head -20"
+fail_msg = "registry/passport route or chain references must be present"
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-serve -p roko-chain"
+required = true
+
+[[task.acceptance_contract.gates]]
+id = "route-structure"
+kind = "custom"
+command = "grep -R \"passport\\|registr\" crates/roko-serve/src/routes crates/roko-chain/src"
+required = true
+
+[task.acceptance_contract.parity_ledger]
+required = true
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "DEFI.D02.registry-passport-routes"
+source_ref = "plans/architecture-core-queue/tasks.toml#Q14-chain-registries-defi-foundation"
+evidence_ref = "crates/roko-serve/src/routes/registries.rs"
+
+[[task]]
+id = "D03-defi-critical-path-verification"
+title = "Verify the DeFi critical path integration surface"
+description = "Run the focused compile and test checks for the DeFi architecture path after chain and serve wiring are present."
+role = "implementer"
+status = "ready"
+tier = "focused"
+model_hint = "claude-sonnet-4-6"
+max_loc = 80
+files = [
+    "crates/roko-chain/src/lib.rs",
+    "crates/roko-serve/src/routes/mod.rs",
+]
+depends_on = ["D02-serve-registry-passport-routes"]
+
+[task.context]
+read_files = [
+    { path = "plans/architecture-core-queue/tasks.toml", why = "parent architecture queue acceptance context" },
+]
+symbols = ["cargo check -p roko-chain -p roko-serve"]
+anti_patterns = [
+    "Do not add new features in this task beyond final verification fixes.",
+]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-chain -p roko-serve -p roko-learn -p roko-agent 2>&1 | tail -10"
+fail_msg = "chain, serve, learning, and agent crates must compile"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-chain --lib --no-run 2>&1 | tail -10"
+fail_msg = "chain tests must build"
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-chain -p roko-serve -p roko-learn -p roko-agent"
+required = true
+
+[[task.acceptance_contract.gates]]
+id = "test-build"
+kind = "test"
+command = "cargo test -p roko-chain --lib --no-run"
+required = true
+
+[task.acceptance_contract.parity_ledger]
+required = true
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "DEFI.D03.critical-path-verification"
+source_ref = "plans/architecture-core-queue/tasks.toml#Q14-chain-registries-defi-foundation"
+evidence_ref = "crates/roko-chain/src/lib.rs"

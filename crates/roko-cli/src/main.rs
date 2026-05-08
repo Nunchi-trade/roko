@@ -37,6 +37,7 @@ pub use roko_cli::{model_selection, repo_context};
 use roko_core::agent::{AgentRole, ProviderKind};
 use roko_core::config::ServeDeployWebhookConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::shutdown::GracefulShutdown;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_core::{ContentHash, Context, DaimonPolicy, Kind, Query, Store};
 use roko_core::{Headlines, TaskMetric, compute_headlines};
@@ -2148,6 +2149,8 @@ fn main() {
         .enable_all()
         .build()
         .expect("failed to build Tokio runtime");
+    let shutdown = setup_graceful_shutdown();
+    install_sigterm_handler(&runtime, shutdown.clone());
 
     let code = match runtime.block_on(dispatch(cli)) {
         Ok(code) => {
@@ -3057,6 +3060,41 @@ fn prepare_runtime_hooks(workdir: &Path, quiet: bool) {
     }
     run_process_lifecycle_hooks(workdir, quiet);
 }
+
+fn setup_graceful_shutdown() -> GracefulShutdown {
+    let shutdown = GracefulShutdown::new();
+    shutdown.register("reap_orphaned_children", || async {
+        let reaped = reap_orphaned_children();
+        if reaped > 0 {
+            tracing::warn!(reaped, "SIGTERM shutdown reaped orphaned children");
+        }
+    });
+    shutdown
+}
+
+#[cfg(unix)]
+fn install_sigterm_handler(runtime: &tokio::runtime::Runtime, shutdown: GracefulShutdown) {
+    std::mem::drop(runtime.spawn(async move {
+        let Ok(mut sigterm) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        else {
+            tracing::warn!("failed to install SIGTERM handler");
+            return;
+        };
+        sigterm.recv().await;
+        let report = shutdown.drain().await;
+        tracing::info!(
+            drained_hooks = report.drained_hooks,
+            timed_out_hooks = report.timed_out_hooks,
+            elapsed_ms = report.elapsed_ms,
+            "SIGTERM graceful shutdown complete"
+        );
+        std::process::exit(EXIT_SUCCESS);
+    }));
+}
+
+#[cfg(not(unix))]
+fn install_sigterm_handler(_runtime: &tokio::runtime::Runtime, _shutdown: GracefulShutdown) {}
 
 fn bootstrap_observability_dirs(workdir: &Path) -> std::io::Result<()> {
     // Only create .roko/ if the user has expressed intent (roko.toml exists or .roko/ already exists).

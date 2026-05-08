@@ -25,6 +25,7 @@
 pub mod env;
 pub mod group;
 pub mod kill;
+pub mod limits;
 pub mod mcp;
 pub mod registry;
 pub mod stderr;
@@ -33,6 +34,7 @@ pub mod stderr;
 pub use env::{AgentEnv, apply_agent_env};
 pub use group::{collect_descendants, kill_process_group, set_process_group};
 pub use kill::{GRACE_SIGTERM_MS, GRACE_STDIN_CLOSE_MS, kill_tree};
+pub use limits::{ResourceLimits, apply_resource_limits};
 pub use mcp::{McpLaunch, find_mcp_launch, normalize_mcp_launch, write_mcp_config};
 pub use registry::{
     cleanup_orphaned_agents, reap_orphaned_children, register_spawned_pid, registered_pids,
