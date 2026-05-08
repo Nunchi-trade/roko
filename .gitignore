@@ -32,6 +32,9 @@ demo/.runtime/
 .roko/
 **/.roko/
 
+# Plans (generated per-workspace, not committed) ----------------------------
+plans/
+
 # LLM / sccache / misc caches ------------------------------------------------
 .fastembed_cache/
 **/.fastembed_cache/
