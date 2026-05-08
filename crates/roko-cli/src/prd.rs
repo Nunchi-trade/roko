@@ -676,11 +676,11 @@ pub fn cmd_list(workdir: &Path) -> Result<()> {
         for path in &published {
             let entry = read_prd_entry(path);
             let cov = if entry.coverage > 0.0 {
-                format!("{:.0}%", entry.coverage * 100.0)
+                format!("coverage: {:.0}%", entry.coverage * 100.0)
             } else {
-                "—".into()
+                String::new()
             };
-            println!("  {:<35} coverage: {cov}", entry.title);
+            println!("  {:<30} slug: {:<25} {cov}", entry.title, entry.slug);
         }
     }
 
@@ -692,7 +692,7 @@ pub fn cmd_list(workdir: &Path) -> Result<()> {
     } else {
         for path in &drafts {
             let entry = read_prd_entry(path);
-            println!("  {:<35} [draft]", entry.title);
+            println!("  {:<30} slug: {}", entry.title, entry.slug);
         }
     }
 
@@ -713,6 +713,37 @@ pub fn cmd_list(workdir: &Path) -> Result<()> {
     }
     if ideas_lines.is_empty() {
         println!("  (none)");
+    }
+
+    // Show actionable hints for ACP / CLI users.
+    let has_drafts = !drafts.is_empty();
+    let has_published = !published.is_empty();
+    let has_ideas = idea_count > 0;
+    if has_drafts || has_published || has_ideas {
+        println!();
+        println!("═══ Actions ═══");
+        if has_ideas {
+            println!("  /prd-draft <slug>         Draft a PRD from an idea");
+        }
+        if has_drafts {
+            let first_draft = read_prd_entry(&drafts[0]);
+            println!(
+                "  /enhance-prd {:<12} Research & enrich a draft",
+                first_draft.slug
+            );
+            println!(
+                "  /prd-plan {:<15} Generate implementation plan from draft",
+                first_draft.slug
+            );
+        }
+        if has_published {
+            let first_pub = read_prd_entry(&published[0]);
+            println!(
+                "  /prd-plan {:<15} Generate implementation plan from PRD",
+                first_pub.slug
+            );
+        }
+        println!("  /prd-idea \"<text>\"        Capture a new idea");
     }
 
     Ok(())
