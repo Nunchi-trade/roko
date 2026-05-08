@@ -1294,12 +1294,11 @@ enum CompletionShell {
 /// Execution engine for `roko plan run`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum PlanEngine {
-    /// Graph Engine (default). Converts plans to graphs and executes via the Engine.
-    #[default]
+    /// Graph Engine. Converts plans to graphs and executes via the Engine.
     #[value(name = "graph")]
     Graph,
-    /// Runner v2 (legacy). Uses the streaming event-loop plan executor.
-    #[cfg(feature = "legacy-runner-v2")]
+    /// Runner v2. Uses the streaming event-loop plan executor.
+    #[default]
     #[value(name = "runner-v2")]
     RunnerV2,
 }

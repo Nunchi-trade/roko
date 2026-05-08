@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 ## Enable the legacy orchestrate.rs plan runner (the pre-WorkflowEngine path).
-default = []
+default = ["legacy-runner-v2"]
 legacy-orchestrate = ["legacy-direct-dispatch"]
 ## Enable the legacy `dispatch_direct` module (raw single-shot dispatch, no
 ## tools / system prompt / MCP). Deprecated; will be removed once T5-36

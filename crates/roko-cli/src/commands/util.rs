@@ -1938,7 +1938,6 @@ pub(crate) fn preflight_provider_for_model(
 /// Check that the gate pipeline tools (cargo, git, clippy) are available.
 /// Returns the names of any missing tools. The caller should warn but not
 /// necessarily abort — some gate rungs may not need all tools.
-#[cfg(feature = "legacy-runner-v2")]
 pub(crate) fn preflight_gate_deps() -> Vec<String> {
     let mut missing = Vec::new();
     for tool in &["cargo", "git"] {

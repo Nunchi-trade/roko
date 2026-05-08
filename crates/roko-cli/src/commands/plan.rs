@@ -4,7 +4,6 @@
 use crate::*;
 use roko_fs::RokoLayout;
 
-#[cfg(feature = "legacy-runner-v2")]
 fn join_approval_tui_thread(handle: Option<std::thread::JoinHandle<anyhow::Result<()>>>) {
     let Some(handle) = handle else {
         return;
@@ -272,30 +271,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 return cmd_plan_run_engine(&resolved_plans_dir, &wd, cli).await;
             }
 
-            // ── Runner v2 path (legacy, feature-gated) ──
-            //
-            // When `legacy-runner-v2` is not enabled, PlanEngine only has
-            // `Graph` so the match above always returns. The block below
-            // is unreachable without the feature.
-            #[cfg(not(feature = "legacy-runner-v2"))]
-            {
-                let _ = (
-                    &resume_plan,
-                    &approval,
-                    &max_retries,
-                    &max_tasks,
-                    &fresh,
-                    &force_resume,
-                    &layout,
-                    &t_setup,
-                    &t_total,
-                );
-                bail!(
-                    "Runner v2 is not available; enable the `legacy-runner-v2` feature to use --engine runner-v2"
-                );
-            }
-
-            #[cfg(feature = "legacy-runner-v2")]
+            // ── Runner v2 path ──
             {
                 // Acquire exclusive workspace lock before mutating state.
                 let _lock = roko_cli::workspace_lock::acquire_workspace_lock(layout.root())?;
@@ -801,7 +777,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 } else {
                     EXIT_FAILURE
                 })
-            } // end #[cfg(feature = "legacy-runner-v2")]
+            } // end runner-v2 path
         }
         PlanCmd::Generate {
             source,
