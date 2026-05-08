@@ -4,6 +4,7 @@ total = 5
 done = 4
 status = "ready"
 max_parallel = 1
+skip_enrichment = true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # T1 — Add TaskDef::build_fix_prompt to task_parser.rs
