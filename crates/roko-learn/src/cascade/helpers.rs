@@ -513,6 +513,8 @@ pub fn slug_family(slug: &str) -> Option<&'static str> {
         Some("o3")
     } else if slug.starts_with("deepseek") {
         Some("deepseek")
+    } else if slug.starts_with("sonar") {
+        Some("sonar")
     } else if slug.starts_with("gemini") {
         Some("gemini")
     } else {

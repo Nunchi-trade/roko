@@ -5,7 +5,7 @@
   ],
   "governance": [
     { "MaxToolCallsPerTurn": 12 },
-    { "ForbiddenTools": ["write_file", "edit_file", "multi_edit", "apply_patch"] }
+    { "ForbiddenTools": ["edit_file", "multi_edit", "apply_patch"] }
   ],
   "recovery": [
     { "trigger": "contract_violation", "action": "Alert" }

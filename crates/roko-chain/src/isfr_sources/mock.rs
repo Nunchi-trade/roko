@@ -2,6 +2,9 @@
 //!
 //! Uses `SystemTime::subsec_nanos()` for deterministic-enough jitter
 //! without pulling in the `rand` crate.
+//!
+//! Also contains [`OfflineSource`] — a permanently-offline source that
+//! replaces mock fallbacks when the RPC endpoint is unreachable at startup.
 
 use async_trait::async_trait;
 
@@ -100,5 +103,56 @@ impl ISFRSource for MockSource {
 
     fn rate_class(&self) -> RateClass {
         self.class
+    }
+}
+
+// ─── OfflineSource ───────────────────────────────────────────────────────────
+
+/// A permanently-offline source that replaces mock fallbacks when the RPC
+/// endpoint is unreachable at startup. Always returns an error from
+/// `fetch_rate()` and reports `is_offline() = true`.
+pub struct OfflineSource {
+    name: String,
+    class: RateClass,
+    weight: f64,
+    /// The original source kind that couldn't be built (for diagnostics).
+    original_kind: String,
+}
+
+impl OfflineSource {
+    /// Create a new offline source.
+    pub fn new(name: &str, class: RateClass, weight: f64, original_kind: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            class,
+            weight,
+            original_kind: original_kind.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl ISFRSource for OfflineSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn fetch_rate(&self) -> anyhow::Result<SourceReading> {
+        anyhow::bail!(
+            "source offline: RPC unreachable at startup (original kind: {})",
+            self.original_kind
+        )
+    }
+
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+
+    fn rate_class(&self) -> RateClass {
+        self.class
+    }
+
+    fn is_offline(&self) -> bool {
+        true
     }
 }

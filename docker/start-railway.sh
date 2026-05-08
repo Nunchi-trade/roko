@@ -67,7 +67,21 @@ setup_state() {
     "${WORKDIR}/.roko/dreams" \
     "${WORKDIR}/.roko/learn" \
     "${WORKDIR}/.roko/neuro" \
-    "${WORKDIR}/.roko/state"
+    "${WORKDIR}/.roko/state" \
+    "${WORKDIR}/.roko/plans"
+
+  # Prune stale plan directories with names longer than 200 chars
+  # (generated before the slugify length cap was deployed).
+  if [ -d "${WORKDIR}/.roko/plans" ]; then
+    find "${WORKDIR}/.roko/plans" -maxdepth 1 -mindepth 1 -type d \
+      | while IFS= read -r d; do
+          name="$(basename "$d")"
+          if [ "${#name}" -gt 200 ]; then
+            log "pruning stale long-slug plan: ${name:0:80}..."
+            rm -rf "$d"
+          fi
+        done
+  fi
 
   export MIRAGE_STATE_DIR="${MIRAGE_STATE_DIR:-${WORKDIR}/.roko/state}"
 
@@ -244,6 +258,23 @@ start_child roko roko serve \
   "$@"
 roko_pid="${CHILD_PIDS[-1]}"
 wait_http roko "http://127.0.0.1:${PUBLIC_PORT}/health" "${roko_pid}" 60
+
+# ---------- ISFR agent fleet gate ----------
+# The ISFR agent fleet uses `roko do` which generates plans, runs agents that
+# write Rust code, and validates with cargo gates. This requires the full source
+# tree + Rust toolchain in the container. The Railway image is a deployment
+# target with only compiled binaries — the fleet always fails.
+#
+# The ISFR *keeper* (live rate polling from RPC) is separate and works fine.
+# Set ISFR_AGENTS_ENABLED=1 explicitly to force-enable the fleet.
+if [ "${ISFR_AGENTS_ENABLED:-0}" != "1" ]; then
+  if [ "${ISFR_AGENTS_ENABLED:-0}" = "0" ]; then
+    log "ISFR agent fleet disabled (default for deployed containers)"
+  elif [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    log "WARN: no LLM API keys set; disabling ISFR agent fleet"
+  fi
+  ISFR_AGENTS_ENABLED=0
+fi
 
 # ---------- ISFR agent fleet (fire-and-forget, serialized) ----------
 # Agents run one-at-a-time to avoid OOM on small Railway containers.

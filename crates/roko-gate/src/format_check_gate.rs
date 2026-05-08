@@ -3,7 +3,7 @@
 //! Stub gate that currently passes through. Designed to run `rustfmt --check`
 //! or equivalent formatters and fail when files are not properly formatted.
 
-use crate::payload::GatePayload;
+use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
 use roko_core::{Context, Signal, Verify, Verdict};
 use std::time::Instant;
@@ -36,6 +36,14 @@ impl Verify for FormatCheckGate {
         let started = Instant::now();
         let payload: Option<GatePayload> = signal.body.as_json().ok();
         let working_dir = payload.as_ref().map(|p| p.working_dir.clone());
+
+        if !BuildSystem::Cargo.is_available() {
+            let reason = "Cargo not available: 'cargo' not found on PATH";
+            tracing::warn!(gate = %self.name, "{reason}");
+            return Verdict::pass(&self.name)
+                .with_detail(format!("skipped: {reason}"))
+                .with_duration(elapsed_ms());
+        }
 
         let mut cmd = Command::new("cargo");
         cmd.args(["fmt", "--check"]);

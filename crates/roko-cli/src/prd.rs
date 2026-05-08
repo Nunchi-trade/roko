@@ -2573,8 +2573,11 @@ fn build_structural_verify_cmd(title: &str, files: &[String]) -> Option<String> 
 }
 
 /// Slugify a title.
+///
+/// Output is capped at 200 bytes, truncated at the last hyphen before the
+/// limit (word boundary) to avoid filesystem path-length errors.
 pub fn slugify(title: &str) -> String {
-    title
+    let slug: String = title
         .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
@@ -2582,7 +2585,19 @@ pub fn slugify(title: &str) -> String {
         .split('-')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+
+    const MAX_LEN: usize = 200;
+    if slug.len() <= MAX_LEN {
+        return slug;
+    }
+
+    // Truncate at the last hyphen before the limit (word boundary).
+    if let Some(pos) = slug[..MAX_LEN].rfind('-') {
+        slug[..pos].to_string()
+    } else {
+        slug[..MAX_LEN].to_string()
+    }
 }
 
 #[must_use]
@@ -2888,6 +2903,34 @@ mod tests {
         assert_eq!(slugify("Agent Self-Improvement"), "agent-self-improvement");
         assert_eq!(slugify("  foo  BAR  "), "foo-bar");
         assert_eq!(slugify("hello"), "hello");
+    }
+
+    #[test]
+    fn slugify_long_input_capped_at_200() {
+        // Build a title that would produce a slug longer than 200 bytes.
+        let long_title = "word ".repeat(100); // 500 chars → ~400+ byte slug
+        let slug = slugify(&long_title);
+        assert!(slug.len() <= 200, "slug len {} > 200", slug.len());
+        // Should end at a word boundary (no trailing hyphen).
+        assert!(!slug.ends_with('-'));
+        assert!(!slug.is_empty());
+    }
+
+    #[test]
+    fn slugify_exactly_200_not_truncated() {
+        // Build a slug that's exactly 200 bytes — should not be truncated.
+        let word = "abcdefghij"; // 10 chars
+        // 19 words of 10 + 18 hyphens = 208; 18 words = 198; need filler
+        let title = format!("{} ab", vec![word; 19].join(" ")); // yields 19*10+18+3 = 211 → truncated
+        let slug = slugify(&title);
+        assert!(slug.len() <= 200, "slug len {} > 200", slug.len());
+    }
+
+    #[test]
+    fn slugify_short_input_unchanged() {
+        let slug = slugify("small title");
+        assert_eq!(slug, "small-title");
+        assert!(slug.len() < 200);
     }
 
     #[test]

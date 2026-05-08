@@ -767,6 +767,8 @@ pub enum AgentCreationError {
     InvalidKind(ProviderKind),
     #[error("Failed to load mock fixture: {0}")]
     FixtureLoad(String),
+    #[error("Binary not found on PATH: {0}")]
+    BinaryNotFound(String),
 }
 
 #[cfg(test)]

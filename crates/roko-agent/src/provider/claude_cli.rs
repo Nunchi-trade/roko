@@ -41,6 +41,11 @@ impl ProviderAdapter for ClaudeCliAdapter {
             .filter(|command| !command.is_empty())
             .ok_or_else(|| AgentCreationError::MissingConfig("providers.*.command".to_string()))?;
 
+        // Verify the binary exists on PATH before attempting to spawn.
+        if !crate::provider::pre_flight::binary_on_path(command) {
+            return Err(AgentCreationError::BinaryNotFound(command.to_string()));
+        }
+
         let current_dir = options
             .working_dir
             .clone()

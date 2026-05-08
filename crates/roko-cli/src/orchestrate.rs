@@ -13289,6 +13289,7 @@ impl PlanRunner {
                 total: 1,
                 done: 0,
                 status: "ready".to_string(),
+                superseded_by: None,
                 max_parallel: old_tasks.meta.max_parallel,
                 estimated_total_minutes: old_tasks.meta.estimated_total_minutes,
                 skip_enrichment: old_tasks.meta.skip_enrichment,

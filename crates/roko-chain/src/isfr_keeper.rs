@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::isfr_sources::{
     CompositeRate, ISFRSource, RateClass, SourceMeta, SourceReading, SourceStatus,
-    compute_composite, mock::MockSource,
+    compute_composite, mock::MockSource, mock::OfflineSource,
 };
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -188,14 +188,41 @@ impl ISFRKeeper {
         > = std::collections::HashMap::new();
 
         // Pre-check which RPC URLs are reachable (quick TCP connect test).
-        // Sources pointing to unreachable RPCs will fall back to mock.
+        // Sources pointing to unreachable RPCs will try ETH_RPC_URL as
+        // fallback before going offline — this lets the keeper fetch live
+        // mainnet data when mirage is down.
         #[cfg(feature = "alloy-backend")]
-        let reachable_rpcs: std::collections::HashSet<String> = {
+        let eth_rpc_fallback: Option<String> = std::env::var("ETH_RPC_URL").ok().filter(|v| !v.trim().is_empty());
+        #[cfg(feature = "alloy-backend")]
+        let (reachable_rpcs, rpc_rewrites): (std::collections::HashSet<String>, std::collections::HashMap<String, String>) = {
             let mut set = std::collections::HashSet::new();
+            let mut rewrites = std::collections::HashMap::new();
             let mut checked = std::collections::HashSet::new();
+
+            // Also probe the fallback URL if present.
+            let mut fallback_reachable = false;
+            if let Some(ref fb) = eth_rpc_fallback {
+                if let Ok(parsed) = reqwest::Url::parse(fb) {
+                    let host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+                    let port = parsed.port().unwrap_or(443);
+                    if let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() {
+                        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)).is_ok() {
+                            info!(rpc = %fb, "ETH_RPC_URL fallback reachable");
+                            set.insert(fb.clone());
+                            fallback_reachable = true;
+                        } else {
+                            warn!(rpc = %fb, "ETH_RPC_URL fallback unreachable");
+                        }
+                    }
+                }
+            }
+
             for sc in source_configs {
                 let url = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
                 if !checked.insert(url.to_string()) {
+                    continue;
+                }
+                if set.contains(url) {
                     continue;
                 }
                 if let Ok(parsed) = reqwest::Url::parse(url) {
@@ -212,12 +239,18 @@ impl ISFRKeeper {
                             set.insert(url.to_string());
                         }
                         Err(_) => {
-                            warn!(rpc = %url, "RPC endpoint unreachable, sources will use mock fallback");
+                            if fallback_reachable {
+                                let fb = eth_rpc_fallback.as_deref().unwrap();
+                                info!(rpc = %url, fallback = %fb, "RPC unreachable, falling back to ETH_RPC_URL");
+                                rewrites.insert(url.to_string(), fb.to_string());
+                            } else {
+                                warn!(rpc = %url, "RPC endpoint unreachable, sources will go offline");
+                            }
                         }
                     }
                 }
             }
-            set
+            (set, rewrites)
         };
 
         let sources: Vec<Box<dyn ISFRSource>> = source_configs
@@ -230,6 +263,23 @@ impl ISFRKeeper {
                     "staking" => RateClass::Staking,
                     _ => RateClass::Lending,
                 };
+
+                // Apply RPC rewrite if the configured URL was unreachable
+                // but ETH_RPC_URL fallback is available.
+                #[cfg(feature = "alloy-backend")]
+                let effective_sc: std::borrow::Cow<'_, SourceConfig> = {
+                    let rpc = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
+                    if let Some(rewritten) = rpc_rewrites.get(rpc) {
+                        let mut patched = sc.clone();
+                        patched.rpc_url = Some(rewritten.clone());
+                        std::borrow::Cow::Owned(patched)
+                    } else {
+                        std::borrow::Cow::Borrowed(sc)
+                    }
+                };
+                #[cfg(feature = "alloy-backend")]
+                let sc = effective_sc.as_ref();
+
                 match sc.kind.as_str() {
                     "mock" => Box::new(MockSource::new(
                         &sc.name,
@@ -242,14 +292,14 @@ impl ISFRKeeper {
                     "aave_v3" => {
                         let rpc = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
                         if !reachable_rpcs.contains(rpc) {
-                            info!(source = %sc.name, "RPC unreachable, using mock (base=620 bps)");
-                            Box::new(MockSource::new(&sc.name, class, sc.weight, 620, 15))
+                            info!(source = %sc.name, "RPC unreachable, marking source offline");
+                            Box::new(OfflineSource::new(&sc.name, class, sc.weight, "aave_v3"))
                         } else {
                             match build_alloy_source_aave_v3(sc, &mut provider_cache) {
                                 Ok(s) => s,
                                 Err(e) => {
-                                    warn!(source = %sc.name, error = %e, "failed to build aave_v3 source, falling back to mock");
-                                    Box::new(MockSource::new(&sc.name, class, sc.weight, 620, 15))
+                                    warn!(source = %sc.name, error = %e, "failed to build aave_v3 source, marking offline");
+                                    Box::new(OfflineSource::new(&sc.name, class, sc.weight, "aave_v3"))
                                 }
                             }
                         }
@@ -258,14 +308,14 @@ impl ISFRKeeper {
                     "compound_v3" => {
                         let rpc = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
                         if !reachable_rpcs.contains(rpc) {
-                            info!(source = %sc.name, "RPC unreachable, using mock (base=580 bps)");
-                            Box::new(MockSource::new(&sc.name, class, sc.weight, 580, 10))
+                            info!(source = %sc.name, "RPC unreachable, marking source offline");
+                            Box::new(OfflineSource::new(&sc.name, class, sc.weight, "compound_v3"))
                         } else {
                             match build_alloy_source_compound_v3(sc, &mut provider_cache) {
                                 Ok(s) => s,
                                 Err(e) => {
-                                    warn!(source = %sc.name, error = %e, "failed to build compound_v3 source, falling back to mock");
-                                    Box::new(MockSource::new(&sc.name, class, sc.weight, 580, 10))
+                                    warn!(source = %sc.name, error = %e, "failed to build compound_v3 source, marking offline");
+                                    Box::new(OfflineSource::new(&sc.name, class, sc.weight, "compound_v3"))
                                 }
                             }
                         }
@@ -274,14 +324,14 @@ impl ISFRKeeper {
                     "ethena" => {
                         let rpc = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
                         if !reachable_rpcs.contains(rpc) {
-                            info!(source = %sc.name, "RPC unreachable, using mock (base=850 bps)");
-                            Box::new(MockSource::new(&sc.name, class, sc.weight, 850, 25))
+                            info!(source = %sc.name, "RPC unreachable, marking source offline");
+                            Box::new(OfflineSource::new(&sc.name, class, sc.weight, "ethena"))
                         } else {
                             match build_alloy_source_ethena(sc, &mut provider_cache) {
                                 Ok(s) => s,
                                 Err(e) => {
-                                    warn!(source = %sc.name, error = %e, "failed to build ethena source, falling back to mock");
-                                    Box::new(MockSource::new(&sc.name, class, sc.weight, 850, 25))
+                                    warn!(source = %sc.name, error = %e, "failed to build ethena source, marking offline");
+                                    Box::new(OfflineSource::new(&sc.name, class, sc.weight, "ethena"))
                                 }
                             }
                         }
@@ -290,14 +340,14 @@ impl ISFRKeeper {
                     "eth_staking" => {
                         let rpc = sc.rpc_url.as_deref().unwrap_or("http://127.0.0.1:8545");
                         if !reachable_rpcs.contains(rpc) {
-                            info!(source = %sc.name, "RPC unreachable, using mock (base=350 bps)");
-                            Box::new(MockSource::new(&sc.name, class, sc.weight, 350, 5))
+                            info!(source = %sc.name, "RPC unreachable, marking source offline");
+                            Box::new(OfflineSource::new(&sc.name, class, sc.weight, "eth_staking"))
                         } else {
                             match build_alloy_source_lido(sc, &mut provider_cache) {
                                 Ok(s) => s,
                                 Err(e) => {
-                                    warn!(source = %sc.name, error = %e, "failed to build lido source, falling back to mock");
-                                    Box::new(MockSource::new(&sc.name, class, sc.weight, 350, 5))
+                                    warn!(source = %sc.name, error = %e, "failed to build lido source, marking offline");
+                                    Box::new(OfflineSource::new(&sc.name, class, sc.weight, "eth_staking"))
                                 }
                             }
                         }
@@ -323,6 +373,14 @@ impl ISFRKeeper {
         Self::new(keeper_id, sources, config)
     }
 
+    /// Whether any source is live (not permanently offline).
+    ///
+    /// When all sources are offline (RPC unreachable at startup), the keeper
+    /// should not run — it would only produce empty/zero composites.
+    pub fn has_live_sources(&self) -> bool {
+        self.sources.iter().any(|s| !s.is_offline())
+    }
+
     /// Set the relay publish callback. Called after each successful tick.
     pub fn set_publish_fn(&self, f: PublishFn) {
         *self.publish_fn.write() = Some(f);
@@ -335,6 +393,7 @@ impl ISFRKeeper {
     pub async fn run(&self, cancel: tokio_util::sync::CancellationToken) {
         info!(keeper = %self.keeper_id, sources = self.sources.len(), "ISFR keeper starting");
         let sleep_dur = Duration::from_secs(self.config.poll_interval_secs);
+        let mut all_offline_ticks: u32 = 0;
 
         loop {
             tokio::select! {
@@ -344,6 +403,30 @@ impl ISFRKeeper {
                 }
                 _ = tokio::time::sleep(sleep_dur) => {
                     self.tick().await;
+
+                    // If fewer than min_submissions sources are healthy for
+                    // 3+ consecutive ticks, suspend — the composite is unreliable.
+                    let metas = self.source_metas.read();
+                    let healthy = metas.iter().filter(|m| m.consecutive_failures == 0).count();
+                    let total = self.sources.len();
+                    let min_needed = (self.config.min_submissions.max(1) as usize)
+                        .max(total.div_ceil(4)); // at least 25% of sources
+                    drop(metas);
+
+                    if healthy >= min_needed {
+                        all_offline_ticks = 0;
+                    } else {
+                        all_offline_ticks += 1;
+                        if all_offline_ticks >= 3 {
+                            info!(
+                                keeper = %self.keeper_id,
+                                healthy,
+                                min_needed,
+                                "insufficient healthy sources for 3 ticks; suspending keeper"
+                            );
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -357,6 +440,19 @@ impl ISFRKeeper {
         self.current_epoch.store(new_epoch, Ordering::Relaxed);
 
         let readings = self.poll_sources().await;
+
+        // Skip if too few sources reported — composite would be unreliable.
+        let total = self.sources.len();
+        let min_needed = (self.config.min_submissions.max(1) as usize).max(total.div_ceil(4));
+        if readings.len() < min_needed {
+            tracing::debug!(
+                keeper = %self.keeper_id,
+                readings = readings.len(),
+                min_needed,
+                "insufficient readings, skipping publish"
+            );
+            return;
+        }
 
         let src_refs: Vec<&dyn ISFRSource> = self.sources.iter().map(|s| s.as_ref()).collect();
         let composite = compute_composite(&readings, &src_refs);
@@ -386,6 +482,7 @@ impl ISFRKeeper {
     /// source has its own `liveness_timeout_ms`.
     async fn poll_sources(&self) -> Vec<SourceReading> {
         let mut readings = Vec::with_capacity(self.sources.len());
+        let mut new_failures: Vec<String> = Vec::new();
 
         for (i, source) in self.sources.iter().enumerate() {
             let name = source.name().to_string();
@@ -396,6 +493,9 @@ impl ISFRKeeper {
                     {
                         let mut metas = self.source_metas.write();
                         if let Some(meta) = metas.get_mut(i) {
+                            if meta.consecutive_failures > 0 {
+                                info!(source = %name, "source recovered after {} failures", meta.consecutive_failures);
+                            }
                             meta.last_reading = Some(reading.clone());
                             meta.status = SourceStatus::Live;
                             meta.consecutive_failures = 0;
@@ -403,27 +503,43 @@ impl ISFRKeeper {
                     }
                     readings.push(reading);
                 }
-                Ok(Err(e)) => {
-                    warn!(source = %name, error = %e, "source fetch failed");
+                Ok(Err(_e)) => {
                     let mut metas = self.source_metas.write();
                     if let Some(meta) = metas.get_mut(i) {
+                        let was_ok = meta.consecutive_failures == 0;
                         meta.consecutive_failures += 1;
                         meta.status = if meta.consecutive_failures >= 3 {
                             SourceStatus::Offline
                         } else {
                             SourceStatus::Stale
                         };
+                        if was_ok {
+                            new_failures.push(name);
+                        }
                     }
                 }
                 Err(_) => {
-                    warn!(source = %name, "source fetch timed out");
                     let mut metas = self.source_metas.write();
                     if let Some(meta) = metas.get_mut(i) {
+                        let was_ok = meta.consecutive_failures == 0;
                         meta.consecutive_failures += 1;
                         meta.status = SourceStatus::Stale;
+                        if was_ok {
+                            new_failures.push(format!("{name} (timeout)"));
+                        }
                     }
                 }
             }
+        }
+
+        if !new_failures.is_empty() {
+            warn!(
+                failed = new_failures.len(),
+                ok = readings.len(),
+                total = self.sources.len(),
+                sources = %new_failures.join(", "),
+                "ISFR sources failed on first poll"
+            );
         }
 
         readings

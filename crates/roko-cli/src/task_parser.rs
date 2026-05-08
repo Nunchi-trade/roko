@@ -29,6 +29,8 @@ pub struct TaskMeta {
     pub done: u32,
     #[serde(default)]
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
     #[serde(default = "default_max_parallel")]
     pub max_parallel: u32,
     #[serde(default)]
@@ -128,7 +130,7 @@ struct TaskDefSerde {
     pub model_hint: Option<String>,
     #[serde(default)]
     pub replan_strategy: Option<ReplanStrategy>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "normalize_max_loc")]
     pub max_loc: Option<u32>,
     #[serde(default, alias = "write_files")]
     pub files: Vec<String>,
@@ -342,6 +344,16 @@ fn default_timeout_secs() -> u64 {
 
 fn default_max_retries() -> u32 {
     3
+}
+
+/// Normalize `max_loc`: treat `Some(0)` as `None` (unlimited) since LLM-generated
+/// plans often emit `max_loc = 0` as a default.
+fn normalize_max_loc<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<u32>::deserialize(deserializer)?;
+    Ok(opt.filter(|&v| v > 0))
 }
 
 fn is_valid_plan_dependency_reference(dependency: &str, current_plan: &str) -> bool {
@@ -923,9 +935,6 @@ impl TasksFile {
             // Check numeric bounds.
             if task.timeout_secs == 0 {
                 issues.push(format!("{task_label}: timeout_secs must be > 0"));
-            }
-            if task.max_loc.is_some_and(|m| m == 0) {
-                issues.push(format!("{task_label}: max_loc must be > 0"));
             }
         }
 
@@ -1766,6 +1775,7 @@ depends_on = []
                 total: 21,
                 done: 0,
                 status: "ready".into(),
+                superseded_by: None,
                 max_parallel: 1,
                 estimated_total_minutes: 0,
                 skip_enrichment: false,
@@ -2126,5 +2136,78 @@ depends_on = []
             .expect("auditor should have denied_tools");
         assert!(denied.contains(&"write_file".to_string()));
         assert!(denied.contains(&"edit_file".to_string()));
+    }
+
+    #[test]
+    fn max_loc_zero_normalizes_to_none() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Task with zero max_loc"
+status = "ready"
+depends_on = []
+max_loc = 0
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        assert_eq!(parsed.tasks[0].max_loc, None, "max_loc=0 should normalize to None");
+    }
+
+    #[test]
+    fn max_loc_positive_preserved() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Task with positive max_loc"
+status = "ready"
+depends_on = []
+max_loc = 500
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        assert_eq!(parsed.tasks[0].max_loc, Some(500));
+    }
+
+    #[test]
+    fn max_loc_missing_is_none() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Task without max_loc"
+status = "ready"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        assert_eq!(parsed.tasks[0].max_loc, None);
+    }
+
+    #[test]
+    fn validation_does_not_reject_max_loc_zero() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Task with zero max_loc"
+status = "ready"
+depends_on = []
+max_loc = 0
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let issues = parsed.validate_against_schema();
+        let max_loc_issues: Vec<_> = issues.iter().filter(|i| i.contains("max_loc")).collect();
+        assert!(max_loc_issues.is_empty(), "max_loc=0 should not produce validation errors");
     }
 }

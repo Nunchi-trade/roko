@@ -183,7 +183,7 @@ fn check_api_key_env(
 }
 
 /// Check whether a binary name is findable on the system PATH.
-fn binary_on_path(name: &str) -> bool {
+pub(crate) fn binary_on_path(name: &str) -> bool {
     // If the name contains a path separator, check directly.
     if name.contains('/') || name.contains('\\') {
         return std::path::Path::new(name).exists();

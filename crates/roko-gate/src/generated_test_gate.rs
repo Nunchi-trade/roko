@@ -305,7 +305,21 @@ impl Verify for GeneratedTestGate {
                 .with_duration(elapsed);
         }
 
-        // 5. Build and run the test command with a pattern selector.
+        // 5. Check toolchain availability before spawning.
+        if !self.build_system.is_available() {
+            let reason = format!(
+                "{} not available: '{}' not found on PATH",
+                self.build_system.name(),
+                self.build_system.program()
+            );
+            tracing::warn!(gate = %self.name, "{reason}");
+            let elapsed = elapsed_ms(started);
+            return Verdict::pass(&self.name)
+                .with_detail(format!("skipped: {reason}"))
+                .with_duration(elapsed);
+        }
+
+        // 6. Build and run the test command with a pattern selector.
         let selector = TestSelector::Patterns(vec![self.test_prefix.clone()]);
         let mut cmd = Command::new(self.build_system.program());
         for arg in self.build_system.scoped_test_args(&payload.target_crates) {

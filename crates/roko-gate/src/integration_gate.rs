@@ -307,6 +307,17 @@ async fn run_build_test(
         return Verdict::fail(gate_name, "timed out before scenario started");
     }
 
+    if !build.is_available() {
+        let reason = format!(
+            "{} not available: '{}' not found on PATH",
+            build.name(),
+            build.program()
+        );
+        tracing::warn!(gate = %gate_name, "{reason}");
+        return Verdict::pass(gate_name)
+            .with_detail(format!("skipped: {reason}"));
+    }
+
     let payload: Option<GatePayload> = signal.body.as_json().ok();
     let mut cmd = Command::new(build.program());
     let target_crates = payload

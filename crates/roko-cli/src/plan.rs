@@ -35,12 +35,11 @@ pub fn stable_plan_id(plan_info: &PlanInfo) -> &str {
 /// Return the sibling `tasks.toml` path for a directory-style plan.
 #[must_use]
 pub fn tasks_path(plan_info: &PlanInfo) -> Option<PathBuf> {
-    plan_info
-        .path
-        .file_name()
-        .is_some_and(|name| name == "plan.md")
-        .then(|| plan_info.path.parent().map(|dir| dir.join("tasks.toml")))
-        .flatten()
+    match plan_info.path.file_name().and_then(|name| name.to_str()) {
+        Some("plan.md") => plan_info.path.parent().map(|dir| dir.join("tasks.toml")),
+        Some("tasks.toml") => Some(plan_info.path.clone()),
+        _ => None,
+    }
 }
 
 /// A plan summary (used in list output).
@@ -58,15 +57,40 @@ pub struct PlanSummary {
     pub tasks_failed: usize,
     /// Whether the plan has been completed.
     pub completed: bool,
+    /// Plan lifecycle status from `[meta].status`, when present.
+    pub status: String,
+    /// Replacement queue or plan declared by `[meta].superseded_by`.
+    pub superseded_by: Option<String>,
     /// Whether the plan's `tasks.toml` is missing modern fields.
     pub old_format: bool,
     /// Last error message from executor state, if any.
     pub last_error: Option<String>,
 }
 
+impl PlanSummary {
+    #[must_use]
+    pub fn status_label(&self) -> String {
+        match self.status.as_str() {
+            "superseded" => "superseded".to_string(),
+            "archived" => "archived".to_string(),
+            _ if self.completed => "done".to_string(),
+            _ if self.tasks_done > 0 || self.tasks_failed > 0 => "in-progress".to_string(),
+            _ => "pending".to_string(),
+        }
+    }
+}
+
 impl std::fmt::Display for PlanSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let status_label = if self.completed {
+        let status_label = if matches!(self.status.as_str(), "superseded" | "archived") {
+            let replacement = self
+                .superseded_by
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!(" by {value}"))
+                .unwrap_or_default();
+            format!("{}{replacement}", self.status)
+        } else if self.completed {
             format!("done {}/{}", self.tasks_done, self.task_count)
         } else if self.tasks_done > 0 || self.tasks_failed > 0 {
             let mut parts = Vec::new();
@@ -164,6 +188,8 @@ impl Plan {
             tasks_done: self.tasks.iter().filter(|task| task.completed).count(),
             tasks_failed: 0,
             completed,
+            status: if completed { "done" } else { "ready" }.into(),
+            superseded_by: None,
             old_format: false,
             last_error: None,
         }
@@ -217,6 +243,11 @@ pub fn list_plan_files(workdir: &Path) -> std::io::Result<Vec<PathBuf>> {
             let plan_md = path.join("plan.md");
             if plan_md.is_file() {
                 plans.push(plan_md);
+                continue;
+            }
+            let tasks_toml = path.join("tasks.toml");
+            if tasks_toml.is_file() {
+                plans.push(tasks_toml);
             }
             continue;
         }
@@ -234,11 +265,21 @@ pub fn list_plan_files(workdir: &Path) -> std::io::Result<Vec<PathBuf>> {
 /// Build a display summary from a discovered plan entry.
 #[must_use]
 pub fn summarize_plan_info(plan_info: &PlanInfo) -> PlanSummary {
-    let title = fs::read_to_string(&plan_info.path)
-        .ok()
-        .and_then(|content| extract_markdown_title(&content))
-        .unwrap_or_else(|| stable_plan_id(plan_info).to_string());
+    let title = if plan_info
+        .path
+        .file_name()
+        .is_some_and(|name| name == "tasks.toml")
+    {
+        stable_plan_id(plan_info).to_string()
+    } else {
+        fs::read_to_string(&plan_info.path)
+            .ok()
+            .and_then(|content| extract_markdown_title(&content))
+            .unwrap_or_else(|| stable_plan_id(plan_info).to_string())
+    };
     let tasks_path = tasks_path(plan_info);
+    let mut meta_status = String::new();
+    let mut superseded_by = None;
     let (task_count, tasks_done, tasks_failed, old_format) = match tasks_path.as_deref() {
         Some(path) if path.is_file() => {
             let old_format = matches!(
@@ -247,6 +288,8 @@ pub fn summarize_plan_info(plan_info: &PlanInfo) -> PlanSummary {
             );
             match crate::task_parser::TasksFile::parse(path) {
                 Ok(tasks_file) => {
+                    meta_status = tasks_file.meta.status.clone();
+                    superseded_by = tasks_file.meta.superseded_by.clone();
                     let total = tasks_file.tasks.len();
                     let done = tasks_file
                         .tasks
@@ -274,6 +317,11 @@ pub fn summarize_plan_info(plan_info: &PlanInfo) -> PlanSummary {
     };
 
     let completed = task_count > 0 && tasks_done == task_count;
+    let status = if meta_status.trim().is_empty() {
+        if completed { "done" } else { "ready" }.to_string()
+    } else {
+        meta_status
+    };
     PlanSummary {
         id: stable_plan_id(plan_info).to_string(),
         title,
@@ -281,6 +329,8 @@ pub fn summarize_plan_info(plan_info: &PlanInfo) -> PlanSummary {
         tasks_done,
         tasks_failed,
         completed,
+        status,
+        superseded_by,
         old_format,
         last_error: None,
     }
@@ -370,13 +420,18 @@ pub fn format_plan_list_json(plans: &[PlanSummary]) -> String {
         .iter()
         .map(|p| {
             format!(
-                r#"{{"id":"{}","title":"{}","task_count":{},"tasks_done":{},"tasks_failed":{},"completed":{},"old_format":{}}}"#,
+                r#"{{"id":"{}","title":"{}","task_count":{},"tasks_done":{},"tasks_failed":{},"completed":{},"status":"{}","superseded_by":"{}","old_format":{}}}"#,
                 p.id,
                 p.title.replace('"', "\\\""),
                 p.task_count,
                 p.tasks_done,
                 p.tasks_failed,
                 p.completed,
+                p.status.replace('"', "\\\""),
+                p.superseded_by
+                    .as_deref()
+                    .unwrap_or("")
+                    .replace('"', "\\\""),
                 p.old_format,
             )
         })
@@ -461,6 +516,21 @@ mod tests {
     }
 
     #[test]
+    fn tasks_path_accepts_task_only_plan_info() {
+        let info = PlanInfo {
+            base: "P08-example".into(),
+            num: "P08".into(),
+            path: PathBuf::from("/repo/plans/P08-example/tasks.toml"),
+            frontmatter: None,
+        };
+
+        assert_eq!(
+            tasks_path(&info),
+            Some(PathBuf::from("/repo/plans/P08-example/tasks.toml"))
+        );
+    }
+
+    #[test]
     fn format_plan_list_empty() {
         assert_eq!(format_plan_list(&[]), "no plans found");
     }
@@ -474,6 +544,8 @@ mod tests {
             tasks_done: 0,
             tasks_failed: 0,
             completed: false,
+            status: "ready".into(),
+            superseded_by: None,
             old_format: false,
             last_error: None,
         }];
@@ -493,6 +565,8 @@ mod tests {
                 tasks_done: 0,
                 tasks_failed: 0,
                 completed: true,
+                status: "done".into(),
+                superseded_by: None,
                 old_format: false,
                 last_error: None,
             },
@@ -503,6 +577,8 @@ mod tests {
                 tasks_done: 0,
                 tasks_failed: 0,
                 completed: false,
+                status: "ready".into(),
+                superseded_by: None,
                 old_format: true,
                 last_error: None,
             },
@@ -551,14 +627,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join(".roko").join("plans");
         std::fs::create_dir_all(dir.join("plan1")).unwrap();
+        std::fs::create_dir_all(dir.join("plan3")).unwrap();
         std::fs::write(dir.join("plan1").join("plan.md"), "# Plan One\n").unwrap();
         std::fs::write(dir.join("plan2.md"), "# Plan Two\n").unwrap();
+        std::fs::write(
+            dir.join("plan3").join("tasks.toml"),
+            "[meta]\nplan = \"plan3\"\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("notes.txt"), "").unwrap();
 
         let plans = list_plan_files(tmp.path()).unwrap();
-        assert_eq!(plans.len(), 2);
+        assert_eq!(plans.len(), 3);
         assert!(plans.iter().any(|p| p.ends_with("plan1/plan.md")));
         assert!(plans.iter().any(|p| p.ends_with("plan2.md")));
+        assert!(plans.iter().any(|p| p.ends_with("plan3/tasks.toml")));
     }
 
     #[test]
@@ -582,6 +665,8 @@ mod tests {
             tasks_done: 5,
             tasks_failed: 0,
             completed: true,
+            status: "done".into(),
+            superseded_by: None,
             old_format: true,
             last_error: None,
         };
@@ -601,6 +686,8 @@ mod tests {
             tasks_done: 2,
             tasks_failed: 1,
             completed: false,
+            status: "ready".into(),
+            superseded_by: None,
             old_format: false,
             last_error: None,
         };
@@ -620,11 +707,32 @@ mod tests {
             tasks_done: 0,
             tasks_failed: 0,
             completed: false,
+            status: "ready".into(),
+            superseded_by: None,
             old_format: false,
             last_error: None,
         };
         let text = summary.to_string();
         assert!(text.contains("pending 0/3"));
+    }
+
+    #[test]
+    fn plan_summary_display_superseded() {
+        let summary = PlanSummary {
+            id: "old".into(),
+            title: "Old Plan".into(),
+            task_count: 3,
+            tasks_done: 0,
+            tasks_failed: 0,
+            completed: false,
+            status: "superseded".into(),
+            superseded_by: Some("new-plan".into()),
+            old_format: false,
+            last_error: None,
+        };
+
+        assert_eq!(summary.status_label(), "superseded");
+        assert!(summary.to_string().contains("superseded by new-plan"));
     }
 
     #[test]

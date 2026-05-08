@@ -27,6 +27,24 @@ pub struct Plan {
     pub prd_excerpt: String,
 }
 
+/// Load a single plan, returning `None` with a warning if it fails.
+///
+/// This wraps [`load_plan`] for use in batch-loading contexts where one bad
+/// plan directory should not kill the entire run.
+pub fn load_plan_lenient(dir: &Path) -> Option<Plan> {
+    match load_plan(dir) {
+        Ok(plan) => Some(plan),
+        Err(e) => {
+            tracing::warn!(
+                plan_dir = %dir.display(),
+                error = %e,
+                "skipping invalid plan directory"
+            );
+            None
+        }
+    }
+}
+
 /// Load a single plan from a directory that must contain `tasks.toml`.
 pub fn load_plan(dir: &Path) -> Result<Plan> {
     let tasks_path = dir.join("tasks.toml");
@@ -94,7 +112,13 @@ pub fn load_plans(dir: &Path) -> Result<Vec<Plan>> {
         .with_context(|| format!("cannot read directory {}", dir.display()))?;
 
     for entry in entries {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), err = %e, "skipping unreadable directory entry");
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -507,6 +531,70 @@ role = "implementer"
         assert_eq!(plans.len(), 2);
         assert_eq!(plans[0].id, "plan-a");
         assert_eq!(plans[1].id, "plan-b");
+    }
+
+    #[test]
+    fn load_plans_skips_invalid_keeps_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Valid plan
+        write_tasks_toml(&tmp.path().join("good-plan"), MINIMAL_TASKS);
+        // Invalid plan: broken TOML
+        let bad_dir = tmp.path().join("bad-plan");
+        fs::create_dir_all(&bad_dir).unwrap();
+        fs::write(bad_dir.join("tasks.toml"), "this is not valid toml {{{{").unwrap();
+
+        let plans = load_plans(tmp.path()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].id, "good-plan");
+    }
+
+    #[test]
+    fn load_plan_lenient_returns_none_for_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bad_dir = tmp.path().join("bad-plan");
+        fs::create_dir_all(&bad_dir).unwrap();
+        fs::write(bad_dir.join("tasks.toml"), "not valid toml").unwrap();
+
+        assert!(load_plan_lenient(&bad_dir).is_none());
+    }
+
+    #[test]
+    fn load_plan_lenient_returns_some_for_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan_dir = tmp.path().join("ok-plan");
+        write_tasks_toml(&plan_dir, MINIMAL_TASKS);
+
+        let plan = load_plan_lenient(&plan_dir);
+        assert!(plan.is_some());
+        assert_eq!(plan.unwrap().id, "ok-plan");
+    }
+
+    #[test]
+    fn load_plans_skips_non_dir_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Valid plan
+        write_tasks_toml(&tmp.path().join("good-plan"), MINIMAL_TASKS);
+        // A file that is not a directory
+        fs::write(tmp.path().join("not-a-dir"), "hello").unwrap();
+
+        let plans = load_plans(tmp.path()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].id, "good-plan");
+    }
+
+    #[test]
+    fn load_plans_skips_empty_tasks_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Valid plan
+        write_tasks_toml(&tmp.path().join("good-plan"), MINIMAL_TASKS);
+        // Plan dir with empty tasks.toml
+        let empty_dir = tmp.path().join("empty-plan");
+        fs::create_dir_all(&empty_dir).unwrap();
+        fs::write(empty_dir.join("tasks.toml"), "").unwrap();
+
+        let plans = load_plans(tmp.path()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].id, "good-plan");
     }
 
     #[test]

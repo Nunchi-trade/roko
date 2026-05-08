@@ -6,6 +6,7 @@
 //! Two directory layouts are supported (the new one wins on conflict):
 //!
 //! - **New layout**: `plans/<num>-<slug>/plan.md`
+//! - **Task-only layout**: `plans/<num>-<slug>/tasks.toml`
 //! - **Legacy layout**: `plans/<num>-<slug>.md`
 //!
 //! The prefix (`<num>`) may be numeric (`01`) or numeric + alpha
@@ -80,7 +81,7 @@ pub struct PlanInfo {
     pub base: String,
     /// Numeric / alphanumeric prefix, e.g. `"01"` or `"08a"`.
     pub num: String,
-    /// Full path to the plan `.md` file.
+    /// Full path to `plan.md`, a task-only `tasks.toml`, or a legacy `.md` file.
     pub path: PathBuf,
     /// Parsed frontmatter. `None` when the file has no `---` fences.
     pub frontmatter: Option<PlanFrontmatter>,
@@ -197,7 +198,12 @@ pub fn discover_plans(plans_dir: &Path) -> Result<Vec<PlanInfo>, DiscoveryError>
             })?;
         if kind.is_dir() {
             let plan_md = entry.path().join("plan.md");
-            dir_candidates.push((name, plan_md));
+            let tasks_toml = entry.path().join("tasks.toml");
+            if plan_md.is_file() {
+                dir_candidates.push((name, plan_md));
+            } else if tasks_toml.is_file() {
+                dir_candidates.push((name, tasks_toml));
+            }
         } else if kind.is_file()
             && has_md_extension(&name)
             && !name.eq_ignore_ascii_case("CONTEXT.md")
@@ -279,7 +285,10 @@ pub fn rank_plans(plans: &mut [PlanInfo]) {
     plans.sort_by(|a, b| {
         let pri_a = a.frontmatter.as_ref().and_then(|f| f.priority).unwrap_or(0);
         let pri_b = b.frontmatter.as_ref().and_then(|f| f.priority).unwrap_or(0);
-        pri_b.cmp(&pri_a).then_with(|| a.num.cmp(&b.num))
+        pri_b
+            .cmp(&pri_a)
+            .then_with(|| a.num.cmp(&b.num))
+            .then_with(|| a.base.cmp(&b.base))
     });
 }
 
@@ -352,6 +361,12 @@ mod tests {
         fs::write(root.join(format!("{base}.md")), body).unwrap();
     }
 
+    fn write_tasks_only_plan(root: &Path, base: &str, body: &str) {
+        let dir = root.join(base);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("tasks.toml"), body).unwrap();
+    }
+
     #[test]
     fn missing_directory_errors_cleanly() {
         let err = discover_plans(Path::new("/definitely/not/real/plans")).unwrap_err();
@@ -391,6 +406,22 @@ mod tests {
         let plans = discover_plans(dir.path()).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].base, "02-core");
+    }
+
+    #[test]
+    fn discovers_task_only_directory_plan() {
+        let dir = TempDir::new().unwrap();
+        write_tasks_only_plan(
+            dir.path(),
+            "02b-task-only",
+            "[meta]\nplan = \"02b-task-only\"\nstatus = \"ready\"\n\n[[task]]\nid = \"T1\"\n",
+        );
+        let plans = discover_plans(dir.path()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].base, "02b-task-only");
+        assert_eq!(plans[0].num, "02b");
+        assert!(plans[0].path.ends_with("02b-task-only/tasks.toml"));
+        assert!(plans[0].frontmatter.is_none());
     }
 
     #[test]

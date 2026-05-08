@@ -141,6 +141,12 @@ pub trait ISFRSource: Send + Sync {
     fn liveness_timeout_ms(&self) -> u64 {
         30_000 // 30s default
     }
+
+    /// Whether this source is permanently offline (e.g. RPC unreachable at startup).
+    /// Default: `false`. Overridden by [`mock::OfflineSource`].
+    fn is_offline(&self) -> bool {
+        false
+    }
 }
 
 /// Composite rate computed from multiple sources.

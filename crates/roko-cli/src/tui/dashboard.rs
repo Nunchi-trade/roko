@@ -1836,6 +1836,8 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
             tasks_done,
             tasks_failed,
             completed,
+            status: if completed { "done" } else { "ready" }.into(),
+            superseded_by: None,
             old_format: false,
             last_error,
         });

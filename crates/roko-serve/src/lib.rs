@@ -355,18 +355,25 @@ impl ServerBuilder {
                 let contracts_dir = chain_cfg.contracts_dir.as_deref().unwrap_or("contracts");
                 let contracts_path = state.workdir.join(contracts_dir);
 
-                match roko_chain::isfr_bootstrap::bootstrap_isfr(rpc, key, &contracts_path).await {
-                    Ok(addrs) => {
-                        tracing::info!(
-                            oracle = ?addrs.isfr_oracle,
-                            bounty_pool = ?addrs.bounty_pool,
-                            "ISFR contracts deployed"
-                        );
-                        *state.isfr.contract_addresses.write().await = Some(addrs);
+                if contracts_path.join("out").is_dir() {
+                    match roko_chain::isfr_bootstrap::bootstrap_isfr(rpc, key, &contracts_path).await {
+                        Ok(addrs) => {
+                            tracing::info!(
+                                oracle = ?addrs.isfr_oracle,
+                                bounty_pool = ?addrs.bounty_pool,
+                                "ISFR contracts deployed"
+                            );
+                            *state.isfr.contract_addresses.write().await = Some(addrs);
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "ISFR contract auto-deploy failed (continuing without on-chain)");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "ISFR contract auto-deploy failed (continuing without on-chain)");
-                    }
+                } else {
+                    tracing::info!(
+                        path = %contracts_path.display(),
+                        "ISFR contract artifacts not found; skipping auto-deploy"
+                    );
                 }
             }
         }
@@ -864,9 +871,9 @@ fn log_provider_credential_status(config: &RokoConfig) {
     missing.sort();
     info!(providers = ?available, "providers with API credentials (or CLI backends)");
     if !missing.is_empty() {
-        warn!(
+        info!(
             providers = ?missing,
-            "providers missing credentials — models on these providers cannot dispatch until env vars or [agent.env] are set"
+            "providers missing credentials — models on these providers will not dispatch"
         );
     }
 }
@@ -916,9 +923,9 @@ fn build_app_state(
         if !model_slugs.is_empty() {
             let router_path = state.layout.cascade_router_path();
             if !router_path.exists() {
-                warn!(
+                info!(
                     path = %router_path.display(),
-                    "persisted CascadeRouter not found; using fresh router"
+                    "no persisted CascadeRouter; starting fresh"
                 );
             }
             let router =
@@ -2120,6 +2127,12 @@ fn start_isfr_keeper(state: Arc<AppState>) -> JoinHandle<()> {
         ISFRKeeper::from_config("roko-serve", keeper_config, &source_configs)
     };
 
+    // Gate: if all sources are offline (RPC unreachable), don't run the keeper.
+    if !keeper.has_live_sources() {
+        tracing::warn!("ISFR keeper: all sources offline, skipping keeper startup");
+        return tokio::spawn(async {});
+    }
+
     let keeper = std::sync::Arc::new(keeper);
 
     // Wire the publish callback: captures Arc<AppState> and Arc<ISFRKeeper>.
@@ -2318,6 +2331,23 @@ fn start_block_watcher(state: Arc<AppState>) -> JoinHandle<()> {
     };
 
     let provider = client.provider();
+
+    // Startup probe: quick TCP connect to check if the RPC endpoint is alive.
+    // Avoids the 30-attempt seed loop (60s waste) when mirage is dead.
+    {
+        let rpc_url = state.load_roko_config().chain.rpc_url.clone().unwrap_or_default();
+        if let Ok(parsed) = reqwest::Url::parse(&rpc_url) {
+            let host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+            let port = parsed.port().unwrap_or(8545);
+            if let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() {
+                if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_err() {
+                    tracing::warn!(rpc_url, "block_watcher RPC startup probe failed; skipping watcher");
+                    return tokio::spawn(async {});
+                }
+            }
+        }
+    }
+
     let watcher = BlockWatcher::new(provider, Duration::from_secs(2));
 
     // Bridge roko's CancelToken into a tokio-util CancellationToken.
@@ -2467,7 +2497,7 @@ fn start_isfr_relay_bridge(state: Arc<AppState>) -> Option<tokio::task::JoinHand
         let handle = match connect(relay_config, agent_state, card, Some(handler)).await {
             Ok(h) => h,
             Err(e) => {
-                warn!(error = %e, relay_url = %relay_url, "ISFRFeed relay bridge: connect failed");
+                info!(error = %e, relay_url = %relay_url, "ISFRFeed relay bridge: not available (non-fatal)");
                 return;
             }
         };

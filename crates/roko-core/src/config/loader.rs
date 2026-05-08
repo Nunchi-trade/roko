@@ -42,11 +42,23 @@
 //! - `ROKO__CONDUCTOR__MAX_AGENTS=16` -> `conductor.max_agents = 16`
 //! - `ROKO__GATES__SKIP_TESTS=true` -> `gates.skip_tests = true`
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use parking_lot::Mutex;
 
 use super::LoadConfigError;
 use super::provenance::{ConfigDiagnostic, ConfigProvenance, ValidatedConfig};
 use super::schema::RokoConfig;
+
+/// Global dedup set for config diagnostic warnings.
+/// Prevents the same warning from being logged on every config reload.
+static EMITTED_DIAGNOSTICS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn emitted_diagnostics() -> &'static Mutex<HashSet<String>> {
+    EMITTED_DIAGNOSTICS.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 // ─── Load options ───────────────────────────────────────────────────────
 
@@ -270,16 +282,22 @@ fn load_from_resolved_path(
 
     // Emit diagnostics as warnings so callers don't need to opt into
     // load_config_validated() to see slug duplicates and orphaned models.
-    for diag in collect_diagnostics(&config) {
-        if diag.key.starts_with('_') {
-            // Skip the env-override meta-note; it's noise on the hot path.
-            continue;
+    // Deduplicated: each unique key is only logged once per process lifetime.
+    {
+        let mut emitted = emitted_diagnostics().lock();
+        for diag in collect_diagnostics(&config) {
+            if diag.key.starts_with('_') {
+                // Skip the env-override meta-note; it's noise on the hot path.
+                continue;
+            }
+            if emitted.insert(diag.key.clone()) {
+                tracing::warn!(
+                    config_key = %diag.key,
+                    "config warning: {}",
+                    diag.message
+                );
+            }
         }
-        tracing::warn!(
-            config_key = %diag.key,
-            "config warning: {}",
-            diag.message
-        );
     }
 
     Ok(config)

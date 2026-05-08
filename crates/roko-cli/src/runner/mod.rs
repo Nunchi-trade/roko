@@ -50,6 +50,6 @@ pub mod types;
 
 // Re-export the primary entry points.
 pub use event_loop::{PlanReport, RunReport, run};
-pub use plan_loader::{Plan, load_plan, load_plans, scaffold_missing_crates};
+pub use plan_loader::{Plan, load_plan, load_plan_lenient, load_plans, scaffold_missing_crates};
 pub use sse_stream::SseStreamClient;
 pub use types::RunConfig;

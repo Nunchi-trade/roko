@@ -124,22 +124,171 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
     let mut out = String::new();
     let _ = writeln!(out, "# Plans Index");
     let _ = writeln!(out, "\n> Auto-generated. Do not edit manually.");
-    let _ = writeln!(out, "> Rebuilt on every `roko plan` command.\n");
+    let _ = writeln!(out, "> Rebuilt on every `roko plan` command.");
+    if plans_dir(workdir)
+        .join("_meta/IMPLEMENTATION_ORDER.md")
+        .is_file()
+    {
+        let _ = writeln!(
+            out,
+            "> Execution order: [`_meta/IMPLEMENTATION_ORDER.md`](_meta/IMPLEMENTATION_ORDER.md)."
+        );
+    }
+    let _ = writeln!(
+        out,
+        "> Executable totals exclude superseded and archived plans.\n"
+    );
 
     if let Some(parent) = plans_index_path(workdir).parent() {
         std::fs::create_dir_all(parent)?;
     }
 
+    let _ = writeln!(out, "## Executable Plans\n");
     let _ = writeln!(out, "| Plan | Tasks | Done | Ready | Status | Parallel |");
     let _ = writeln!(out, "|------|-------|------|-------|--------|----------|");
 
-    let plans_root = plans_dir(workdir);
-    if !plans_root.is_dir() {
+    let plan_entries = collect_plan_index_entries(workdir);
+    if !plans_dir(workdir).is_dir() {
         let _ = writeln!(out, "| _(no plans directory)_ | | | | | |");
         std::fs::write(plans_index_path(workdir), &out)?;
         return Ok(());
     }
 
+    let mut total_tasks = 0u32;
+    let mut total_done = 0u32;
+    let mut executable_plans = 0u32;
+    let mut complete_plans = 0u32;
+    let mut ready_plans = 0u32;
+
+    for entry in plan_entries.iter().filter(|entry| !entry.is_inactive()) {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} | {} | {} | {} |",
+            entry.name,
+            entry.tasks,
+            entry.done,
+            entry.ready,
+            entry.status_label(),
+            entry.max_parallel
+        );
+        total_tasks += entry.tasks;
+        total_done += entry.done;
+        executable_plans += 1;
+        if entry.is_complete() {
+            complete_plans += 1;
+        } else {
+            ready_plans += 1;
+        }
+    }
+
+    if executable_plans == 0 {
+        let _ = writeln!(out, "| _(none)_ | | | | | |");
+    }
+
+    let remaining = total_tasks.saturating_sub(total_done);
+    let _ = writeln!(
+        out,
+        "\n**Executable Total**: {} plans, {} tasks, {} done ({:.0}%), {} remaining",
+        executable_plans,
+        total_tasks,
+        total_done,
+        if total_tasks > 0 {
+            total_done as f64 / total_tasks as f64 * 100.0
+        } else {
+            0.0
+        },
+        remaining
+    );
+    let _ = writeln!(out, "**Complete Plans**: {complete_plans}");
+    let _ = writeln!(out, "**Ready/In-Progress Plans**: {ready_plans}");
+
+    let inactive: Vec<&PlanIndexEntry> = plan_entries
+        .iter()
+        .filter(|entry| entry.is_inactive())
+        .collect();
+    if !inactive.is_empty() {
+        let inactive_tasks: u32 = inactive.iter().map(|entry| entry.tasks).sum();
+        let _ = writeln!(out, "\n## Superseded / Archived\n");
+        let _ = writeln!(out, "| Plan | Tasks | Status | Replaced By |");
+        let _ = writeln!(out, "|------|-------|--------|-------------|");
+        for entry in &inactive {
+            let _ = writeln!(
+                out,
+                "| `{}` | {} | {} | {} |",
+                entry.name,
+                entry.tasks,
+                entry.status_label(),
+                entry
+                    .superseded_by
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("—")
+            );
+        }
+        let _ = writeln!(
+            out,
+            "\n**Excluded**: {} plans, {} tasks",
+            inactive.len(),
+            inactive_tasks
+        );
+    }
+
+    std::fs::write(plans_index_path(workdir), &out)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PlanIndexEntry {
+    name: String,
+    tasks: u32,
+    done: u32,
+    ready: u32,
+    max_parallel: String,
+    meta_status: String,
+    superseded_by: Option<String>,
+}
+
+impl PlanIndexEntry {
+    fn is_inactive(&self) -> bool {
+        matches!(self.meta_status.as_str(), "superseded" | "archived")
+    }
+
+    fn is_complete(&self) -> bool {
+        self.meta_status == "done" || (self.tasks > 0 && self.done == self.tasks)
+    }
+
+    fn status_label(&self) -> String {
+        match self.meta_status.as_str() {
+            "superseded" => "⏭ superseded".to_string(),
+            "archived" => "🗄 archived".to_string(),
+            "done" => "✅ complete".to_string(),
+            status if self.is_complete() => {
+                if status.is_empty() {
+                    "✅ complete".to_string()
+                } else {
+                    format!("✅ {status}")
+                }
+            }
+            status if self.done > 0 => {
+                if status.is_empty() || status == "ready" {
+                    "🔄 in progress".to_string()
+                } else {
+                    format!("🔄 {status}")
+                }
+            }
+            "ready" | "" => "📋 ready".to_string(),
+            status => format!("📋 {status}"),
+        }
+    }
+}
+
+fn collect_plan_index_entries(workdir: &Path) -> Vec<PlanIndexEntry> {
+    let plans_root = plans_dir(workdir);
+    if !plans_root.is_dir() {
+        return Vec::new();
+    }
+
+    let run_state_completed = load_run_state_completed(workdir);
     let mut plan_dirs: Vec<PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&plans_root) {
         for entry in entries.flatten() {
@@ -151,74 +300,58 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
     }
     plan_dirs.sort();
 
-    // Load run-state for real completion data. tasks.toml is never
-    // updated by plan run -- completion state lives in run-state.json only.
-    // NOTE: This is run-state.json (RunStateSnapshot), NOT executor.json
-    // (ExecutorSnapshot). Only RunStateSnapshot has completed_tasks.
-    let run_state_path = workdir.join(".roko/state/run-state.json");
-    let run_state_completed: std::collections::HashMap<String, Vec<String>> =
-        if run_state_path.exists() {
-            std::fs::read_to_string(&run_state_path)
-                .ok()
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                .and_then(|val| {
-                    val.get("completed_tasks")
-                        .and_then(|ct| serde_json::from_value(ct.clone()).ok())
-                })
-                .unwrap_or_default()
-        } else {
-            std::collections::HashMap::new()
-        };
+    plan_dirs
+        .iter()
+        .map(|dir| {
+            let name = dir.file_name().unwrap_or_default().to_string_lossy();
+            let content = std::fs::read_to_string(dir.join("tasks.toml")).unwrap_or_default();
+            let mut counts = count_top_level_tasks(&content);
 
-    let mut total_tasks = 0u32;
-    let mut total_done = 0u32;
-
-    for dir in &plan_dirs {
-        let name = dir.file_name().unwrap_or_default().to_string_lossy();
-        let tasks_path = dir.join("tasks.toml");
-        let content = std::fs::read_to_string(&tasks_path).unwrap_or_default();
-
-        let (tasks, mut done, ready) = count_top_level_tasks(&content);
-
-        // Overlay real completion data from run-state.json if available.
-        if let Some(completed_ids) = run_state_completed.get(name.as_ref()) {
-            if !completed_ids.is_empty() {
-                done = completed_ids.len() as u32;
+            // Overlay real completion data from run-state.json if available.
+            if let Some(completed_ids) = run_state_completed.get(name.as_ref()) {
+                if !completed_ids.is_empty() {
+                    counts.1 = completed_ids.len() as u32;
+                    counts.2 = counts.0.saturating_sub(counts.1);
+                }
             }
-        }
-        let max_parallel = extract_toml_value(&content, "max_parallel").unwrap_or_default();
 
-        let status = if done == tasks && tasks > 0 {
-            "✅ complete"
-        } else if done > 0 {
-            "🔄 in progress"
-        } else {
-            "📋 ready"
-        };
+            let meta_status = extract_meta_string(&content, "status")
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let superseded_by = extract_meta_string(&content, "superseded_by");
+            let max_parallel =
+                extract_meta_value(&content, "max_parallel").unwrap_or_else(|| "—".to_string());
 
-        let _ = writeln!(
-            out,
-            "| `{name}` | {tasks} | {done} | {ready} | {status} | {max_parallel} |"
-        );
-        total_tasks += tasks;
-        total_done += done;
+            PlanIndexEntry {
+                name: name.to_string(),
+                tasks: counts.0,
+                done: counts.1,
+                ready: counts.2,
+                max_parallel,
+                meta_status,
+                superseded_by,
+            }
+        })
+        .collect()
+}
+
+fn load_run_state_completed(workdir: &Path) -> std::collections::HashMap<String, Vec<String>> {
+    // tasks.toml is never updated by plan run; completion state lives in
+    // run-state.json. This is RunStateSnapshot, not executor.json.
+    let run_state_path = workdir.join(".roko/state/run-state.json");
+    if !run_state_path.exists() {
+        return std::collections::HashMap::new();
     }
 
-    let _ = writeln!(
-        out,
-        "\n**Total**: {} plans, {} tasks, {} done ({:.0}%)",
-        plan_dirs.len(),
-        total_tasks,
-        total_done,
-        if total_tasks > 0 {
-            total_done as f64 / total_tasks as f64 * 100.0
-        } else {
-            0.0
-        }
-    );
-
-    std::fs::write(plans_index_path(workdir), &out)?;
-    Ok(())
+    std::fs::read_to_string(&run_state_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|val| {
+            val.get("completed_tasks")
+                .and_then(|ct| serde_json::from_value(ct.clone()).ok())
+        })
+        .unwrap_or_default()
 }
 
 fn count_top_level_tasks(content: &str) -> (u32, u32, u32) {
@@ -319,26 +452,26 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "→ [Full index](.roko/prd/INDEX.md)\n");
 
     // Plans summary
-    let plans_root = plans_dir(workdir);
-    let mut plan_count = 0u32;
-    let mut task_count = 0u32;
-    let mut done_count = 0u32;
-    if plans_root.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&plans_root) {
-            for entry in entries.flatten() {
-                let tasks_path = entry.path().join("tasks.toml");
-                if tasks_path.exists() {
-                    plan_count += 1;
-                    let content = std::fs::read_to_string(&tasks_path).unwrap_or_default();
-                    task_count += content.matches("[[task]]").count() as u32;
-                    done_count += content.matches("status = \"done\"").count() as u32;
-                }
-            }
-        }
-    }
+    let plan_entries = collect_plan_index_entries(workdir);
+    let active_entries: Vec<&PlanIndexEntry> = plan_entries
+        .iter()
+        .filter(|entry| !entry.is_inactive())
+        .collect();
+    let plan_count = active_entries.len() as u32;
+    let task_count: u32 = active_entries.iter().map(|entry| entry.tasks).sum();
+    let done_count: u32 = active_entries.iter().map(|entry| entry.done).sum();
+    let complete_count = active_entries
+        .iter()
+        .filter(|entry| entry.is_complete())
+        .count();
+    let superseded_count = plan_entries
+        .iter()
+        .filter(|entry| entry.is_inactive())
+        .count();
+    let remaining_count = task_count.saturating_sub(done_count);
     let _ = writeln!(
         out,
-        "## Plans ({plan_count} plans, {task_count} tasks, {done_count} done)"
+        "## Plans ({plan_count} executable, {complete_count} complete, {remaining_count} tasks remaining, {superseded_count} superseded)"
     );
     let _ = writeln!(out, "→ [Full index](.roko/plans/INDEX.md)\n");
 
@@ -448,16 +581,24 @@ fn read_frontmatter(path: &Path) -> FrontmatterBrief {
     brief
 }
 
-fn extract_toml_value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(key) {
-            if let Some(val) = rest.trim().strip_prefix('=') {
-                return Some(val.trim());
-            }
-        }
+fn extract_meta_string(content: &str, key: &str) -> Option<String> {
+    extract_meta_value(content, key).map(|value| value.trim_matches('"').to_string())
+}
+
+fn extract_meta_value(content: &str, key: &str) -> Option<String> {
+    let parsed = toml::from_str::<toml::Value>(content).ok()?;
+    let value = parsed
+        .get("meta")
+        .and_then(toml::Value::as_table)?
+        .get(key)?;
+
+    match value {
+        toml::Value::String(s) => Some(s.clone()),
+        toml::Value::Integer(i) => Some(i.to_string()),
+        toml::Value::Float(f) => Some(f.to_string()),
+        toml::Value::Boolean(b) => Some(b.to_string()),
+        _ => Some(value.to_string()),
     }
-    None
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────
@@ -538,6 +679,39 @@ mod tests {
             content.contains("| `contract-plan` | 1 | 0 | 1 |"),
             "nested gate id/status changed plan counts: {content}"
         );
+    }
+
+    #[test]
+    fn plans_index_excludes_superseded_from_executable_totals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let active = plans_dir(tmp.path()).join("active-plan");
+        let old = plans_dir(tmp.path()).join("old-plan");
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            active.join("tasks.toml"),
+            "[meta]\nplan = \"active\"\nstatus = \"ready\"\nmax_parallel = 1\n\n\
+             [[task]]\nid = \"T1\"\nstatus = \"done\"\n\n\
+             [[task]]\nid = \"T2\"\nstatus = \"ready\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            old.join("tasks.toml"),
+            "[meta]\nplan = \"old\"\nstatus = \"superseded\"\n\
+             superseded_by = \"active-plan\"\nmax_parallel = 1\n\n\
+             [[task]]\nid = \"T1\"\nstatus = \"ready\"\n\n\
+             [[task]]\nid = \"T2\"\nstatus = \"ready\"\n",
+        )
+        .unwrap();
+
+        rebuild_plans_index(tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(plans_index_path(tmp.path())).unwrap();
+        assert!(content.contains("| `active-plan` | 2 | 1 | 1 |"));
+        assert!(content.contains("## Superseded / Archived"));
+        assert!(content.contains("| `old-plan` | 2 | ⏭ superseded | active-plan |"));
+        assert!(content.contains("**Executable Total**: 1 plans, 2 tasks, 1 done"));
+        assert!(content.contains("**Excluded**: 1 plans, 2 tasks"));
     }
 
     #[test]

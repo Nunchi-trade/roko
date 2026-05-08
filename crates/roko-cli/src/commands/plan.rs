@@ -55,6 +55,9 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                             "tasks_done": summary.tasks_done,
                             "tasks_failed": summary.tasks_failed,
                             "completed": summary.completed,
+                            "status": summary.status.as_str(),
+                            "status_label": summary.status_label(),
+                            "superseded_by": summary.superseded_by.as_deref(),
                             "has_run_state": has_run_state,
                         })
                     })
@@ -73,20 +76,12 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         "ID", "TITLE", "PROGRESS", "STATUS"
                     );
                     for summary in &summaries {
-                        let status =
-                            if summary.task_count > 0 && summary.tasks_done == summary.task_count {
-                                "done"
-                            } else if summary.tasks_done > 0 {
-                                "in-progress"
-                            } else {
-                                "pending"
-                            };
                         println!(
                             "{:<16} {:<40} {:<12} {}",
                             summary.id.as_str(),
                             summary.title.as_str(),
                             format!("{}/{}", summary.tasks_done, summary.task_count),
-                            status
+                            summary.status_label()
                         );
                     }
                     if !has_run_state {

@@ -216,50 +216,6 @@ is_embedding_model = false
 tier = "premium"
 use_max_completion_tokens = false
 
-[models.gemini-2-5-pro]
-provider = "gemini"
-slug = "gemini-2.5-pro"
-context_window = 1048576
-max_output = 65536
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-tier = "premium"
-use_max_completion_tokens = false
-
-[models.gemini-2-5-flash]
-provider = "gemini"
-slug = "gemini-2.5-flash"
-context_window = 1048576
-max_output = 65536
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-tier = "standard"
-use_max_completion_tokens = false
-
 [models.glm-5-1]
 provider = "zai"
 slug = "glm-5.1"
@@ -348,28 +304,6 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 tier = "fast"
-use_max_completion_tokens = false
-
-[models.claude-opus]
-provider = "anthropic"
-slug = "claude-opus-4-6"
-context_window = 200000
-max_output = 32768
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "anthropic_blocks"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-tier = "premium"
 use_max_completion_tokens = false
 
 [models.sonar]
@@ -508,28 +442,6 @@ is_embedding_model = false
 tier = "standard"
 use_max_completion_tokens = false
 
-[models.sonar-pro]
-provider = "perplexity"
-slug = "sonar-pro"
-context_window = 127000
-max_output = 16384
-supports_tools = false
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-tier = "fast"
-use_max_completion_tokens = false
-
 [models.gemma4]
 provider = "ollama"
 slug = "gemma4:26b-a4b-it-q8_0"
@@ -550,30 +462,6 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 tier = "fast"
-use_max_completion_tokens = false
-
-[models.glm51]
-provider = "zhipu"
-slug = "glm-5.1"
-context_window = 200000
-max_output = 16384
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-cost_input_per_m = 1.4
-cost_output_per_m = 4.4
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-tier = "standard"
 use_max_completion_tokens = false
 
 [models.gpt54-mini]
@@ -661,28 +549,6 @@ supports_grounding = false
 supports_code_execution = false
 supports_caching = false
 tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-tier = "standard"
-use_max_completion_tokens = false
-
-[models.claude-sonnet]
-provider = "anthropic"
-slug = "claude-sonnet-4-6"
-context_window = 200000
-max_output = 16384
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "anthropic_blocks"
 supports_search = false
 supports_citations = false
 supports_async = false
@@ -844,28 +710,6 @@ supports_citations = false
 supports_async = false
 is_embedding_model = false
 tier = "standard"
-use_max_completion_tokens = false
-
-[models.cerebras-70b]
-provider = "cerebras"
-slug = "gpt-oss-120b"
-context_window = 128000
-max_output = 32768
-supports_tools = true
-supports_thinking = false
-supports_vision = false
-supports_web_search = false
-supports_mcp_tools = false
-supports_partial = false
-supports_grounding = false
-supports_code_execution = false
-supports_caching = false
-tool_format = "openai_json"
-supports_search = false
-supports_citations = false
-supports_async = false
-is_embedding_model = false
-tier = "fast"
 use_max_completion_tokens = false
 
 [models.gpt51-codex]
@@ -1057,6 +901,7 @@ deny = []
 [tools.profiles]
 
 [chain]
+enabled = true
 rpc_url = "http://127.0.0.1:8545"
 chain_id = 31337
 wallet_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"

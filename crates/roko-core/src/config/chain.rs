@@ -3,8 +3,16 @@
 use serde::{Deserialize, Serialize};
 
 /// Chain connection settings used by the `chain.*` tool domain.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+///
+/// When the `[chain]` section is present in TOML but `enabled` is omitted,
+/// serde uses `default_true()` → chain is enabled. When no `[chain]` section
+/// exists at all, `ChainConfig::default()` sets `enabled: false`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChainConfig {
+    /// Whether the chain subsystem is active. Default: `false` (no `[chain]`
+    /// section = chain off). When `[chain]` is present, defaults to `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Chain profile name: "mirage" (local dev), "daeji" (testnet), or custom.
     /// Resolves into a ChainProfile at runtime via ChainProfile::from_roko_config().
     #[serde(default = "default_chain_profile")]
@@ -103,6 +111,30 @@ impl Default for FeedAgentsConfig {
     fn default() -> Self {
         Self { enabled: false }
     }
+}
+
+impl Default for ChainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            profile: default_chain_profile(),
+            rpc_url: None,
+            chain_id: None,
+            wallet_key: None,
+            identity_registry: None,
+            reputation_registry: None,
+            validation_registry: None,
+            agent_registry: None,
+            bounty_market: None,
+            deployer: None,
+            auto_deploy_contracts: false,
+            contracts_dir: None,
+        }
+    }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 fn default_chain_profile() -> String {
@@ -215,5 +247,20 @@ rate_bps = 500
     fn chain_config_profile_default() {
         let config: ChainConfig = toml::from_str("").unwrap();
         assert_eq!(config.profile, "mirage");
+        // When [chain] section IS present, enabled defaults to true.
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn chain_config_default_impl_disabled() {
+        // When no [chain] section exists, Default::default() has enabled=false.
+        let config = ChainConfig::default();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn chain_config_explicit_enabled_false() {
+        let config: ChainConfig = toml::from_str("enabled = false").unwrap();
+        assert!(!config.enabled);
     }
 }

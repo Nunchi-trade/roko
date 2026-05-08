@@ -102,7 +102,7 @@ impl JwksCache {
                 });
             }
             Err(err) => {
-                tracing::warn!(error = %err, "failed to prime JWKS cache; JWT auth will retry on first request");
+                tracing::info!(error = %err, "JWKS cache not available; JWT auth will retry on first request");
             }
         }
     }

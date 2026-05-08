@@ -40,9 +40,8 @@ RUN cargo build --release -p roko-cli --bin roko \
     && cp target/release/mirage-rs /tmp/mirage-rs \
     && cp target/release/agent-relay /tmp/agent-relay
 
-# ---- Runtime (NO toolchain) -----------------------------------------------
-# Only compiled binaries plus scripts and minimal runtime dependencies.
-# The Rust toolchain (rustc, cargo, rustup) is NOT copied into this stage.
+# ---- Runtime ---------------------------------------------------------------
+# Compiled binaries + Rust toolchain (for gate pipeline) + Claude CLI (for agent dispatch).
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
@@ -54,12 +53,24 @@ RUN apt-get update \
         git \
         gosu \
         libssl3 \
+        nodejs \
+        npm \
         tini \
-    && rm -rf /var/lib/apt/lists/*
+    && npm install -g @anthropic-ai/claude-code \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
 
 COPY --from=builder /tmp/roko /usr/local/bin/roko
 COPY --from=builder /tmp/mirage-rs /usr/local/bin/mirage-rs
 COPY --from=builder /tmp/agent-relay /usr/local/bin/agent-relay
+
+# Rust toolchain (needed for gate pipeline: cargo check/clippy/test)
+COPY --from=builder /usr/local/rustup /usr/local/rustup
+COPY --from=builder /usr/local/cargo /usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
 COPY docker/start-railway.sh /usr/local/bin/start-railway
 # Railway config is injected via ROKO_* env vars (see: roko config export --env railway).
 # A default roko.toml is generated at startup by start-railway if absent.

@@ -247,6 +247,7 @@ async fn chain_aware_resolver_resolves_both_domains() {
 fn chain_config_round_trips_through_toml() {
     let mut config = RokoConfig::default();
     config.chain = ChainConfig {
+        enabled: true,
         rpc_url: Some(MIRAGE_RPC.to_string()),
         chain_id: Some(CHAIN_ID),
         wallet_key: Some(DEPLOYER_KEY.to_string()),

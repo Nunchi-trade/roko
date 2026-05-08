@@ -1938,7 +1938,7 @@ impl CascadeRouter {
         let slug = if ctx.task_category == TaskCategory::Research {
             self.model_slugs
                 .iter()
-                .find(|s| s.as_str() == "sonar-pro" || s.as_str() == "sonar")
+                .find(|s| slug_family(s) == Some("sonar"))
                 .cloned()
                 .unwrap_or_else(|| {
                     self.role_table

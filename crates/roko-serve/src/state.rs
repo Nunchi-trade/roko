@@ -1032,10 +1032,15 @@ impl AppState {
     }
 
     /// Build chain client + wallet from the `[chain]` config section.
-    /// Returns `(None, None)` when `chain.rpc_url` is not set.
+    /// Returns `(None, None)` when chain is disabled or `chain.rpc_url` is not set.
     fn init_chain(
         config: &RokoConfig,
     ) -> (Option<Arc<AlloyChainClient>>, Option<Arc<AlloyChainWallet>>) {
+        if !config.chain.enabled {
+            tracing::info!("chain subsystem disabled via config");
+            return (None, None);
+        }
+
         let rpc_url = match config.chain.rpc_url.as_deref() {
             Some(url) if !url.is_empty() => url,
             _ => return (None, None),

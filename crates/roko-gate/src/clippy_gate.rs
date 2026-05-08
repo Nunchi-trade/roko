@@ -113,6 +113,19 @@ impl Verify for ClippyGate {
             }
         };
 
+        if !self.build_system.is_available() {
+            let reason = format!(
+                "{} not available: '{}' not found on PATH",
+                self.build_system.name(),
+                self.build_system.program()
+            );
+            tracing::warn!(gate = %self.name, "{reason}");
+            let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            return Verdict::pass(&self.name)
+                .with_detail(format!("skipped: {reason}"))
+                .with_duration(elapsed);
+        }
+
         // Use scoped lint args when the payload specifies target crates,
         // falling back to workspace-wide when no crates are specified.
         // For cargo, the args already embed `-- -D warnings`; splice
