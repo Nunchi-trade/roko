@@ -607,6 +607,8 @@ pub async fn run(
                 &resume_report.drifted_tasks,
             );
         }
+    } else {
+        seed_completed_tasks_from_plan_status(&mut state, &plans);
     }
 
     let mut agent_handles: HashMap<String, AgentHandle> = HashMap::new();
@@ -3427,6 +3429,24 @@ fn restore_state_from_resume_snapshot(
     state.tasks_completed = state.completed_tasks.values().map(Vec::len).sum::<usize>();
 }
 
+fn seed_completed_tasks_from_plan_status(state: &mut RunState, plans: &[Plan]) {
+    for plan in plans {
+        for task in &plan.tasks.tasks {
+            if task.status.eq_ignore_ascii_case("done") {
+                state.mark_task_completed(&plan.id, &task.id);
+            }
+        }
+    }
+
+    state.tasks_completed = state.completed_tasks.values().map(Vec::len).sum::<usize>();
+    if state.tasks_completed > 0 {
+        info!(
+            tasks_completed = state.tasks_completed,
+            "seeded completed tasks from plan status"
+        );
+    }
+}
+
 // ─── Resume ─────────────────────────────────────────────────────────────
 
 struct ResumeLoad {
@@ -6008,6 +6028,7 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task_parser::TasksFile;
 
     #[test]
     fn successful_plan_verify_finalizes_runner_plan() {
@@ -6035,6 +6056,55 @@ mod tests {
             executor.tick().is_empty(),
             "completed plan must not request review/doc agents or rerun tasks"
         );
+    }
+
+    #[test]
+    fn fresh_run_seeds_done_tasks_from_plan_status() {
+        let tasks = TasksFile::parse_str(
+            r#"
+[meta]
+plan = "seed-test"
+total = 3
+status = "ready"
+
+[[task]]
+id = "T1"
+title = "done dependency"
+status = "done"
+tier = "focused"
+role = "implementer"
+depends_on = []
+
+[[task]]
+id = "T2"
+title = "ready follow-up"
+status = "ready"
+tier = "focused"
+role = "implementer"
+depends_on = ["T1"]
+
+[[task]]
+id = "T3"
+title = "also done"
+status = "done"
+tier = "focused"
+role = "implementer"
+depends_on = []
+"#,
+        )
+        .unwrap();
+        let plan = Plan {
+            id: "seed-test".to_string(),
+            dir: std::path::PathBuf::from("plans/seed-test"),
+            tasks,
+            prd_excerpt: String::new(),
+        };
+        let mut state = RunState::new(3);
+
+        seed_completed_tasks_from_plan_status(&mut state, &[plan]);
+
+        assert_eq!(state.tasks_completed, 2);
+        assert_eq!(state.plan_completed_tasks("seed-test"), ["T1", "T3"]);
     }
 
     #[test]

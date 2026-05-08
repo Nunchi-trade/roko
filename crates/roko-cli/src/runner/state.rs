@@ -579,10 +579,13 @@ impl RunState {
 
     /// Mark a task as completed for DAG dependency tracking.
     pub fn mark_task_completed(&mut self, plan_id: &str, task_id: &str) {
-        self.completed_tasks
-            .entry(plan_id.to_string())
-            .or_default()
-            .push(task_id.to_string());
+        let completed = self.completed_tasks.entry(plan_id.to_string()).or_default();
+        if !completed
+            .iter()
+            .any(|completed_task| completed_task == task_id)
+        {
+            completed.push(task_id.to_string());
+        }
     }
 
     /// Get completed task IDs for a plan.

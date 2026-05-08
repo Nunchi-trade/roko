@@ -17,9 +17,10 @@ id = "T1"
 title = "Add TaskDef::build_fix_prompt method to task_parser.rs"
 status = "done"
 tier = "focused"
-model_hint = "claude-sonnet-4-5"
+model_hint = "claude-sonnet-4-6"
 max_loc = 35
 files = ["crates/roko-cli/src/task_parser.rs"]
+role = "implementer"
 depends_on = []
 
 [task.context]
@@ -117,9 +118,10 @@ id = "T2"
 title = "Extract run_verify_steps helper in orchestrate.rs (mechanical refactor)"
 status = "done"
 tier = "focused"
-model_hint = "claude-sonnet-4-5"
+model_hint = "claude-sonnet-4-6"
 max_loc = 50
 files = ["crates/roko-cli/src/orchestrate.rs"]
+role = "implementer"
 depends_on = ["T1"]
 
 [task.context]
@@ -197,9 +199,10 @@ id = "T3"
 title = "Wire MAX_AUTOFIX_ATTEMPTS retry loop and run_fix_agent helper into dispatch_agent"
 status = "done"
 tier = "integrative"
-model_hint = "claude-sonnet-4-5"
+model_hint = "claude-sonnet-4-6"
 max_loc = 80
 files = ["crates/roko-cli/src/orchestrate.rs"]
+role = "implementer"
 depends_on = ["T2"]
 
 [task.context]
@@ -269,6 +272,7 @@ tier = "focused"
 model_hint = "claude-haiku-4-5"
 max_loc = 40
 files = ["crates/roko-cli/src/task_parser.rs"]
+role = "implementer"
 depends_on = ["T1"]
 
 [task.context]
@@ -324,9 +328,10 @@ id = "T5"
 title = "Add smoke tests for run_verify_steps pass/fail paths in orchestrate.rs"
 status = "ready"
 tier = "focused"
-model_hint = "claude-sonnet-4-5"
+model_hint = "claude-sonnet-4-6"
 max_loc = 45
 files = ["crates/roko-cli/src/orchestrate.rs"]
+role = "implementer"
 depends_on = ["T3"]
 
 [task.context]
