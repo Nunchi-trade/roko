@@ -23351,4 +23351,36 @@ command = "cargo check -p roko-cli"
         assert_eq!(merged.tasks[2].depends_on, vec!["N2"]);
         assert!(merged.tasks.iter().all(|task| task.id != "N1"));
     }
+
+    #[tokio::test]
+    async fn run_verify_steps_pass() {
+        let tmp = TempDir::new().expect("tempdir");
+        let runner = runner_for_repo(tmp.path(), false).await;
+        let steps = vec![crate::task_parser::VerifyStep {
+            phase: "structural".to_string(),
+            command: "true".to_string(),
+            fail_msg: None,
+            timeout_ms: 5_000,
+        }];
+        let result = runner.run_verify_steps("t1", &steps, tmp.path()).await;
+        assert!(result.is_ok(), "expected Ok(()), got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn run_verify_steps_fail() {
+        let tmp = TempDir::new().expect("tempdir");
+        let runner = runner_for_repo(tmp.path(), false).await;
+        let steps = vec![crate::task_parser::VerifyStep {
+            phase: "compile".to_string(),
+            command: "false".to_string(),
+            fail_msg: Some("forced failure".to_string()),
+            timeout_ms: 5_000,
+        }];
+        let result = runner.run_verify_steps("t1", &steps, tmp.path()).await;
+        assert!(result.is_err(), "expected Err, got Ok");
+        let (task_id, phase, cmd, _stderr) = result.unwrap_err();
+        assert_eq!(task_id, "t1");
+        assert_eq!(phase, "compile");
+        assert_eq!(cmd, "false");
+    }
 }
