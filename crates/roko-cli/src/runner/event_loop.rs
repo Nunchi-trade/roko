@@ -1283,10 +1283,47 @@ pub async fn run(
                     }
                 }
 
-                if completion.passed {
+                if completion.passed && completion.task_id.is_empty() {
+                    // The post-implementation gate is plan-level: it proves the
+                    // current aggregate worktree, not an individual task. Do not
+                    // count it as another completed task.
+                    state.clear_retry_backoff(&completion.plan_id);
+                    match executor.apply_event(&completion.plan_id, &ExecutorEvent::GatePassed) {
+                        Ok(phase) => {
+                            info!(
+                                plan_id = %completion.plan_id,
+                                phase = ?phase,
+                                "plan gate passed — running plan verify"
+                            );
+                        }
+                        Err(err) => {
+                            error!(
+                                plan_id = %completion.plan_id,
+                                error = %err,
+                                "plan gate transition failed"
+                            );
+                            let _ = executor.apply_event(
+                                &completion.plan_id,
+                                &ExecutorEvent::Fatal(format!("plan gate transition failed: {err}")),
+                            );
+                        }
+                    }
+
+                    // Queue dream consolidation only when this run actually
+                    // spawned agents. Verification-only runs do not create new
+                    // agent episodes, and blocking after run.completed on old
+                    // episodes makes no-op reruns look stuck.
+                    if state.total_agent_calls > 0 {
+                        dream_completion_pending = true;
+                        debug!("dream consolidation queued after plan gate completion");
+                    } else {
+                        debug!("dream consolidation skipped after verification-only plan gate");
+                    }
+                } else if completion.passed {
                     // Mark this task completed in the DAG and check for more.
                     state.clear_retry_backoff(&completion.plan_id);
-                    state.mark_task_completed(&completion.plan_id, &completion.task_id);
+                    let newly_completed =
+                        state.mark_task_completed(&completion.plan_id, &completion.task_id);
                     let task_declared_files = task_index
                         .get(completion.plan_id.as_str())
                         .and_then(|tasks| tasks.get(completion.task_id.as_str()))
@@ -1309,7 +1346,9 @@ pub async fn run(
                         &completion.task_id,
                         output_files,
                     );
-                    state.task_completed();
+                    if newly_completed {
+                        state.task_completed();
+                    }
                     // Record task completion in the run ledger.
                     if let Some(ref mut ledger) = run_ledger {
                         let now_ms = std::time::SystemTime::now()
@@ -1954,6 +1993,16 @@ fn apply_agent_completion(executor: &mut ParallelExecutor, plan_id: &str, tui: &
         Err(e) => {
             warn!(plan_id = %plan_id, err = %e, "transition error after agent completion");
         }
+    }
+}
+
+fn no_ready_spawn_event(phase_kind: PhaseKind, requested_task: &str) -> Option<ExecutorEvent> {
+    match phase_kind {
+        PhaseKind::Implementing => Some(ExecutorEvent::ImplementationDone),
+        PhaseKind::Complete | PhaseKind::Done | PhaseKind::Failed | PhaseKind::Skipped => None,
+        _ => Some(ExecutorEvent::Fatal(format!(
+            "agent spawn requested for {requested_task:?} while plan is in {phase_kind:?}, but no runnable task was available"
+        ))),
     }
 }
 
@@ -3868,11 +3917,49 @@ async fn dispatch_action(
             let task_id = match resolved_task {
                 Some(id) => id,
                 None => {
-                    // No more ready tasks — all done for this plan.
-                    info!(plan_id = %plan_id, "no more ready tasks — implementation complete");
-                    let _ = ctx
+                    let Some(phase_kind) = ctx
                         .executor
-                        .apply_event(plan_id, &ExecutorEvent::ImplementationDone);
+                        .plan_state(plan_id)
+                        .map(|state| state.current_phase.kind())
+                    else {
+                        warn!(plan_id = %plan_id, requested_task = %task, "no ready task for unknown plan");
+                        return ActionDispatchOutcome::Noop;
+                    };
+
+                    let Some(event) = no_ready_spawn_event(phase_kind, &task) else {
+                        debug!(
+                            plan_id = %plan_id,
+                            requested_task = %task,
+                            phase = ?phase_kind,
+                            "no ready task for terminal plan"
+                        );
+                        return ActionDispatchOutcome::Noop;
+                    };
+
+                    if matches!(event, ExecutorEvent::ImplementationDone) {
+                        info!(plan_id = %plan_id, "no more ready tasks — implementation complete");
+                    } else {
+                        warn!(
+                            plan_id = %plan_id,
+                            requested_task = %task,
+                            phase = ?phase_kind,
+                            "agent spawn requested with no runnable task"
+                        );
+                    }
+
+                    if let Err(e) = ctx.executor.apply_event(plan_id, &event) {
+                        error!(
+                            plan_id = %plan_id,
+                            requested_task = %task,
+                            phase = ?phase_kind,
+                            err = %e,
+                            "failed to transition after no-ready spawn request"
+                        );
+                        ctx.state.force_plan_terminal(plan_id);
+                    }
+                    if let ExecutorEvent::Fatal(reason) = event {
+                        ctx.tui.error(&reason);
+                    }
                     return ActionDispatchOutcome::Noop;
                 }
             };
@@ -6105,6 +6192,26 @@ depends_on = []
 
         assert_eq!(state.tasks_completed, 2);
         assert_eq!(state.plan_completed_tasks("seed-test"), ["T1", "T3"]);
+    }
+
+    #[test]
+    fn no_ready_spawn_only_completes_implementing_phase() {
+        assert_eq!(
+            no_ready_spawn_event(PhaseKind::Implementing, "next"),
+            Some(ExecutorEvent::ImplementationDone)
+        );
+
+        assert!(matches!(
+            no_ready_spawn_event(PhaseKind::RegeneratingVerify, "regen-verify"),
+            Some(ExecutorEvent::Fatal(reason))
+                if reason.contains("no runnable task was available")
+        ));
+        assert!(matches!(
+            no_ready_spawn_event(PhaseKind::AutoFixing, "fix"),
+            Some(ExecutorEvent::Fatal(reason))
+                if reason.contains("no runnable task was available")
+        ));
+        assert_eq!(no_ready_spawn_event(PhaseKind::Complete, "next"), None);
     }
 
     #[test]

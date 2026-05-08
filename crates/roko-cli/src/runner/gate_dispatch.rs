@@ -519,4 +519,21 @@ mod tests {
 
         assert_eq!(verdicts.first().map(|verdict| verdict.passed), Some(false));
     }
+
+    #[tokio::test]
+    async fn verify_steps_pass() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let signal = gate_signal("plan", "task", 2, tempdir.path(), &[]);
+        let ctx = roko_core::Context::now();
+        let step = VerifyStep {
+            phase: "structural".to_string(),
+            command: "true".to_string(),
+            fail_msg: None,
+            timeout_ms: 10_000,
+        };
+
+        let verdicts = run_verify_steps(&signal, &ctx, "T01", vec![step]).await;
+
+        assert_eq!(verdicts.first().map(|verdict| verdict.passed), Some(true));
+    }
 }

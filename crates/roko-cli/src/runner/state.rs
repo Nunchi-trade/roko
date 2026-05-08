@@ -578,13 +578,21 @@ impl RunState {
     }
 
     /// Mark a task as completed for DAG dependency tracking.
-    pub fn mark_task_completed(&mut self, plan_id: &str, task_id: &str) {
+    ///
+    /// Returns true only when this call newly recorded a concrete task.
+    pub fn mark_task_completed(&mut self, plan_id: &str, task_id: &str) -> bool {
+        if task_id.is_empty() {
+            return false;
+        }
         let completed = self.completed_tasks.entry(plan_id.to_string()).or_default();
         if !completed
             .iter()
             .any(|completed_task| completed_task == task_id)
         {
             completed.push(task_id.to_string());
+            true
+        } else {
+            false
         }
     }
 
@@ -661,5 +669,22 @@ impl RunState {
     /// Take (and remove) stored replan context for a task.
     pub fn take_replan_context(&mut self, plan_id: &str, task_id: &str) -> Option<String> {
         self.replan_contexts.remove(&format!("{plan_id}/{task_id}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunState;
+
+    #[test]
+    fn mark_task_completed_ignores_empty_and_duplicates() {
+        let mut state = RunState::new(2);
+
+        assert!(!state.mark_task_completed("plan", ""));
+        assert!(state.plan_completed_tasks("plan").is_empty());
+
+        assert!(state.mark_task_completed("plan", "T1"));
+        assert!(!state.mark_task_completed("plan", "T1"));
+        assert_eq!(state.plan_completed_tasks("plan"), ["T1"]);
     }
 }
