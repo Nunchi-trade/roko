@@ -6703,6 +6703,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "roko-tempo"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-trie",
+ "anyhow",
+ "async-trait",
+ "clap",
+ "hex",
+ "parking_lot",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "roko-tests"
 version = "0.1.0"
 dependencies = [

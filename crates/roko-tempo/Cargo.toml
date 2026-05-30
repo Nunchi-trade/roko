@@ -1,0 +1,49 @@
+[package]
+name = "roko-tempo"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Light-client trait + real Tempo testnet (Moderato) RPC backend for Roko agents that consume external chain state with cryptographic verification."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Deterministic in-memory backend used by tests, examples, and offline demos.
+# Off by default so the published crate ships only the real Tempo backend.
+mock = []
+# Phase 2 (not yet wired): commonware-p2p subscription to a Tempo follower
+# socket with full BLS aggregate-signature verification. Lands when Tempo
+# opens its consensus surface.
+commonware-backend = []
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+# Real Tempo backend: alloy provider + EIP-1186 state proofs + MPT verifier.
+# Mirrors `crates/roko-chain`'s alloy-backend feature so the workspace pins
+# stay coherent.
+alloy = { version = "1", features = ["full"] }
+alloy-primitives = { workspace = true }
+alloy-rlp = "0.3"
+alloy-trie = "0.9"
+reqwest = { workspace = true }
+hex = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util"] }
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[[example]]
+name = "tempo_tail"
+path = "examples/tempo_tail.rs"

@@ -23,6 +23,9 @@ members = [
     "crates/roko-orchestrator",
     # Chain client + wallet trait abstractions (reads + signed writes)
     "crates/roko-chain",
+    # Light-client trait + Tempo-shaped backend for agents-as-light-clients
+    # (Workstream A from Nunchi-trade/collaboration PR #144). Phase 0 = mock-only.
+    "crates/roko-tempo",
     # End-to-end integration tests
     "tests",
 
